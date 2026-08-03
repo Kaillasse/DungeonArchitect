@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "DungeonArchitect",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/core/main.py",
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "console": "integratedTerminal"
+    }
+  ]
+}

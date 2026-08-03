@@ -1,0 +1,26 @@
+Dungeon Architect :
+a topdown customization based rogue like.
+
+Principales inspiration : Dungeon Keeper, Mighty quest for epic loot, Isaac, Enter The Gungeon, Wizard of Legend, Moonlighter
+
+Objectif : parcourir, explorer des donjons ce qui permet de débloquer au joueur a force de découverte de débloquer : 
+- de nouvelles tuiles,
+- monstres, mob passif ou PNJ
+- pièges, 
+- et toute sorte d'entités interactive
+
+Entre chaques run le joueur reviendra a son monde d'origines qui est entierement customisable.
+Chaques mondes est diviser en etages eux meme divisé en salles, salles qui respectent une grille avec des cellules de 16x16 pixel ou chaques cellules peut etre remplie par des tuiles.
+L'objectif est d'avoir un environnement en 2D top down entierement destructible, customisable.
+
+Fonctionnalités ATM :
+-éditeur de salle 20% : fait : grille logique, autotile (fonction qui placent les murs automatiquement et logiquement les murs en fonction du sol placé)
+30 tuiles basiques relié a l'autotile et classé par type mur ou sol, chacunes avec un code qui permet a l'autotile de savoir par le calcul des tuiles voisines,
+de savoir quel tuiles placer, gomme (fonction qui supprimes les sol et mur placé)
+
+Priorités AF:
+-Ameliorer/simplifier/stabiliser la logique du game_manager qui permettra de gerer/changer de game state entre les menus, les editeurs et le jeu top down
+-finir l'editeur : pouvoir sauvegarder des salles, stabiliser les outils actuel (placer et detruire) et ajouter les autres outils (activer/desactiver l'autotile)
+placer des tuiles interactives (coffres, portes pour commencer), placer les premieres entités (joueur et mob pour commencer)
+-Implementer d'autres game states : le top down avec controle du joueur et les menus.
+
