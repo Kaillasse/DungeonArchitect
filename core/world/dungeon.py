@@ -43,6 +43,7 @@ class Dungeon:
         else:
             self.logical_grid[grid_y][grid_x] = FLOOR
         self.rebuild()
+        self.object_manager.prune_invalid()
 
     # ------------------------------------------------------------------
     # Sauvegarde
@@ -109,5 +110,9 @@ class Dungeon:
     # Rendu
     # ------------------------------------------------------------------
 
-    def render(self, screen, camera, spawn_preview=None):
-        self.renderer.render(screen, self, camera, spawn_preview=spawn_preview)
+    def render(self, screen, camera, spawn_preview=None, hide_object_types=None):
+        self.renderer.render(
+            screen, self, camera,
+            spawn_preview=spawn_preview,
+            hide_object_types=hide_object_types,
+        )

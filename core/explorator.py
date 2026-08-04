@@ -183,6 +183,7 @@ class Explorator:
         self.dungeon.render(
             self.screen,
             self.camera,
+            hide_object_types={"spawn"},
         )
 
         self.player.draw(

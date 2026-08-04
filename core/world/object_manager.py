@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pygame
 
-from core.editor.autotile import FLOOR
+from core.editor.autotile import FLOOR, WALL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -83,7 +83,7 @@ class ObjectManager:
         if not (0 <= grid_y < self.dungeon.height):
             return False
 
-        if self.dungeon.logical_grid[grid_y][grid_x] != FLOOR:
+        if self.dungeon.logical_grid[grid_y][grid_x] != self._required_cell(object_type):
             return False
 
         self.objects.append({
@@ -93,3 +93,13 @@ class ObjectManager:
         })
 
         return True
+
+    def prune_invalid(self):
+        """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased)."""
+        self.objects = [
+            obj for obj in self.objects
+            if self.dungeon.logical_grid[obj["y"]][obj["x"]] == self._required_cell(obj["type"])
+        ]
+
+    def _required_cell(self, object_type):
+        return FLOOR if OBJECT_TYPES[object_type]["placement"] == "floor" else WALL

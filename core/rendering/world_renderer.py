@@ -27,7 +27,8 @@ class WorldRenderer:
             self._tile_cache[cache_key] = pygame.transform.scale(tile_surface, (tile_px, tile_px))
         return self._tile_cache[cache_key]
 
-    def render(self, screen, dungeon, camera, spawn_preview=None):
+    def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None):
+        hide_object_types = hide_object_types or ()
         zoom = camera.zoom
         tile_size = dungeon.tile_size
         tile_px = tile_size * zoom
@@ -46,6 +47,9 @@ class WorldRenderer:
                 screen.blit(scaled, (screen_x, screen_y))
 
         for obj in dungeon.object_manager.objects:
+            if obj["type"] in hide_object_types:
+                continue
+
             sprite = self._get_object_sprite(obj["type"])
 
             size_cells_x, size_cells_y = OBJECT_TYPES[obj["type"]]["size"]
