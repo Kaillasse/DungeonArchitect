@@ -36,6 +36,12 @@ OBJECT_TYPES = {
         "placement": "wall",
         "size": (1, 1),
         "frames": 8,
+        # Wall-mounted variants: chosen at placement time from which side
+        # of the wall the room's floor is on (see ObjectManager._torch_variant).
+        "variants": {
+            "L": "tiles/Torch Yellow L.png",
+            "R": "tiles/Torch Yellow R.png",
+        },
     },
     "vase": {
         "asset": "tiles/Vase.png",
@@ -54,10 +60,11 @@ OBJECT_LIST = [
 ]
 
 
-def load_object_frames(object_type):
+def load_object_frames(object_type, variant=None):
     """Slice an object's sprite sheet into its animation frames."""
     config = OBJECT_TYPES[object_type]
-    asset = PROJECT_ROOT / "assets" / config["asset"]
+    asset_path = config.get("variants", {}).get(variant, config["asset"])
+    asset = PROJECT_ROOT / "assets" / asset_path
     sheet = pygame.image.load(asset).convert_alpha()
 
     frame_size = 24 if object_type == "spawn" else 16
@@ -86,13 +93,28 @@ class ObjectManager:
         if self.dungeon.logical_grid[grid_y][grid_x] != self._required_cell(object_type):
             return False
 
-        self.objects.append({
+        placed = {
             "type": object_type,
             "x": grid_x,
             "y": grid_y,
-        })
+        }
+
+        if "variants" in OBJECT_TYPES[object_type]:
+            variant = self._wall_variant(grid_x, grid_y)
+            if variant is not None:
+                placed["variant"] = variant
+
+        self.objects.append(placed)
 
         return True
+
+    def _wall_variant(self, grid_x, grid_y):
+        """L/R variant for an object mounted on a wall, from which side its room's floor is on."""
+        if grid_x > 0 and self.dungeon.logical_grid[grid_y][grid_x - 1] == FLOOR:
+            return "R"
+        if grid_x + 1 < self.dungeon.width and self.dungeon.logical_grid[grid_y][grid_x + 1] == FLOOR:
+            return "L"
+        return None
 
     def prune_invalid(self):
         """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased)."""

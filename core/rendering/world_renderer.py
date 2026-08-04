@@ -15,10 +15,11 @@ class WorldRenderer:
         self._tile_cache = {}
         self._object_sprites = {}
 
-    def _get_object_sprite(self, object_type):
-        if object_type not in self._object_sprites:
-            self._object_sprites[object_type] = load_object_frames(object_type)[0]
-        return self._object_sprites[object_type]
+    def _get_object_sprite(self, object_type, variant=None):
+        cache_key = (object_type, variant)
+        if cache_key not in self._object_sprites:
+            self._object_sprites[cache_key] = load_object_frames(object_type, variant)[0]
+        return self._object_sprites[cache_key]
 
     def _get_scaled_tile(self, tile_index, zoom, tile_px, columns):
         cache_key = (tile_index, zoom)
@@ -50,7 +51,7 @@ class WorldRenderer:
             if obj["type"] in hide_object_types:
                 continue
 
-            sprite = self._get_object_sprite(obj["type"])
+            sprite = self._get_object_sprite(obj["type"], obj.get("variant"))
 
             size_cells_x, size_cells_y = OBJECT_TYPES[obj["type"]]["size"]
             size = (
