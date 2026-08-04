@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pygame
 import random
-from core.grid import DungeonGrid
-from core.ressources import ROOMS_DIRECTORY
-from core.entities import Player
-from core.gamestate import GameState
-from core.camera import Camera
+from core.world.dungeon import Dungeon
+from core.data.ressources import ROOMS_DIRECTORY
+from core.world.entities import Player
+from core.engine.gamestate import GameState
+from core.engine.camera import Camera
 from pathlib import Path
 
 class Explorator:
@@ -24,7 +24,7 @@ class Explorator:
         # Monde
         # -----------------------------
 
-        self.editor = DungeonGrid(width=22, height=18)
+        self.dungeon = Dungeon(width=22, height=18)
 
         self.grid_offset_x = 0
         self.grid_offset_y = 0
@@ -39,14 +39,14 @@ class Explorator:
         if not self.load_spawn_room():
             print("Aucune salle avec un spawn n'a été trouvée.")
 
-        spawn = self.editor.get_spawn_world_position()
+        spawn = self.dungeon.get_spawn_world_position()
         print("spawn =", spawn)
 
         if spawn is None:
             print("Spawn invalide.")
             spawn = (
-                self.editor.tile_size,
-                self.editor.tile_size,
+                self.dungeon.tile_size,
+                self.dungeon.tile_size,
             )
 
         self.player.position.update(*spawn)
@@ -70,9 +70,9 @@ class Explorator:
 
         for room in rooms:
 
-            self.editor.load_from_json(room.stem)
+            self.dungeon.load_from_json(room.stem)
 
-            if self.editor.get_spawn_world_position() is not None:
+            if self.dungeon.get_spawn_world_position() is not None:
 
                 print(f"Spawn trouvé dans : {room.stem}")
                 return True
@@ -111,14 +111,14 @@ class Explorator:
 
             future_hitbox = self.player.get_hitbox()
             future_hitbox.x += movement.x
-            print("X ->", self.editor.is_rect_walkable(future_hitbox))
-            if self.editor.is_rect_walkable(future_hitbox):
+            print("X ->", self.dungeon.is_rect_walkable(future_hitbox))
+            if self.dungeon.is_rect_walkable(future_hitbox):
                 self.player.position.x += movement.x
 
             future_hitbox = self.player.get_hitbox()
             future_hitbox.y += movement.y
-            print("Y ->", self.editor.is_rect_walkable(future_hitbox))
-            if self.editor.is_rect_walkable(future_hitbox):
+            print("Y ->", self.dungeon.is_rect_walkable(future_hitbox))
+            if self.dungeon.is_rect_walkable(future_hitbox):
                 self.player.position.y += movement.y
 
             # -----------------------------
@@ -180,10 +180,9 @@ class Explorator:
 
         self.screen.fill((20, 20, 20))
 
-        self.editor.render(
+        self.dungeon.render(
             self.screen,
-            camera=self.camera,
-            zoom=self.camera.zoom,
+            self.camera,
         )
 
         self.player.draw(
