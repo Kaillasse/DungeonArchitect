@@ -71,6 +71,13 @@ class Dungeon:
             int(world_y // self.tile_size),
         )
 
+    def object_indicator_position(self, obj):
+        """World position of an object's link indicator (top-right corner of its cell)."""
+        return (
+            (obj["x"] + 1) * self.tile_size,
+            obj["y"] * self.tile_size,
+        )
+
     # ------------------------------------------------------------------
     # Requêtes monde
     # ------------------------------------------------------------------
@@ -110,9 +117,10 @@ class Dungeon:
     # Rendu
     # ------------------------------------------------------------------
 
-    def render(self, screen, camera, spawn_preview=None, hide_object_types=None):
+    def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False):
         self.renderer.render(
             screen, self, camera,
             spawn_preview=spawn_preview,
             hide_object_types=hide_object_types,
+            show_link_indicators=show_link_indicators,
         )

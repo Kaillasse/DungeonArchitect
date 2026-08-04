@@ -9,6 +9,8 @@ class WorldRenderer:
 
     GRID_LINE_COLOR = (80, 80, 80)
     SPAWN_PREVIEW_COLOR = (0, 255, 0)
+    LINK_INDICATOR_COLOR = (60, 220, 90)
+    LINK_INDICATOR_RADIUS = 5
 
     def __init__(self):
         self.tileset = load_tileset()
@@ -28,7 +30,7 @@ class WorldRenderer:
             self._tile_cache[cache_key] = pygame.transform.scale(tile_surface, (tile_px, tile_px))
         return self._tile_cache[cache_key]
 
-    def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None):
+    def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False):
         hide_object_types = hide_object_types or ()
         zoom = camera.zoom
         tile_size = dungeon.tile_size
@@ -95,3 +97,19 @@ class WorldRenderer:
                 int(tile_size * zoom / 4),
                 2,
             )
+
+        if show_link_indicators:
+            self._draw_link_indicators(screen, dungeon, camera)
+
+    def _draw_link_indicators(self, screen, dungeon, camera):
+        for obj in dungeon.object_manager.objects:
+            if not dungeon.object_manager.is_linkable(obj["type"]):
+                continue
+
+            sx, sy = camera.world_to_screen(*dungeon.object_indicator_position(obj))
+
+            for link_target in obj.get("links", []):
+                lsx, lsy = camera.world_to_screen(*dungeon.object_indicator_position(link_target))
+                pygame.draw.line(screen, self.LINK_INDICATOR_COLOR, (sx, sy), (lsx, lsy), 2)
+
+            pygame.draw.circle(screen, self.LINK_INDICATOR_COLOR, (int(sx), int(sy)), self.LINK_INDICATOR_RADIUS)

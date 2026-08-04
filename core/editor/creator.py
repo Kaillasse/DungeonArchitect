@@ -14,6 +14,9 @@ from core.editor.tools import ObjectTool
 
 class Creator:
 
+    INDICATOR_HIT_RADIUS = 10
+    LINK_LINE_COLOR = (60, 220, 90)
+
     def __init__(self, game_manager):
 
         self.game_manager = game_manager
@@ -32,6 +35,12 @@ class Creator:
 
         self.painting = False
         self.erasing = False
+
+        self.link_source = None
+        self.link_drag_pos = None
+
+        self.moving_object = None
+        self.move_drag_pos = None
 
         self.camera = Camera(zoom=1.0)
         self.grid_zoom = self.camera.zoom
@@ -66,6 +75,20 @@ class Creator:
             0 <= grid_y < self.dungeon.height
         )
 
+    def _find_indicator_at(self, mouse_pos):
+        mx, my = mouse_pos
+
+        for obj in self.dungeon.object_manager.objects:
+            if not self.dungeon.object_manager.is_linkable(obj["type"]):
+                continue
+
+            sx, sy = self.camera.world_to_screen(*self.dungeon.object_indicator_position(obj))
+
+            if (sx - mx) ** 2 + (sy - my) ** 2 <= self.INDICATOR_HIT_RADIUS ** 2:
+                return obj
+
+        return None
+
     def _paint_at_mouse(self, mouse_pos, erase=False):
 
         grid_x, grid_y = self._mouse_to_grid(mouse_pos)
@@ -78,22 +101,13 @@ class Creator:
 
     def _try_place_object(self):
 
-        print("SCREEN POSITION",
-            self.object_tool.position
-        )
-
         world = self.camera.screen_to_world(
             *self.object_tool.position
         )
 
-        print("WORLD POSITION", world)
-
         grid_x, grid_y = self.dungeon.world_to_grid(
             *world
         )
-
-        print("GRID POSITION", grid_x, grid_y)
-
 
         return self.dungeon.object_manager.add_object(
             self.object_tool.object_type,
@@ -154,7 +168,24 @@ class Creator:
                         if self.palette.handle_click(event.pos):
                             continue
 
+                        indicator_obj = self._find_indicator_at(event.pos)
+
+                        if indicator_obj is not None:
+
+                            self.link_source = indicator_obj
+                            self.link_drag_pos = event.pos
+                            continue
+
                         if self._is_valid_grid_cell(event.pos):
+
+                            grid_x, grid_y = self._mouse_to_grid(event.pos)
+                            existing_obj = self.dungeon.object_manager.get_object_at(grid_x, grid_y)
+
+                            if existing_obj is not None:
+
+                                self.moving_object = existing_obj
+                                self.move_drag_pos = event.pos
+                                continue
 
                             self.painting = True
                             self._paint_at_mouse(event.pos,erase=False)
@@ -174,21 +205,29 @@ class Creator:
 
                     if event.button == 1:
 
-                        print(
-                            "DROP EVENT",
-                            self.object_tool.dragging,
-                            self.object_tool.object_type
-                        )
-
                         self.painting = False
 
-                        if self.object_tool.dragging:
+                        if self.link_source is not None:
 
-                            print("AVANT TRY")
+                            target_obj = self._find_indicator_at(event.pos)
 
-                            result = self._try_place_object()
+                            if target_obj is not None and target_obj is not self.link_source:
+                                self.dungeon.object_manager.link(self.link_source, target_obj)
 
-                            print("RESULTAT", result)
+                            self.link_source = None
+                            self.link_drag_pos = None
+
+                        elif self.moving_object is not None:
+
+                            grid_x, grid_y = self._mouse_to_grid(event.pos)
+                            self.dungeon.object_manager.move_object(self.moving_object, grid_x, grid_y)
+
+                            self.moving_object = None
+                            self.move_drag_pos = None
+
+                        elif self.object_tool.dragging:
+
+                            self._try_place_object()
 
                             self.object_tool.dragging = False
 
@@ -198,7 +237,15 @@ class Creator:
 
                 elif event.type == pygame.MOUSEMOTION:
 
-                    if self.painting and self._is_valid_grid_cell(event.pos):
+                    if self.link_source is not None:
+
+                        self.link_drag_pos = event.pos
+
+                    elif self.moving_object is not None:
+
+                        self.move_drag_pos = event.pos
+
+                    elif self.painting and self._is_valid_grid_cell(event.pos):
 
                         self._paint_at_mouse(event.pos, erase=False)
 
@@ -285,7 +332,27 @@ class Creator:
                 self.screen,
                 self.camera,
                 spawn_preview=self.spawn_preview,
+                show_link_indicators=True,
             )
+
+            if self.link_source is not None and self.link_drag_pos is not None:
+
+                source_screen = self.camera.world_to_screen(
+                    *self.dungeon.object_indicator_position(self.link_source)
+                )
+                pygame.draw.line(self.screen, self.LINK_LINE_COLOR, source_screen, self.link_drag_pos, 2)
+
+            if self.moving_object is not None and self.move_drag_pos is not None:
+
+                sprite = self.object_palette.get_current_frame(
+                    self.moving_object["type"]
+                )
+
+                rect = sprite.get_rect(
+                    center=self.move_drag_pos
+                )
+
+                self.screen.blit(sprite, rect)
 
             self.palette.render(self.screen)
             if self.object_tool.dragging:

@@ -18,18 +18,21 @@ OBJECT_TYPES = {
         "placement": "floor",
         "size": (1, 1),
         "frames": 3,
+        "linkable": True,
     },
     "gate": {
         "asset": "tiles/gateopenclose.png",
         "placement": "floor",
         "size": (1, 1),
         "frames": 8,
+        "linkable": True,
     },
     "wall": {
         "asset": "tiles/wallopenclose.png",
         "placement": "floor",
         "size": (2, 1),
         "frames": 7,
+        "linkable": True,
     },
     "torch": {
         "asset": "tiles/Torch Yellow.png",
@@ -108,6 +111,59 @@ class ObjectManager:
 
         return True
 
+    def get_object_at(self, grid_x, grid_y):
+        for obj in self.objects:
+            if obj["x"] == grid_x and obj["y"] == grid_y:
+                return obj
+        return None
+
+    def is_linkable(self, object_type):
+        return OBJECT_TYPES[object_type].get("linkable", False)
+
+    def link(self, obj_a, obj_b):
+        """Symmetric link between two linkable objects (e.g. a button and the gate/wall it opens)."""
+        if obj_a is obj_b:
+            return
+
+        a_target = {"x": obj_b["x"], "y": obj_b["y"]}
+        b_target = {"x": obj_a["x"], "y": obj_a["y"]}
+
+        a_links = obj_a.setdefault("links", [])
+        if a_target not in a_links:
+            a_links.append(a_target)
+
+        b_links = obj_b.setdefault("links", [])
+        if b_target not in b_links:
+            b_links.append(b_target)
+
+    def move_object(self, obj, grid_x, grid_y):
+        """Reposition an already-placed object. Returns True if the new cell was valid."""
+        if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
+            return False
+
+        if self.dungeon.logical_grid[grid_y][grid_x] != self._required_cell(obj["type"]):
+            return False
+
+        old_x, old_y = obj["x"], obj["y"]
+        obj["x"], obj["y"] = grid_x, grid_y
+
+        if "variants" in OBJECT_TYPES[obj["type"]]:
+            variant = self._wall_variant(grid_x, grid_y)
+            if variant is not None:
+                obj["variant"] = variant
+            else:
+                obj.pop("variant", None)
+
+        self._retarget_links(old_x, old_y, grid_x, grid_y)
+
+        return True
+
+    def _retarget_links(self, old_x, old_y, new_x, new_y):
+        for obj in self.objects:
+            for link_target in obj.get("links", []):
+                if link_target["x"] == old_x and link_target["y"] == old_y:
+                    link_target["x"], link_target["y"] = new_x, new_y
+
     def _wall_variant(self, grid_x, grid_y):
         """L/R variant for an object mounted on a wall, from which side its room's floor is on."""
         if grid_x > 0 and self.dungeon.logical_grid[grid_y][grid_x - 1] == FLOOR:
@@ -117,11 +173,22 @@ class ObjectManager:
         return None
 
     def prune_invalid(self):
-        """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased)."""
+        """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased), and any links left dangling by that."""
         self.objects = [
             obj for obj in self.objects
             if self.dungeon.logical_grid[obj["y"]][obj["x"]] == self._required_cell(obj["type"])
         ]
+
+        existing = {(obj["x"], obj["y"]) for obj in self.objects}
+        for obj in self.objects:
+            if "links" not in obj:
+                continue
+            obj["links"] = [
+                link_target for link_target in obj["links"]
+                if (link_target["x"], link_target["y"]) in existing
+            ]
+            if not obj["links"]:
+                del obj["links"]
 
     def _required_cell(self, object_type):
         return FLOOR if OBJECT_TYPES[object_type]["placement"] == "floor" else WALL
