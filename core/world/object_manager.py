@@ -39,15 +39,18 @@ OBJECT_TYPES = {
     },
     "torch": {
         "asset": "tiles/Torch Yellow.png",
+        # "wall" here is just the fallback/default variant's placement (a
+        # torch mounted flat on a plain wall cell, e.g. a back wall). The
+        # L/R variants use custom placement logic instead (see
+        # ObjectManager._resolve_placement/_torch_variant): they go on a
+        # FLOOR cell that has a WALL immediately beside it (right -> R,
+        # left -> L), since they're meant to sit at a side wall the player
+        # walks past, not block a whole cell -- that's also why only L/R
+        # are walkable/drawn in front of the player
+        # (ObjectManager.is_foreground_object), not the plain variant.
         "placement": "wall",
         "size": (1, 1),
         "frames": 8,
-        # Wall-mounted variants: chosen at placement time from which side
-        # of the wall the room's floor is on (see ObjectManager._wall_variant).
-        # Only the L/R variants are walkable/drawn in front of the player
-        # (ObjectManager.is_foreground_object) -- a straight torch sits on a
-        # plain back wall, and walking through it would mean walking through
-        # that wall.
         "variants": {
             "L": "tiles/Torch Yellow L.png",
             "R": "tiles/Torch Yellow R.png",
@@ -97,13 +100,11 @@ class ObjectManager:
         self.objects = []
 
     def add_object(self, object_type, grid_x, grid_y):
-        if not (0 <= grid_x < self.dungeon.width):
+        if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
             return False
 
-        if not (0 <= grid_y < self.dungeon.height):
-            return False
-
-        if self.dungeon.logical_grid[grid_y][grid_x] != self._required_cell(object_type):
+        valid, variant = self._resolve_placement(object_type, grid_x, grid_y)
+        if not valid:
             return False
 
         placed = {
@@ -112,10 +113,8 @@ class ObjectManager:
             "y": grid_y,
         }
 
-        if "variants" in OBJECT_TYPES[object_type]:
-            variant = self._wall_variant(grid_x, grid_y)
-            if variant is not None:
-                placed["variant"] = variant
+        if variant is not None:
+            placed["variant"] = variant
 
         self.objects.append(placed)
 
@@ -151,7 +150,7 @@ class ObjectManager:
             if config.get("blocks_until_open"):
                 return obj.get("open", False)
 
-            if config.get("walkable") or self.is_foreground_object(obj):
+            if config.get("walkable"):
                 return True
 
         return self.dungeon.logical_grid[grid_y][grid_x] != WALL
@@ -217,18 +216,17 @@ class ObjectManager:
         if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
             return False
 
-        if self.dungeon.logical_grid[grid_y][grid_x] != self._required_cell(obj["type"]):
+        valid, variant = self._resolve_placement(obj["type"], grid_x, grid_y)
+        if not valid:
             return False
 
         old_x, old_y = obj["x"], obj["y"]
         obj["x"], obj["y"] = grid_x, grid_y
 
-        if "variants" in OBJECT_TYPES[obj["type"]]:
-            variant = self._wall_variant(grid_x, grid_y)
-            if variant is not None:
-                obj["variant"] = variant
-            else:
-                obj.pop("variant", None)
+        if variant is not None:
+            obj["variant"] = variant
+        else:
+            obj.pop("variant", None)
 
         self._retarget_links(old_x, old_y, grid_x, grid_y)
 
@@ -240,11 +238,26 @@ class ObjectManager:
                 if link_target["x"] == old_x and link_target["y"] == old_y:
                     link_target["x"], link_target["y"] = new_x, new_y
 
-    def _wall_variant(self, grid_x, grid_y):
-        """L/R variant for an object mounted on a wall, from which side its room's floor is on."""
-        if grid_x > 0 and self.dungeon.logical_grid[grid_y][grid_x - 1] == FLOOR:
+    def _resolve_placement(self, object_type, grid_x, grid_y):
+        """Returns (is_valid, variant) for placing/moving object_type at this cell."""
+        if object_type == "torch":
+            variant = self._torch_variant(grid_x, grid_y)
+            if variant is not None:
+                return True, variant
+            if self.dungeon.logical_grid[grid_y][grid_x] == WALL:
+                return True, None
+            return False, None
+
+        is_valid = self.dungeon.logical_grid[grid_y][grid_x] == self._required_cell(object_type)
+        return is_valid, None
+
+    def _torch_variant(self, grid_x, grid_y):
+        """L/R variant for a torch on a floor cell with an adjacent wall: wall to the right -> R, wall to the left -> L. None if this isn't a valid floor-beside-a-wall spot."""
+        if self.dungeon.logical_grid[grid_y][grid_x] != FLOOR:
+            return None
+        if grid_x + 1 < self.dungeon.width and self.dungeon.logical_grid[grid_y][grid_x + 1] == WALL:
             return "R"
-        if grid_x + 1 < self.dungeon.width and self.dungeon.logical_grid[grid_y][grid_x + 1] == FLOOR:
+        if grid_x > 0 and self.dungeon.logical_grid[grid_y][grid_x - 1] == WALL:
             return "L"
         return None
 
@@ -252,7 +265,7 @@ class ObjectManager:
         """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased), and any links left dangling by that."""
         self.objects = [
             obj for obj in self.objects
-            if self.dungeon.logical_grid[obj["y"]][obj["x"]] == self._required_cell(obj["type"])
+            if self._resolve_placement(obj["type"], obj["x"], obj["y"])[0]
         ]
 
         existing = {(obj["x"], obj["y"]) for obj in self.objects}

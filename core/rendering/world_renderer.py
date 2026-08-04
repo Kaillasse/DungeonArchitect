@@ -113,13 +113,17 @@ class WorldRenderer:
             )
             scaled_sprite = pygame.transform.scale(sprite, size)
 
-            wx, wy = dungeon.grid_to_world(obj["x"], obj["y"])
-            sx, sy = camera.world_to_screen(wx, wy)
+            # Anchored to the footprint's left/bottom edge (not the origin cell's
+            # center) so a multi-cell object like "wall" fills exactly the cells
+            # it occupies instead of straddling half a tile into its neighbors.
+            left_world_x = obj["x"] * tile_size
+            bottom_world_y = (obj["y"] + size_cells_y) * tile_size
+            sx, sy = camera.world_to_screen(left_world_x, bottom_world_y)
 
             screen.blit(
                 scaled_sprite,
                 (
-                    sx - scaled_sprite.get_width() / 2,
+                    sx,
                     sy - scaled_sprite.get_height(),
                 ),
             )
