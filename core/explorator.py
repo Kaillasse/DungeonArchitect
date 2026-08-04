@@ -110,9 +110,9 @@ class Explorator:
         if located is not None:
             self.current_placed_room = located
 
-        portal = self.assembly.find_portal(self.current_placed_room, grid_x, grid_y)
-        if portal is not None:
-            target_room = self.assembly.room_at(portal["target_floor"], grid_x, grid_y)
+        target_floor = self.assembly.find_portal(self.current_placed_room, grid_x, grid_y)
+        if target_floor is not None:
+            target_room = self.assembly.room_at(target_floor, grid_x, grid_y)
             if target_room is not None:
                 self.current_placed_room = target_room
 

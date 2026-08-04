@@ -23,17 +23,12 @@ ENTRY_EXIT_TYPES = ("gate", "wall")
 class PlacedRoom:
     """A Dungeon placed at a given floor and global grid offset within a DungeonAssembly."""
 
-    def __init__(self, dungeon, room_name, floor, offset_x, offset_y, portals=None):
+    def __init__(self, dungeon, room_name, floor, offset_x, offset_y):
         self.dungeon = dungeon
         self.room_name = room_name
         self.floor = floor
         self.offset_x = offset_x
         self.offset_y = offset_y
-        # Each portal is {"x", "y", "target_floor"}: a global cell (always one
-        # this room legitimately owns as FLOOR) that also belongs to another
-        # room on a different floor -- stepping onto it while it's walkable
-        # is what actually changes the player's current floor.
-        self.portals = portals if portals is not None else []
 
     def to_global(self, local_x, local_y):
         return self.offset_x + local_x, self.offset_y + local_y
@@ -100,7 +95,7 @@ class DungeonAssembly:
         could let the player "phase" through a wall that's solid on their
         own floor just because an unrelated room on another floor happens to
         have FLOOR at that same global cell. Crossing floors is handled
-        separately, via `find_portal` -- see generate_assembly's portals.
+        separately, via `find_portal` -- see generate_assembly's portal_level.
 
         Prefers staying in `prefer_room` if it still claims the cell (checked
         first), then falls back to any other room on `floor`. Checks FLOOR
@@ -124,22 +119,29 @@ class DungeonAssembly:
 
         return None
 
-    @staticmethod
-    def find_portal(room, global_x, global_y):
-        """The portal on `room` at (global_x, global_y), or None.
+    def find_portal(self, room, global_x, global_y):
+        """The target floor to cross to if the object at (global_x, global_y)
+        within `room` is a portal (an entry-exit with a "portal_level"), else
+        None.
 
-        Stepping onto a portal cell means crossing to the room on its
-        target_floor at the same global cell -- only reachable at all once
-        the current floor's own collision already allowed walking there
-        (e.g. a gate opened by a button), so no extra "is it open" check is
-        needed here.
+        portal_level is the half-integer midpoint between the two floors a
+        staircase connects (e.g. 0.5 between floors 0 and 1, 1.5 between 1
+        and 2 -- see generate_assembly) and is stored directly on the object,
+        the same value on both sides of the connection since it's the same
+        physical staircase either way; the actual target floor depends on
+        which side (which `room.floor`) you're asking from:
+        target = 2 * portal_level - room.floor.
+
+        Only reachable at all once the current floor's own collision already
+        allowed walking there (e.g. a gate opened by a button), so no extra
+        "is it open" check is needed here.
         """
         if room is None:
             return None
-        for portal in room.portals:
-            if portal["x"] == global_x and portal["y"] == global_y:
-                return portal
-        return None
+        obj = room.dungeon.object_manager.get_object_at(global_x - room.offset_x, global_y - room.offset_y)
+        if obj is None or "portal_level" not in obj:
+            return None
+        return round(2 * obj["portal_level"] - room.floor)
 
     def is_global_cell_walkable(self, global_x, global_y, floor, prefer_room=None):
         room = self.locate_room(global_x, global_y, floor, prefer_room=prefer_room)
@@ -410,10 +412,15 @@ def generate_assembly(room_names, room_count, rng=None):
             obj for obj in candidate_dungeon.object_manager.objects
             if obj["type"] in ENTRY_EXIT_TYPES
         ]
-        if not candidate_exits:
+        # Only align onto an exit of the SAME type as the anchor's (a gate
+        # merges with a gate, a wall with a wall) -- otherwise the two halves
+        # of one physical doorway would be different objects with unrelated
+        # sprites/animations.
+        matching_exits = [obj for obj in candidate_exits if obj["type"] == anchor_exit["type"]]
+        if not matching_exits:
             continue
 
-        candidate_exit = rng.choice(candidate_exits)
+        candidate_exit = rng.choice(matching_exits)
 
         anchor_gx, anchor_gy = anchor_room.to_global(anchor_exit["x"], anchor_exit["y"])
         offset_x = anchor_gx - candidate_exit["x"]
@@ -432,13 +439,16 @@ def generate_assembly(room_names, room_count, rng=None):
                 candidate_room.floor = floor
 
         if floor != anchor_room.floor:
-            # Genuine cross-floor connection: record a portal on both sides so
+            # Genuine cross-floor connection: tag both halves of the doorway
+            # with the same portal_level (the half-integer midpoint between
+            # the two floors, e.g. 0.5 between 0 and 1) so
             # DungeonAssembly.find_portal can flip the player's current floor
-            # when they step onto this shared cell (see locate_room's docstring
-            # for why floor-crossing can't just fall out of FLOOR-ownership
-            # checks the way same-floor room-crossing does).
-            anchor_room.portals.append({"x": anchor_gx, "y": anchor_gy, "target_floor": floor})
-            candidate_room.portals.append({"x": anchor_gx, "y": anchor_gy, "target_floor": anchor_room.floor})
+            # when they step onto this shared cell (see locate_room's
+            # docstring for why floor-crossing can't just fall out of
+            # FLOOR-ownership checks the way same-floor room-crossing does).
+            portal_level = (anchor_room.floor + floor) / 2
+            anchor_exit["portal_level"] = portal_level
+            candidate_exit["portal_level"] = portal_level
 
         # Any button in the anchor's room that links to the anchor's exit should
         # also open the candidate's now-merged copy of that same door -- but a
@@ -486,7 +496,6 @@ def save_assembly(assembly, name):
                 "floor": room.floor,
                 "offset_x": room.offset_x,
                 "offset_y": room.offset_y,
-                "portals": room.portals,
                 **room.dungeon.save.to_json(room.dungeon),
             }
             for room in assembly.rooms
@@ -522,7 +531,6 @@ def load_assembly(name):
             room_payload["floor"],
             room_payload["offset_x"],
             room_payload["offset_y"],
-            portals=room_payload.get("portals", []),
         )
         assembly.add_room(placed)
 
