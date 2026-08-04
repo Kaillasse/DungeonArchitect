@@ -1,11 +1,10 @@
-from pathlib import Path
 
-from core.grid import DungeonGrid
-from core.ressources import ROOMS_DIRECTORY
+from core.world.dungeon import Dungeon
+from core.data.ressources import ROOMS_DIRECTORY
 
 class RoomManager:
 
-    def __init__(self, grid: DungeonGrid):
+    def __init__(self, grid: Dungeon):
         self.rooms = grid
         self.grid = grid
         self.current_room = None

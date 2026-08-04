@@ -26,7 +26,7 @@ _CARDINAL_OFFSETS = (
 # Chargement du JSON
 # --------------------------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 JSON_PATH = PROJECT_ROOT / "assets" / "tiles" / "tile_categories.json"
 
 with JSON_PATH.open(encoding="utf8") as f:

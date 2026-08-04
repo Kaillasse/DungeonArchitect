@@ -1,7 +1,6 @@
-from pathlib import Path
-from core.ressources import FLOOR
+
 import pygame
-from core.object import OBJECT_TYPES, OBJECT_LIST
+from core.world.object_manager import OBJECT_LIST
 
 class ObjectTool:
 
