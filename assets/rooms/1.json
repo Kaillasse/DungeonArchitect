@@ -31,14 +31,14 @@
       "y": 6,
       "links": [
         {
-          "x": 9,
+          "x": 8,
           "y": 8
         }
       ]
     },
     {
       "type": "button",
-      "x": 9,
+      "x": 8,
       "y": 8,
       "links": [
         {
@@ -51,6 +51,33 @@
       "type": "spawn",
       "x": 8,
       "y": 10
+    },
+    {
+      "type": "wall",
+      "x": 6,
+      "y": 7
+    },
+    {
+      "type": "vase",
+      "x": 13,
+      "y": 11
+    },
+    {
+      "type": "torch",
+      "x": 12,
+      "y": 3
+    },
+    {
+      "type": "torch",
+      "x": 14,
+      "y": 6,
+      "variant": "R"
+    },
+    {
+      "type": "torch",
+      "x": 5,
+      "y": 11,
+      "variant": "L"
     }
   ],
   "cells": [
