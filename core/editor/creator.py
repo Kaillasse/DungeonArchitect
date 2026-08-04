@@ -9,7 +9,7 @@ from core.engine.gamestate import GameState
 from core.engine.room_manager import RoomManager
 from core.engine.camera import Camera
 from core.data.ressources import FLOOR
-from core.editor.ui import ObjectPalette
+from core.editor.ui import ObjectPalette, RoomPanelUI
 from core.editor.tools import ObjectTool
 
 class Creator:
@@ -27,6 +27,7 @@ class Creator:
         self.current_room = "room_001"
         self.dungeon.load_from_json(self.current_room)
         self.palette = ToolPaletteUI()
+        self.room_panel = RoomPanelUI(self.room_manager)
 
         self.object_type = "spawn" # Type d'objet par défaut
         self.object_palette = ObjectPalette()
@@ -74,6 +75,25 @@ class Creator:
             and
             0 <= grid_y < self.dungeon.height
         )
+
+    def open_room(self, name):
+        self.current_room = name
+        self.dungeon.load_from_json(name)
+
+    def _apply_room_action(self, action):
+        mode, name = action
+
+        if mode == "save":
+            self.room_manager.save(name)
+            self.current_room = name
+
+        elif mode == "load":
+            self.open_room(name)
+
+        elif mode == "delete":
+            self.room_manager.delete(name)
+            if self.current_room == name:
+                self.current_room = None
 
     def _find_indicator_at(self, mouse_pos):
         mx, my = mouse_pos
@@ -153,6 +173,20 @@ class Creator:
 
                         continue
 
+                if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP):
+
+                    panel_click = (
+                        event.type == pygame.MOUSEBUTTONDOWN
+                        and self.room_panel.contains(event.pos)
+                    )
+
+                    room_action = self.room_panel.handle_event(event)
+
+                    if room_action is not None:
+                        self._apply_room_action(room_action)
+
+                    if panel_click:
+                        continue
 
                 if event.type == pygame.QUIT:
 
@@ -268,18 +302,6 @@ class Creator:
                         self.game_manager.state = GameState.MENU
                         running = False
 
-                    elif event.key == pygame.K_F1:
-                        self.room_manager.save_room()
-
-                    elif event.key == pygame.K_F2:
-                        self.room_manager.delete_room()
-
-                    elif event.key == pygame.K_F3:
-                        self.room_manager.load_room()
-
-                    elif event.key == pygame.K_F4:
-                        self.room_manager.list_rooms()
-
             # -------------------------------------------------
             # Render
             # -------------------------------------------------
@@ -367,8 +389,10 @@ class Creator:
 
                 self.screen.blit(sprite, rect)
             self.object_palette.render(self.screen)
+            self.room_panel.render(self.screen)
 
             pygame.display.flip()
 
 
-        self.dungeon.save_to_json(self.room_manager.current_room)
+        if self.current_room is not None:
+            self.dungeon.save_to_json(self.current_room)
