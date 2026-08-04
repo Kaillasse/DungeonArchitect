@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import pygame
-import random
 from core.world.dungeon import Dungeon
+from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
-from pathlib import Path
 
 class Explorator:
 
@@ -25,6 +24,8 @@ class Explorator:
         # -----------------------------
 
         self.dungeon = Dungeon(width=22, height=18)
+        self.assembly = None
+        self.current_placed_room = None
 
         self.grid_offset_x = 0
         self.grid_offset_y = 0
@@ -51,8 +52,30 @@ class Explorator:
 
     def open_room(self, name):
         """Load a specific room (chosen from the menu) and spawn the player in it."""
+        self.assembly = None
+        self.current_placed_room = None
         self.dungeon.load_from_json(name)
         self._position_player_at_spawn()
+
+    def open_donjon(self, name):
+        """Load a saved procedurally-assembled dungeon and spawn the player in its starting room."""
+        self.assembly = load_assembly(name)
+
+        start_room = next(
+            (room for room in self.assembly.rooms if room.has_spawn()),
+            self.assembly.rooms[0],
+        )
+        self.current_placed_room = start_room
+
+        spawn_local = start_room.dungeon.get_spawn_world_position()
+        if spawn_local is None:
+            spawn_local = (start_room.dungeon.tile_size, start_room.dungeon.tile_size)
+
+        tile_size = start_room.dungeon.tile_size
+        self.player.position.update(
+            start_room.offset_x * tile_size + spawn_local[0],
+            start_room.offset_y * tile_size + spawn_local[1],
+        )
 
     def _position_player_at_spawn(self):
         spawn = self.dungeon.get_spawn_world_position()
@@ -65,6 +88,11 @@ class Explorator:
             )
 
         self.player.position.update(*spawn)
+
+    def _is_walkable(self, rect):
+        if self.assembly is not None:
+            return self.assembly.is_rect_walkable(rect, prefer_room=self.current_placed_room)
+        return self.dungeon.is_rect_walkable(rect)
 
     def load_spawn_room(self):
 
@@ -117,15 +145,23 @@ class Explorator:
 
             future_hitbox = self.player.get_hitbox()
             future_hitbox.x += movement.x
-            print("X ->", self.dungeon.is_rect_walkable(future_hitbox))
-            if self.dungeon.is_rect_walkable(future_hitbox):
+            if self._is_walkable(future_hitbox):
                 self.player.position.x += movement.x
 
             future_hitbox = self.player.get_hitbox()
             future_hitbox.y += movement.y
-            print("Y ->", self.dungeon.is_rect_walkable(future_hitbox))
-            if self.dungeon.is_rect_walkable(future_hitbox):
+            if self._is_walkable(future_hitbox):
                 self.player.position.y += movement.y
+
+            if self.assembly is not None:
+                hitbox = self.player.get_hitbox()
+                located = self.assembly.locate_room(
+                    int(hitbox.centerx // Dungeon.TILE_SIZE),
+                    int((hitbox.bottom - 1) // Dungeon.TILE_SIZE),
+                    prefer_room=self.current_placed_room,
+                )
+                if located is not None:
+                    self.current_placed_room = located
 
             # -----------------------------
             # Choix direction animation
@@ -173,14 +209,22 @@ class Explorator:
         # Boutons / portes
         # -----------------------------
 
-        self.dungeon.update(dt)
-
         hitbox = self.player.get_hitbox()
-        player_grid_x, player_grid_y = self.dungeon.world_to_grid(
-            hitbox.centerx,
-            hitbox.bottom - 1,
-        )
-        self.dungeon.object_manager.check_button_trigger(player_grid_x, player_grid_y)
+
+        if self.assembly is not None:
+            self.assembly.update(dt)
+            player_grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
+            player_grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
+            self.assembly.check_button_trigger(
+                player_grid_x, player_grid_y, prefer_room=self.current_placed_room
+            )
+        else:
+            self.dungeon.update(dt)
+            player_grid_x, player_grid_y = self.dungeon.world_to_grid(
+                hitbox.centerx,
+                hitbox.bottom - 1,
+            )
+            self.dungeon.object_manager.check_button_trigger(player_grid_x, player_grid_y)
 
         # -----------------------------
         # Camera suit le joueur
@@ -199,23 +243,54 @@ class Explorator:
 
         self.screen.fill((20, 20, 20))
 
-        self.dungeon.render(
-            self.screen,
-            self.camera,
-            hide_object_types={"spawn"},
-            skip_foreground_objects=True,
-        )
+        if self.assembly is not None:
 
-        self.player.draw(
-            self.screen,
-            self.camera,
-        )
+            hitbox = self.player.get_hitbox()
+            player_global_pos = (
+                int(hitbox.centerx // Dungeon.TILE_SIZE),
+                int((hitbox.bottom - 1) // Dungeon.TILE_SIZE),
+            )
 
-        self.dungeon.render_foreground(
-            self.screen,
-            self.camera,
-            hide_object_types={"spawn"},
-        )
+            self.assembly.render(
+                self.screen,
+                self.camera,
+                active_floor=self.current_placed_room.floor,
+                player_global_pos=player_global_pos,
+                hide_object_types={"spawn"},
+                skip_active_floor_foreground=True,
+            )
+
+            self.player.draw(
+                self.screen,
+                self.camera,
+            )
+
+            self.assembly.render_active_floor_foreground(
+                self.screen,
+                self.camera,
+                self.current_placed_room.floor,
+                hide_object_types={"spawn"},
+            )
+
+        else:
+
+            self.dungeon.render(
+                self.screen,
+                self.camera,
+                hide_object_types={"spawn"},
+                skip_foreground_objects=True,
+            )
+
+            self.player.draw(
+                self.screen,
+                self.camera,
+            )
+
+            self.dungeon.render_foreground(
+                self.screen,
+                self.camera,
+                hide_object_types={"spawn"},
+            )
 
         pygame.display.flip()
 
