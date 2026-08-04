@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import pygame
 
+from core.data.ressources import WORLD_SCALE
+
 class SpriteAnimation:
     def __init__(self, image, frame_w, frame_h, animations):
         self.frames = []
@@ -161,20 +163,20 @@ class Player:
 
     def draw(self, screen, camera):
         direction, flip = self.get_sprite_direction()
-        print(self.frame)
         base_sprite = self.sprites[self.animation][direction][self.frame]
         if flip:
             base_sprite = pygame.transform.flip(base_sprite, True, False)
 
-        zoom_key = max(1, int(round(camera.zoom * 100)))
+        render_scale = camera.zoom * WORLD_SCALE
+        zoom_key = max(1, int(round(render_scale * 100)))
         cache_key = (self.animation, direction, flip,self.frame, zoom_key)
         if cache_key not in self._render_cache:
-            scaled = pygame.transform.scale_by(base_sprite, camera.zoom)
+            scaled = pygame.transform.scale_by(base_sprite, render_scale)
             self._render_cache[cache_key] = scaled
         sprite = self._render_cache[cache_key]
 
-        sprite_left_world = self.position.x - base_sprite.get_width() / 2
-        sprite_top_world = self.position.y - base_sprite.get_height()
+        sprite_left_world = self.position.x - base_sprite.get_width() * WORLD_SCALE / 2
+        sprite_top_world = self.position.y - base_sprite.get_height() * WORLD_SCALE
         sprite_screen_x, sprite_screen_y = camera.world_to_screen(sprite_left_world, sprite_top_world)
 
         screen.blit(sprite, (int(sprite_screen_x), int(sprite_screen_y)))

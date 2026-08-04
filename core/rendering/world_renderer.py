@@ -1,7 +1,7 @@
 import pygame
 
 from core.data.ressources import TILE_SIZE, load_tileset, get_tile_surface
-from core.world.object_manager import load_object_frames
+from core.world.object_manager import OBJECT_TYPES, load_object_frames
 
 
 class WorldRenderer:
@@ -48,7 +48,11 @@ class WorldRenderer:
         for obj in dungeon.object_manager.objects:
             sprite = self._get_object_sprite(obj["type"])
 
-            size = (int(sprite.get_width() * zoom), int(sprite.get_height() * zoom))
+            size_cells_x, size_cells_y = OBJECT_TYPES[obj["type"]]["size"]
+            size = (
+                int(size_cells_x * tile_size * zoom),
+                int(size_cells_y * tile_size * zoom),
+            )
             scaled_sprite = pygame.transform.scale(sprite, size)
 
             wx, wy = dungeon.grid_to_world(obj["x"], obj["y"])
