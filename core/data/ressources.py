@@ -11,6 +11,7 @@ import pygame
 from core.editor.autotile import FLOOR
 
 TILE_SIZE = 16
+WORLD_SCALE = 2  # world grid cells render source art at 2x (16px art -> 32px cells)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TILESET_PATH = PROJECT_ROOT / "assets" / "tiles" / "tileset.png"
 DEFAULT_TILE_METADATA_PATH = PROJECT_ROOT / "assets" / "tiles" / "tile_categories.json"

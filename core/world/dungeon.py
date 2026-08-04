@@ -1,6 +1,7 @@
 from core.world.object_manager import ObjectManager
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
+from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
 from core.editor.autotile import EMPTY, FLOOR, WALL, build_walls, erase_at, resolve_sprite_grid
 
 
@@ -12,7 +13,7 @@ __all__ = ["DEFAULT_GRID_SAVE_PATH", "Dungeon"]
 class Dungeon:
     """Owns the world data (grid, size) and orchestrates its components. Draws nothing, saves nothing, and doesn't manage objects itself."""
 
-    TILE_SIZE = 32
+    TILE_SIZE = SOURCE_TILE_SIZE * WORLD_SCALE
 
     def __init__(self, width: int = 20, height: int = 20) -> None:
         self.width = width
