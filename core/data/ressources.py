@@ -21,6 +21,20 @@ ROOMS_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_ROOM_NAME = "room_001"
 
+
+def list_rooms():
+    """Names (no .json) of every saved room, sorted."""
+    return [path.stem for path in sorted(ROOMS_DIRECTORY.glob("*.json"))]
+
+
+def next_new_room_name():
+    """First unused "room_NNN" name, following the DEFAULT_ROOM_NAME convention."""
+    existing = set(list_rooms())
+    index = 1
+    while f"room_{index:03d}" in existing:
+        index += 1
+    return f"room_{index:03d}"
+
 class TileMetadata(TypedDict):
     category: str
 
