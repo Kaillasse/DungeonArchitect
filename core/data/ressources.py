@@ -19,6 +19,9 @@ DEFAULT_TILE_METADATA_PATH = PROJECT_ROOT / "assets" / "tiles" / "tile_categorie
 ROOMS_DIRECTORY = PROJECT_ROOT / "assets" / "rooms"
 ROOMS_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
+DONJONS_DIRECTORY = PROJECT_ROOT / "assets" / "donjons"
+DONJONS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+
 DEFAULT_ROOM_NAME = "room_001"
 
 
@@ -34,6 +37,20 @@ def next_new_room_name():
     while f"room_{index:03d}" in existing:
         index += 1
     return f"room_{index:03d}"
+
+
+def list_donjons():
+    """Names (no .json) of every saved procedurally-assembled dungeon, sorted."""
+    return [path.stem for path in sorted(DONJONS_DIRECTORY.glob("*.json"))]
+
+
+def next_new_donjon_name():
+    """First unused "donjon_NNN" name."""
+    existing = set(list_donjons())
+    index = 1
+    while f"donjon_{index:03d}" in existing:
+        index += 1
+    return f"donjon_{index:03d}"
 
 class TileMetadata(TypedDict):
     category: str

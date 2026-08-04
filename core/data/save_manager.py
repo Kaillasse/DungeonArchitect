@@ -37,6 +37,10 @@ class SaveManager:
         except (OSError, ValueError, json.JSONDecodeError):
             return
 
+        self.apply_json(dungeon, payload)
+
+    def apply_json(self, dungeon, payload: dict) -> None:
+        """Apply an already-parsed room payload to a Dungeon -- shared by load() and the assembly loader, which reads each room's payload out of one combined donjon file instead of its own."""
         dungeon.width = int(payload.get("width", dungeon.width))
         dungeon.height = int(payload.get("height", dungeon.height))
         dungeon.object_manager.objects = payload.get("objects", [])
