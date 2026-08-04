@@ -30,7 +30,8 @@ class WorldRenderer:
             self._tile_cache[cache_key] = pygame.transform.scale(tile_surface, (tile_px, tile_px))
         return self._tile_cache[cache_key]
 
-    def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False, skip_foreground_objects=False):
+    def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False, skip_foreground_objects=False, hide_cells=None):
+        hide_cells = hide_cells or ()
         zoom = camera.zoom
         tile_size = dungeon.tile_size
         tile_px = tile_size * zoom
@@ -38,6 +39,9 @@ class WorldRenderer:
 
         for y, row in enumerate(dungeon.sprite_grid):
             for x, tile_index in enumerate(row):
+                if (x, y) in hide_cells:
+                    continue
+
                 if tile_index < 0:
                     continue
 
@@ -52,6 +56,7 @@ class WorldRenderer:
             screen, dungeon, camera,
             hide_object_types=hide_object_types,
             skip_foreground=skip_foreground_objects,
+            hide_cells=hide_cells,
         )
 
         for gy in range(dungeon.height + 1):
@@ -82,17 +87,21 @@ class WorldRenderer:
         if show_link_indicators:
             self._draw_link_indicators(screen, dungeon, camera)
 
-    def render_foreground_objects(self, screen, dungeon, camera, hide_object_types=None):
+    def render_foreground_objects(self, screen, dungeon, camera, hide_object_types=None, hide_cells=None):
         """Objects ObjectManager.is_foreground_object() flags (e.g. an L/R torch) -- call this after drawing the player sprite."""
-        self._draw_objects(screen, dungeon, camera, hide_object_types=hide_object_types, foreground_only=True)
+        self._draw_objects(screen, dungeon, camera, hide_object_types=hide_object_types, foreground_only=True, hide_cells=hide_cells)
 
-    def _draw_objects(self, screen, dungeon, camera, hide_object_types=None, foreground_only=False, skip_foreground=False):
+    def _draw_objects(self, screen, dungeon, camera, hide_object_types=None, foreground_only=False, skip_foreground=False, hide_cells=None):
         hide_object_types = hide_object_types or ()
+        hide_cells = hide_cells or ()
         zoom = camera.zoom
         tile_size = dungeon.tile_size
 
         for obj in dungeon.object_manager.objects:
             if obj["type"] in hide_object_types:
+                continue
+
+            if (obj["x"], obj["y"]) in hide_cells:
                 continue
 
             is_foreground = dungeon.object_manager.is_foreground_object(obj)
