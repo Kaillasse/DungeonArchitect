@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import random
 
+import pygame
+
 from core.world.dungeon import Dungeon
 from core.world.object_manager import OBJECT_TYPES
 from core.editor.autotile import EMPTY, FLOOR, WALL
@@ -21,12 +23,17 @@ ENTRY_EXIT_TYPES = ("gate", "wall")
 class PlacedRoom:
     """A Dungeon placed at a given floor and global grid offset within a DungeonAssembly."""
 
-    def __init__(self, dungeon, room_name, floor, offset_x, offset_y):
+    def __init__(self, dungeon, room_name, floor, offset_x, offset_y, portals=None):
         self.dungeon = dungeon
         self.room_name = room_name
         self.floor = floor
         self.offset_x = offset_x
         self.offset_y = offset_y
+        # Each portal is {"x", "y", "target_floor"}: a global cell (always one
+        # this room legitimately owns as FLOOR) that also belongs to another
+        # room on a different floor -- stepping onto it while it's walkable
+        # is what actually changes the player's current floor.
+        self.portals = portals if portals is not None else []
 
     def to_global(self, local_x, local_y):
         return self.offset_x + local_x, self.offset_y + local_y
@@ -84,23 +91,24 @@ class DungeonAssembly:
     # Live exploration -- crossing between rooms/floors as the player moves
     # ------------------------------------------------------------------
 
-    def locate_room(self, global_x, global_y, prefer_room=None):
-        """The room (any floor) that actually occupies (global_x, global_y).
+    def locate_room(self, global_x, global_y, floor, prefer_room=None):
+        """The room *on `floor`* that actually occupies (global_x, global_y).
 
-        Prefers staying in `prefer_room` (the room the player was in last
-        frame) if it still claims the cell -- otherwise searches every room
-        in the assembly. This is what lets the player cross from one room
-        into another, possibly on a different floor, just by walking there:
-        there's no separate "enter this room" trigger, only ordinary movement.
+        Scoped to a single floor on purpose: collision must never consider
+        another floor's rooms, or two rooms that happen to share a bounding
+        box (they're built from the same source rooms, so this is common)
+        could let the player "phase" through a wall that's solid on their
+        own floor just because an unrelated room on another floor happens to
+        have FLOOR at that same global cell. Crossing floors is handled
+        separately, via `find_portal` -- see generate_assembly's portals.
 
-        Checks FLOOR ownership first, before falling back to "any non-empty
-        cell" (i.e. WALL). Two rooms on different floors can coincidentally
-        share a global position where one has real FLOOR and the other only
-        has an unrelated auto-generated WALL cell from its own layout -- the
-        FLOOR is what actually matters for "which room is this", so it must
-        win even when checking prefer_room second (or not at all).
+        Prefers staying in `prefer_room` if it still claims the cell (checked
+        first), then falls back to any other room on `floor`. Checks FLOOR
+        ownership first, only falling back to "any non-empty cell" (a WALL,
+        e.g. an unrelated auto-generated halo) if nothing claims FLOOR there.
         """
-        candidates = ([prefer_room] if prefer_room is not None else []) + self.rooms
+        rooms = self.rooms_on_floor(floor)
+        candidates = ([prefer_room] if prefer_room in rooms else []) + rooms
 
         for room in candidates:
             local_x, local_y = global_x - room.offset_x, global_y - room.offset_y
@@ -116,13 +124,30 @@ class DungeonAssembly:
 
         return None
 
-    def is_global_cell_walkable(self, global_x, global_y, prefer_room=None):
-        room = self.locate_room(global_x, global_y, prefer_room=prefer_room)
+    @staticmethod
+    def find_portal(room, global_x, global_y):
+        """The portal on `room` at (global_x, global_y), or None.
+
+        Stepping onto a portal cell means crossing to the room on its
+        target_floor at the same global cell -- only reachable at all once
+        the current floor's own collision already allowed walking there
+        (e.g. a gate opened by a button), so no extra "is it open" check is
+        needed here.
+        """
+        if room is None:
+            return None
+        for portal in room.portals:
+            if portal["x"] == global_x and portal["y"] == global_y:
+                return portal
+        return None
+
+    def is_global_cell_walkable(self, global_x, global_y, floor, prefer_room=None):
+        room = self.locate_room(global_x, global_y, floor, prefer_room=prefer_room)
         if room is None:
             return False
         return room.dungeon.object_manager.is_cell_walkable(global_x - room.offset_x, global_y - room.offset_y)
 
-    def is_rect_walkable(self, rect, prefer_room=None):
+    def is_rect_walkable(self, rect, floor, prefer_room=None):
         tile_size = Dungeon.TILE_SIZE
         corners = (
             (rect.left, rect.top),
@@ -134,18 +159,20 @@ class DungeonAssembly:
         for x, y in corners:
             grid_x = x // tile_size
             grid_y = y // tile_size
-            if not self.is_global_cell_walkable(grid_x, grid_y, prefer_room=prefer_room):
+            if not self.is_global_cell_walkable(grid_x, grid_y, floor, prefer_room=prefer_room):
                 return False
 
         return True
 
-    def check_button_trigger(self, global_x, global_y, prefer_room=None):
+    def check_button_trigger(self, global_x, global_y, floor, prefer_room=None):
         """Assembly-aware equivalent of ObjectManager.check_button_trigger -- resolves
         both same-room links (local {"x","y"}) and cross-room ones
         (assembly_links: {"floor","x","y"} in global coordinates, added at
-        generation time -- see generate_assembly).
+        generation time -- see generate_assembly). Scoped to `floor` for the
+        same reason locate_room is: the player can only ever press a button
+        that's actually on their current floor.
         """
-        room = self.locate_room(global_x, global_y, prefer_room=prefer_room)
+        room = self.locate_room(global_x, global_y, floor, prefer_room=prefer_room)
         if room is None:
             return
 
@@ -184,13 +211,26 @@ class DungeonAssembly:
         for room in self.rooms:
             room.dungeon.object_manager.update(dt)
 
-    def render(self, screen, camera, active_floor, player_global_pos=None, hide_object_types=None, skip_active_floor_foreground=False):
-        """Draw every floor relative to active_floor: floors below draw first (so
-        active_floor's own tiles cover them wherever it has content, per gaps
-        showing through elsewhere), active_floor draws normally, and floors
-        above draw last (masking active_floor) except at player_global_pos,
-        left unmasked so the player can always see the floor they're
-        standing on rather than the ceiling above them.
+    # ------------------------------------------------------------------
+    # Rendering -- active floor drawn normally; floors below get a faint
+    # constant tint; floors above act as an opaque "ceiling" that's punched
+    # through by a circular hole around the player, revealing the active
+    # floor underneath as the player's field of view gets close to it.
+    # ------------------------------------------------------------------
+
+    BELOW_FLOOR_ALPHA = 45
+    ABOVE_FLOOR_ALPHA = 235
+    VISION_RADIUS_TILES = 2.5
+
+    def render(self, screen, camera, active_floor, player_world_pos=None, hide_object_types=None,
+               skip_active_floor_foreground=False, vision_radius_tiles=None):
+        """Draw every floor relative to active_floor: floors below first (faintly
+        tinted), active_floor normally, floors above last as a near-opaque mask
+        with a circular hole (vision_radius_tiles, in tiles) cut out around
+        player_world_pos so the player can see their own floor through it as
+        they approach. player_world_pos is a continuous (world_x, world_y)
+        pixel position, not a grid cell -- omit it (e.g. Creator's static
+        preview, which has no player) to render floors above fully opaque.
 
         skip_active_floor_foreground lets a caller that draws its own player
         sprite (Explorator) leave out active_floor's foreground objects (an
@@ -199,9 +239,12 @@ class DungeonAssembly:
         Creator, which draws no player sprite, leaves this off and gets
         everything in one pass.
         """
+        if vision_radius_tiles is None:
+            vision_radius_tiles = self.VISION_RADIUS_TILES
+
         for floor in self.floors():
             if floor < active_floor:
-                self._render_floor(screen, camera, floor, hide_object_types=hide_object_types)
+                self._render_floor_tinted(screen, camera, floor, hide_object_types=hide_object_types)
 
         self._render_floor(
             screen, camera, active_floor,
@@ -211,10 +254,11 @@ class DungeonAssembly:
 
         for floor in self.floors():
             if floor > active_floor:
-                self._render_floor(
+                self._render_floor_masked(
                     screen, camera, floor,
                     hide_object_types=hide_object_types,
-                    player_global_pos=player_global_pos,
+                    player_world_pos=player_world_pos,
+                    vision_radius_tiles=vision_radius_tiles,
                 )
 
     def render_active_floor_foreground(self, screen, camera, active_floor, hide_object_types=None):
@@ -224,25 +268,57 @@ class DungeonAssembly:
             offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
             room.dungeon.render_foreground(screen, offset_camera, hide_object_types=hide_object_types)
 
-    def _render_floor(self, screen, camera, floor, hide_object_types=None, player_global_pos=None, skip_foreground=False):
+    def _render_floor(self, screen, camera, floor, hide_object_types=None, skip_foreground=False):
         tile_size = Dungeon.TILE_SIZE
-
         for room in self.rooms_on_floor(floor):
-            hide_cells = None
-
-            if player_global_pos is not None:
-                local_x = player_global_pos[0] - room.offset_x
-                local_y = player_global_pos[1] - room.offset_y
-                if 0 <= local_x < room.dungeon.width and 0 <= local_y < room.dungeon.height:
-                    hide_cells = {(local_x, local_y)}
-
             offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
             room.dungeon.render(
                 screen, offset_camera,
                 hide_object_types=hide_object_types,
-                hide_cells=hide_cells,
                 skip_foreground_objects=skip_foreground,
             )
+
+    def _draw_floor_layer(self, screen, camera, floor, hide_object_types):
+        """Render `floor`'s rooms onto a fresh per-pixel-alpha surface the same size as `screen`."""
+        layer = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        tile_size = Dungeon.TILE_SIZE
+        for room in self.rooms_on_floor(floor):
+            offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
+            room.dungeon.render(layer, offset_camera, hide_object_types=hide_object_types)
+        return layer
+
+    @staticmethod
+    def _multiply_alpha(layer, alpha):
+        """Scale every drawn pixel's alpha by alpha/255, leaving untouched (fully
+        transparent) background pixels at 0 -- a plain Surface.set_alpha() would
+        be ignored here since `layer` already has per-pixel alpha (SRCALPHA)."""
+        tint = pygame.Surface(layer.get_size(), pygame.SRCALPHA)
+        tint.fill((255, 255, 255, alpha))
+        layer.blit(tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+
+    def _render_floor_tinted(self, screen, camera, floor, hide_object_types=None):
+        layer = self._draw_floor_layer(screen, camera, floor, hide_object_types)
+        self._multiply_alpha(layer, self.BELOW_FLOOR_ALPHA)
+        screen.blit(layer, (0, 0))
+
+    def _render_floor_masked(self, screen, camera, floor, hide_object_types=None,
+                              player_world_pos=None, vision_radius_tiles=None):
+        if vision_radius_tiles is None:
+            vision_radius_tiles = self.VISION_RADIUS_TILES
+
+        layer = self._draw_floor_layer(screen, camera, floor, hide_object_types)
+        self._multiply_alpha(layer, self.ABOVE_FLOOR_ALPHA)
+
+        if player_world_pos is not None:
+            radius_px = int(vision_radius_tiles * Dungeon.TILE_SIZE * camera.zoom)
+            player_screen_x, player_screen_y = camera.world_to_screen(*player_world_pos)
+
+            hole = pygame.Surface(layer.get_size(), pygame.SRCALPHA)
+            hole.fill((255, 255, 255, 255))
+            pygame.draw.circle(hole, (255, 255, 255, 0), (int(player_screen_x), int(player_screen_y)), radius_px)
+            layer.blit(hole, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+
+        screen.blit(layer, (0, 0))
 
 
 class _OffsetCamera:
@@ -355,6 +431,15 @@ def generate_assembly(room_names, room_count, rng=None):
                 floor = anchor_room.floor - 1
                 candidate_room.floor = floor
 
+        if floor != anchor_room.floor:
+            # Genuine cross-floor connection: record a portal on both sides so
+            # DungeonAssembly.find_portal can flip the player's current floor
+            # when they step onto this shared cell (see locate_room's docstring
+            # for why floor-crossing can't just fall out of FLOOR-ownership
+            # checks the way same-floor room-crossing does).
+            anchor_room.portals.append({"x": anchor_gx, "y": anchor_gy, "target_floor": floor})
+            candidate_room.portals.append({"x": anchor_gx, "y": anchor_gy, "target_floor": anchor_room.floor})
+
         # Any button in the anchor's room that links to the anchor's exit should
         # also open the candidate's now-merged copy of that same door -- but a
         # plain local {"x", "y"} link only resolves within one room's own object
@@ -401,6 +486,7 @@ def save_assembly(assembly, name):
                 "floor": room.floor,
                 "offset_x": room.offset_x,
                 "offset_y": room.offset_y,
+                "portals": room.portals,
                 **room.dungeon.save.to_json(room.dungeon),
             }
             for room in assembly.rooms
@@ -436,6 +522,7 @@ def load_assembly(name):
             room_payload["floor"],
             room_payload["offset_x"],
             room_payload["offset_y"],
+            portals=room_payload.get("portals", []),
         )
         assembly.add_room(placed)
 
