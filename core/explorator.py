@@ -91,8 +91,30 @@ class Explorator:
 
     def _is_walkable(self, rect):
         if self.assembly is not None:
-            return self.assembly.is_rect_walkable(rect, prefer_room=self.current_placed_room)
+            return self.assembly.is_rect_walkable(
+                rect, self.current_placed_room.floor, prefer_room=self.current_placed_room
+            )
         return self.dungeon.is_rect_walkable(rect)
+
+    def _update_current_room(self):
+        """Resolve which room the player occupies now: same-floor room-crossing
+        via locate_room, then a portal check to actually flip floors (see
+        DungeonAssembly.locate_room/find_portal for why these are separate)."""
+        hitbox = self.player.get_hitbox()
+        grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
+        grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
+
+        located = self.assembly.locate_room(
+            grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
+        )
+        if located is not None:
+            self.current_placed_room = located
+
+        portal = self.assembly.find_portal(self.current_placed_room, grid_x, grid_y)
+        if portal is not None:
+            target_room = self.assembly.room_at(portal["target_floor"], grid_x, grid_y)
+            if target_room is not None:
+                self.current_placed_room = target_room
 
     def load_spawn_room(self):
 
@@ -154,14 +176,7 @@ class Explorator:
                 self.player.position.y += movement.y
 
             if self.assembly is not None:
-                hitbox = self.player.get_hitbox()
-                located = self.assembly.locate_room(
-                    int(hitbox.centerx // Dungeon.TILE_SIZE),
-                    int((hitbox.bottom - 1) // Dungeon.TILE_SIZE),
-                    prefer_room=self.current_placed_room,
-                )
-                if located is not None:
-                    self.current_placed_room = located
+                self._update_current_room()
 
             # -----------------------------
             # Choix direction animation
@@ -216,7 +231,7 @@ class Explorator:
             player_grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
             player_grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
             self.assembly.check_button_trigger(
-                player_grid_x, player_grid_y, prefer_room=self.current_placed_room
+                player_grid_x, player_grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
             )
         else:
             self.dungeon.update(dt)
@@ -245,17 +260,11 @@ class Explorator:
 
         if self.assembly is not None:
 
-            hitbox = self.player.get_hitbox()
-            player_global_pos = (
-                int(hitbox.centerx // Dungeon.TILE_SIZE),
-                int((hitbox.bottom - 1) // Dungeon.TILE_SIZE),
-            )
-
             self.assembly.render(
                 self.screen,
                 self.camera,
                 active_floor=self.current_placed_room.floor,
-                player_global_pos=player_global_pos,
+                player_world_pos=(self.player.position.x, self.player.position.y),
                 hide_object_types={"spawn"},
                 skip_active_floor_foreground=True,
             )
