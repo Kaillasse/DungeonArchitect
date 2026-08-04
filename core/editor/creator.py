@@ -4,12 +4,12 @@ import os
 import pygame
 
 from core.world.dungeon import DEFAULT_GRID_SAVE_PATH, Dungeon
-from core.world.assembly import generate_assembly
+from core.world.assembly import generate_assembly, load_assembly, save_assembly
 from core.editor.ui import ToolPaletteUI
 from core.engine.gamestate import GameState
 from core.engine.room_manager import RoomManager
 from core.engine.camera import Camera
-from core.data.ressources import FLOOR
+from core.data.ressources import FLOOR, next_new_donjon_name
 from core.editor.ui import GeneratorPanelUI, ObjectPalette, RoomPanelUI
 from core.editor.tools import ObjectTool
 
@@ -29,8 +29,9 @@ class Creator:
         self.dungeon.load_from_json(self.current_room)
         self.palette = ToolPaletteUI()
         self.room_panel = RoomPanelUI(self.room_manager)
-        self.generator_panel = GeneratorPanelUI(self.room_manager)
+        self.generator_panel = GeneratorPanelUI(self.room_manager, x=10, y=240)
         self.last_assembly = None
+        self.assembly_active_floor = 0
 
         self.object_type = "spawn" # Type d'objet par défaut
         self.object_palette = ObjectPalette()
@@ -81,21 +82,32 @@ class Creator:
 
     def open_room(self, name):
         self.current_room = name
+        self.last_assembly = None
         self.dungeon.load_from_json(name)
 
+    def open_donjon(self, name):
+        """Preview a saved procedurally-assembled dungeon instead of a single room."""
+        self.last_assembly = load_assembly(name)
+        self.assembly_active_floor = 0
+        self.current_room = None
+
     def _apply_room_action(self, action):
-        mode, name = action
+        mode, selection = action
 
         if mode == "save":
-            self.room_manager.save(name)
-            self.current_room = name
+            self.room_manager.save(selection)
+            self.current_room = selection
 
         elif mode == "load":
-            self.open_room(name)
+            kind, name = selection
+            if kind == "donjon":
+                self.open_donjon(name)
+            else:
+                self.open_room(name)
 
         elif mode == "delete":
-            self.room_manager.delete(name)
-            if self.current_room == name:
+            self.room_manager.delete(selection)
+            if self.current_room == selection:
                 self.current_room = None
 
         self.generator_panel.refresh_rooms()
@@ -109,9 +121,13 @@ class Creator:
             self.generator_panel.status_text = "Aucune salle avec spawn + sortie dans la selection."
             return
 
+        donjon_name = next_new_donjon_name()
+        save_assembly(assembly, donjon_name)
+
         self.last_assembly = assembly
+        self.assembly_active_floor = 0
         self.generator_panel.status_text = (
-            f"{len(assembly.rooms)} salle(s) sur {len(assembly.floors())} etage(s)."
+            f"{donjon_name} : {len(assembly.rooms)} salle(s) sur {len(assembly.floors())} etage(s)."
         )
 
     def _find_indicator_at(self, mouse_pos):
@@ -211,6 +227,13 @@ class Creator:
 
                     if panel_click:
                         continue
+
+                if self.last_assembly is not None and event.type in (
+                    pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION
+                ):
+                    # Previewing a generated assembly -- painting/object tools all act
+                    # on self.dungeon, which isn't what's on screen right now.
+                    continue
 
                 if event.type == pygame.QUIT:
 
@@ -323,8 +346,11 @@ class Creator:
                         running = False
 
                     elif event.key == pygame.K_ESCAPE:
-                        self.game_manager.state = GameState.MENU
-                        running = False
+                        if self.last_assembly is not None:
+                            self.last_assembly = None
+                        else:
+                            self.game_manager.state = GameState.MENU
+                            running = False
 
             # -------------------------------------------------
             # Render
@@ -374,44 +400,65 @@ class Creator:
                 (250, 5),
             )
 
-            self.dungeon.render(
-                self.screen,
-                self.camera,
-                spawn_preview=self.spawn_preview,
-                show_link_indicators=True,
-            )
+            if self.last_assembly is not None:
 
-            if self.link_source is not None and self.link_drag_pos is not None:
-
-                source_screen = self.camera.world_to_screen(
-                    *self.dungeon.object_indicator_position(self.link_source)
-                )
-                pygame.draw.line(self.screen, self.LINK_LINE_COLOR, source_screen, self.link_drag_pos, 2)
-
-            if self.moving_object is not None and self.move_drag_pos is not None:
-
-                sprite = self.object_palette.get_current_frame(
-                    self.moving_object["type"]
+                self.last_assembly.render(
+                    self.screen,
+                    self.camera,
+                    active_floor=self.assembly_active_floor,
                 )
 
-                rect = sprite.get_rect(
-                    center=self.move_drag_pos
+                hint_font = pygame.font.SysFont("arial", 16)
+                self.screen.blit(
+                    hint_font.render(
+                        "Apercu du donjon genere -- ECHAP pour revenir a l'edition",
+                        True,
+                        (220, 220, 220),
+                    ),
+                    (250, 34),
                 )
 
-                self.screen.blit(sprite, rect)
+            else:
+
+                self.dungeon.render(
+                    self.screen,
+                    self.camera,
+                    spawn_preview=self.spawn_preview,
+                    show_link_indicators=True,
+                )
+
+                if self.link_source is not None and self.link_drag_pos is not None:
+
+                    source_screen = self.camera.world_to_screen(
+                        *self.dungeon.object_indicator_position(self.link_source)
+                    )
+                    pygame.draw.line(self.screen, self.LINK_LINE_COLOR, source_screen, self.link_drag_pos, 2)
+
+                if self.moving_object is not None and self.move_drag_pos is not None:
+
+                    sprite = self.object_palette.get_current_frame(
+                        self.moving_object["type"]
+                    )
+
+                    rect = sprite.get_rect(
+                        center=self.move_drag_pos
+                    )
+
+                    self.screen.blit(sprite, rect)
+
+                if self.object_tool.dragging:
+
+                    sprite = self.object_palette.get_current_frame(
+                        self.object_tool.object_type
+                    )
+
+                    rect = sprite.get_rect(
+                        center=self.object_tool.position
+                    )
+
+                    self.screen.blit(sprite, rect)
 
             self.palette.render(self.screen)
-            if self.object_tool.dragging:
-
-                sprite = self.object_palette.get_current_frame(
-                    self.object_tool.object_type
-                )
-
-                rect = sprite.get_rect(
-                    center=self.object_tool.position
-                )
-
-                self.screen.blit(sprite, rect)
             self.object_palette.render(self.screen)
             self.room_panel.render(self.screen)
             self.generator_panel.render(self.screen)
