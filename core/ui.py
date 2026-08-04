@@ -135,3 +135,127 @@ class BorderManager:
         screen.blit(b["tr"], (x + w - c, y))
         screen.blit(b["bl"], (x, y + h - c))
         screen.blit(b["br"], (x + w - c, y + h - c))
+
+
+# ---------------------------------------------------------------------
+# Room browser
+# ---------------------------------------------------------------------
+
+
+class RoomBrowser:
+    """Scrollable, selectable list of room names with a drag slider. Purely a list-selector -- callers decide what "confirming" a selection means."""
+
+    ROW_HEIGHT = 30
+    VISIBLE_ROWS = 5
+    SLIDER_WIDTH = 12
+
+    def __init__(self, x, y, width=240):
+        self.x = x
+        self.y = y
+        self.width = width
+
+        self.rooms = []
+        self.selected = None
+        self.scroll = 0
+        self._dragging_slider = False
+
+        self.border = BorderManager()
+        self.font = pygame.font.SysFont("arial", 16)
+
+    @property
+    def height(self):
+        return self.ROW_HEIGHT * self.VISIBLE_ROWS
+
+    @property
+    def selected_name(self):
+        if self.selected is None or self.selected >= len(self.rooms):
+            return None
+        return self.rooms[self.selected]
+
+    def set_rooms(self, rooms):
+        self.rooms = list(rooms)
+        self.selected = None
+        self.scroll = 0
+
+    def _max_scroll(self):
+        return max(0, len(self.rooms) - self.VISIBLE_ROWS)
+
+    def _visible_count(self):
+        return min(self.VISIBLE_ROWS, len(self.rooms) - self.scroll)
+
+    def _row_rect(self, row_index):
+        return pygame.Rect(
+            self.x,
+            self.y + row_index * self.ROW_HEIGHT,
+            self.width - self.SLIDER_WIDTH - 4,
+            self.ROW_HEIGHT,
+        )
+
+    def _slider_track_rect(self):
+        return pygame.Rect(self.x + self.width - self.SLIDER_WIDTH, self.y, self.SLIDER_WIDTH, self.height)
+
+    def _slider_thumb_rect(self):
+        track = self._slider_track_rect()
+        max_scroll = self._max_scroll()
+
+        if max_scroll == 0:
+            return track
+
+        thumb_h = max(20, track.height * self.VISIBLE_ROWS / len(self.rooms))
+        thumb_y = track.y + (track.height - thumb_h) * (self.scroll / max_scroll)
+
+        return pygame.Rect(track.x, thumb_y, track.width, thumb_h)
+
+    def contains(self, pos):
+        panel_rect = pygame.Rect(self.x, self.y, self.width, self.height)
+        return panel_rect.collidepoint(pos)
+
+    def handle_event(self, event):
+        """Returns True if this event was consumed (row click, slider drag)."""
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+
+            if self._max_scroll() > 0 and self._slider_thumb_rect().collidepoint(event.pos):
+                self._dragging_slider = True
+                return True
+
+            for row_index in range(self._visible_count()):
+                if self._row_rect(row_index).collidepoint(event.pos):
+                    self.selected = self.scroll + row_index
+                    return True
+
+            return self.contains(event.pos)
+
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if self._dragging_slider:
+                self._dragging_slider = False
+                return True
+            return False
+
+        if event.type == pygame.MOUSEMOTION and self._dragging_slider:
+            track = self._slider_track_rect()
+            max_scroll = self._max_scroll()
+            if max_scroll > 0:
+                rel = (event.pos[1] - track.y) / track.height
+                self.scroll = max(0, min(max_scroll, round(rel * max_scroll)))
+            return True
+
+        return False
+
+    def render(self, screen):
+        panel_rect = pygame.Rect(self.x, self.y, self.width, self.height)
+        self.border.draw(screen, panel_rect)
+
+        for row_index in range(self._visible_count()):
+            room_index = self.scroll + row_index
+            rect = self._row_rect(row_index)
+
+            is_selected = room_index == self.selected
+            color = (255, 220, 120) if is_selected else (255, 255, 255)
+            text = self.font.render(self.rooms[room_index], True, color)
+
+            screen.blit(text, (rect.x + 8, rect.centery - text.get_height() / 2))
+
+        if self._max_scroll() > 0:
+            pygame.draw.rect(screen, (60, 60, 70), self._slider_track_rect())
+            pygame.draw.rect(screen, (150, 150, 150), self._slider_thumb_rect())
