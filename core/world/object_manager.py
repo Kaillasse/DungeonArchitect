@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pygame
 
-from core.editor.autotile import FLOOR, WALL
+from core.editor.autotile import EMPTY, FLOOR, WALL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -23,7 +23,16 @@ OBJECT_TYPES = {
     },
     "gate": {
         "asset": "tiles/gateopenclose.png",
-        "placement": "floor",
+        # Custom placement, not a plain "floor"/"wall" lookup -- see
+        # ObjectManager._resolve_placement/is_valid_doorway: a gate/wall must
+        # sit on a WALL cell that reads as a clean break in a straight wall
+        # segment (one FLOOR neighbor, the room interior, directly opposite
+        # one EMPTY neighbor, the void beyond, with WALL flanking the other
+        # two sides). This is what makes a placed entry-exit unambiguous for
+        # both the player (no ordinary floor tile doubles as a doorway) and
+        # the procedural assembler (core.world.assembly), which additionally
+        # only treats a gate/wall with this pattern as a connectable exit.
+        "placement": "doorway",
         "size": (1, 1),
         "frames": 8,
         "linkable": True,
@@ -31,7 +40,7 @@ OBJECT_TYPES = {
     },
     "wall": {
         "asset": "tiles/wallopenclose.png",
-        "placement": "floor",
+        "placement": "doorway",
         "size": (2, 1),
         "frames": 7,
         "linkable": True,
@@ -248,6 +257,9 @@ class ObjectManager:
                 return True, None
             return False, None
 
+        if object_type in ("gate", "wall"):
+            return self.is_valid_doorway(grid_x, grid_y), None
+
         is_valid = self.dungeon.logical_grid[grid_y][grid_x] == self._required_cell(object_type)
         return is_valid, None
 
@@ -260,6 +272,43 @@ class ObjectManager:
         if grid_x > 0 and self.dungeon.logical_grid[grid_y][grid_x - 1] == WALL:
             return "L"
         return None
+
+    def _cell_or_empty(self, grid_x, grid_y):
+        if 0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height:
+            return self.dungeon.logical_grid[grid_y][grid_x]
+        return EMPTY
+
+    def is_valid_doorway(self, grid_x, grid_y):
+        """True if (grid_x, grid_y) is a WALL cell that reads as a clean break in a
+        straight wall segment: exactly one FLOOR neighbor (the room interior)
+        directly opposite exactly one EMPTY neighbor (the void beyond), with
+        WALL flanking the other two sides. Off-grid neighbors count as EMPTY.
+
+        This is the only shape a gate/wall entry-exit is ever allowed to
+        occupy (enforced here, at placement/move time) -- it can't end up in
+        the middle of a room, which is what made it ambiguous whether a given
+        floor tile was "just floor" or a doorway to another room. The
+        procedural assembler (core.world.assembly) also re-checks this same
+        pattern before treating a gate/wall as a connectable exit, so a
+        gate/wall lacking a void neighbor (interior-only, e.g. a locked door
+        gating a side room) is simply never picked as a room-to-room
+        connection -- it still works as an ordinary in-room obstacle.
+        """
+        if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
+            return False
+        if self.dungeon.logical_grid[grid_y][grid_x] != WALL:
+            return False
+
+        up = self._cell_or_empty(grid_x, grid_y - 1)
+        down = self._cell_or_empty(grid_x, grid_y + 1)
+        left = self._cell_or_empty(grid_x - 1, grid_y)
+        right = self._cell_or_empty(grid_x + 1, grid_y)
+
+        if {up, down} == {FLOOR, EMPTY}:
+            return left == WALL and right == WALL
+        if {left, right} == {FLOOR, EMPTY}:
+            return up == WALL and down == WALL
+        return False
 
     def prune_invalid(self):
         """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased), and any links left dangling by that."""

@@ -20,6 +20,20 @@ from core.data.ressources import DONJONS_DIRECTORY
 ENTRY_EXIT_TYPES = ("gate", "wall")
 
 
+def _valid_entry_exits(dungeon):
+    """gate/wall objects that actually qualify as a room-to-room connection:
+    ObjectManager.is_valid_doorway (a WALL cell with one FLOOR neighbor
+    opposite one EMPTY neighbor, WALL flanking the rest) means this exit
+    genuinely borders the void, not just another spot inside the room. A
+    gate/wall placed with no void neighbor (e.g. a locked door gating a side
+    room) still works as an ordinary in-room obstacle -- it's just never
+    picked as a connector here."""
+    return [
+        obj for obj in dungeon.object_manager.objects
+        if obj["type"] in ENTRY_EXIT_TYPES and dungeon.object_manager.is_valid_doorway(obj["x"], obj["y"])
+    ]
+
+
 class PlacedRoom:
     """A Dungeon placed at a given floor and global grid offset within a DungeonAssembly."""
 
@@ -43,10 +57,7 @@ class PlacedRoom:
         return cells
 
     def entry_exits(self):
-        return [
-            obj for obj in self.dungeon.object_manager.objects
-            if obj["type"] in ENTRY_EXIT_TYPES
-        ]
+        return _valid_entry_exits(self.dungeon)
 
     def has_spawn(self):
         return any(obj["type"] == "spawn" for obj in self.dungeon.object_manager.objects)
@@ -366,12 +377,11 @@ def _collides(existing_cells, new_cells, ignore=None):
 
 
 def _find_start_room(room_names):
-    """First room (in the given order) with both a spawn and an entry-exit."""
+    """First room (in the given order) with both a spawn and a valid entry-exit."""
     for room_name in room_names:
         dungeon = _load_room(room_name)
         has_spawn = any(obj["type"] == "spawn" for obj in dungeon.object_manager.objects)
-        has_exit = any(obj["type"] in ENTRY_EXIT_TYPES for obj in dungeon.object_manager.objects)
-        if has_spawn and has_exit:
+        if has_spawn and _valid_entry_exits(dungeon):
             return room_name, dungeon
     return None, None
 
@@ -408,10 +418,7 @@ def generate_assembly(room_names, room_count, rng=None):
 
         candidate_name = rng.choice(room_names)
         candidate_dungeon = _load_room(candidate_name)
-        candidate_exits = [
-            obj for obj in candidate_dungeon.object_manager.objects
-            if obj["type"] in ENTRY_EXIT_TYPES
-        ]
+        candidate_exits = _valid_entry_exits(candidate_dungeon)
         # Only align onto an exit of the SAME type as the anchor's (a gate
         # merges with a gate, a wall with a wall) -- otherwise the two halves
         # of one physical doorway would be different objects with unrelated
