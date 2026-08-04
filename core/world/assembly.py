@@ -7,10 +7,12 @@ room it's connecting from) instead of moving tiles within a floor.
 
 from __future__ import annotations
 
+import json
 import random
 
 from core.world.dungeon import Dungeon
 from core.editor.autotile import EMPTY, WALL
+from core.data.ressources import DONJONS_DIRECTORY
 
 ENTRY_EXIT_TYPES = ("gate", "wall")
 
@@ -239,5 +241,65 @@ def generate_assembly(room_names, room_count, rng=None):
         for exit_obj in candidate_exits:
             if exit_obj is not candidate_exit:
                 pending.append((candidate_room, exit_obj))
+
+    return assembly
+
+
+def _donjon_path(name):
+    return DONJONS_DIRECTORY / f"{name}.json"
+
+
+def save_assembly(assembly, name):
+    """Save a DungeonAssembly as one combined assets/donjons/<name>.json.
+
+    Each room is stored fully (not just a reference to its source room file)
+    since generation can mutate a room's objects (an entry-exit inheriting a
+    link) -- reloading from assets/rooms/ by name would lose that.
+    """
+    payload = {
+        "version": 1,
+        "rooms": [
+            {
+                "room_name": room.room_name,
+                "floor": room.floor,
+                "offset_x": room.offset_x,
+                "offset_y": room.offset_y,
+                **room.dungeon.save.to_json(room.dungeon),
+            }
+            for room in assembly.rooms
+        ],
+    }
+
+    path = _donjon_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+    return path
+
+
+def load_assembly(name):
+    """Load a DungeonAssembly previously saved with save_assembly(), or None if it doesn't exist."""
+    path = _donjon_path(name)
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+    assembly = DungeonAssembly()
+    for room_payload in payload.get("rooms", []):
+        dungeon = Dungeon()
+        dungeon.save.apply_json(dungeon, room_payload)
+        placed = PlacedRoom(
+            dungeon,
+            room_payload.get("room_name", ""),
+            room_payload["floor"],
+            room_payload["offset_x"],
+            room_payload["offset_y"],
+        )
+        assembly.add_room(placed)
 
     return assembly
