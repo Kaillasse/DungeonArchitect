@@ -36,6 +36,10 @@ class GameManager:
 
             elif self.state == GameState.EXPLORATION:
                 if self.pending_room is not None:
-                    self.explorator.open_room(self.pending_room)
+                    kind, name = self.pending_room
+                    if kind == "donjon":
+                        self.explorator.open_donjon(name)
+                    else:
+                        self.explorator.open_room(name)
                     self.pending_room = None
                 self.explorator.run()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pygame
 
 from core.engine.gamestate import GameState
-from core.data.ressources import list_rooms, next_new_room_name
+from core.data.ressources import list_rooms, list_donjons, next_new_room_name
 from core.ui import BorderManager, RoomBrowser
 
 
@@ -67,10 +67,13 @@ class Menu:
         self.mode = "rooms"
         self.room_target_state = target_state
 
-        rooms = list_rooms()
-        if target_state == GameState.CREATOR:
-            rooms = [self.NEW_ROOM_LABEL] + rooms
+        if target_state == GameState.EXPLORATION:
+            entries = [(f"[Salle] {name}", ("room", name)) for name in list_rooms()]
+            entries += [(f"[Donjon] {name}", ("donjon", name)) for name in list_donjons()]
+            self.room_browser.set_rooms(entries)
+            return
 
+        rooms = [self.NEW_ROOM_LABEL] + list_rooms()
         self.room_browser.set_rooms(rooms)
 
     def _activate(self, action):
@@ -97,14 +100,18 @@ class Menu:
     def _confirm_room(self):
         """Returns True if a room was picked and the menu loop should stop."""
 
-        name = self.room_browser.selected_name
-        if name is None:
+        selection = self.room_browser.selected_name
+        if selection is None:
             return False
 
-        if name == self.NEW_ROOM_LABEL:
-            name = next_new_room_name()
+        if self.room_target_state == GameState.EXPLORATION:
+            self.game_manager.pending_room = selection  # ("room" | "donjon", name)
+        else:
+            name = selection
+            if name == self.NEW_ROOM_LABEL:
+                name = next_new_room_name()
+            self.game_manager.pending_room = name
 
-        self.game_manager.pending_room = name
         self.game_manager.state = self.room_target_state
         return True
 
