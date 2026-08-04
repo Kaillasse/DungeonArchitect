@@ -218,8 +218,8 @@ class Creator:
                         running = False
 
                     elif event.key == pygame.K_ESCAPE:
+                        self.game_manager.state = GameState.MENU
                         running = False
-                        self.game_manager.running = False
 
                     elif event.key == pygame.K_F1:
                         self.room_manager.save_room()

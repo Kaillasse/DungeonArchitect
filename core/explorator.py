@@ -224,8 +224,8 @@ class Explorator:
                         running = False
 
                     elif event.key == pygame.K_ESCAPE:
+                        self.game_manager.state = GameState.MENU
                         running = False
-                        self.game_manager.running = False
 
             self.update(dt)
 
