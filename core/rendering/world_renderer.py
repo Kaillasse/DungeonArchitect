@@ -1,0 +1,88 @@
+import pygame
+
+from core.data.ressources import TILE_SIZE, load_tileset, get_tile_surface
+from core.world.object_manager import load_object_frames
+
+
+class WorldRenderer:
+    """Draws a Dungeon. Holds no world data — only pygame surface caches."""
+
+    GRID_LINE_COLOR = (80, 80, 80)
+    SPAWN_PREVIEW_COLOR = (0, 255, 0)
+
+    def __init__(self):
+        self.tileset = load_tileset()
+        self._tile_cache = {}
+        self._object_sprites = {}
+
+    def _get_object_sprite(self, object_type):
+        if object_type not in self._object_sprites:
+            self._object_sprites[object_type] = load_object_frames(object_type)[0]
+        return self._object_sprites[object_type]
+
+    def _get_scaled_tile(self, tile_index, zoom, tile_px, columns):
+        cache_key = (tile_index, zoom)
+        if cache_key not in self._tile_cache:
+            tile_surface = get_tile_surface(self.tileset, tile_index, tile_size=TILE_SIZE, columns=columns)
+            self._tile_cache[cache_key] = pygame.transform.scale(tile_surface, (tile_px, tile_px))
+        return self._tile_cache[cache_key]
+
+    def render(self, screen, dungeon, camera, spawn_preview=None):
+        zoom = camera.zoom
+        tile_size = dungeon.tile_size
+        tile_px = tile_size * zoom
+        columns = self.tileset.get_width() // TILE_SIZE
+
+        for y, row in enumerate(dungeon.sprite_grid):
+            for x, tile_index in enumerate(row):
+                if tile_index < 0:
+                    continue
+
+                scaled = self._get_scaled_tile(tile_index, zoom, tile_px, columns)
+
+                world_x = x * tile_size
+                world_y = y * tile_size
+                screen_x, screen_y = camera.world_to_screen(world_x, world_y)
+                screen.blit(scaled, (screen_x, screen_y))
+
+        for obj in dungeon.object_manager.objects:
+            sprite = self._get_object_sprite(obj["type"])
+
+            size = (int(sprite.get_width() * zoom), int(sprite.get_height() * zoom))
+            scaled_sprite = pygame.transform.scale(sprite, size)
+
+            wx, wy = dungeon.grid_to_world(obj["x"], obj["y"])
+            sx, sy = camera.world_to_screen(wx, wy)
+
+            screen.blit(
+                scaled_sprite,
+                (
+                    sx - scaled_sprite.get_width() / 2,
+                    sy - scaled_sprite.get_height(),
+                ),
+            )
+
+        for gy in range(dungeon.height + 1):
+            world_y = gy * tile_size
+            p1 = camera.world_to_screen(0, world_y)
+            p2 = camera.world_to_screen(dungeon.width * tile_size, world_y)
+            pygame.draw.line(screen, self.GRID_LINE_COLOR, p1, p2)
+
+        for gx in range(dungeon.width + 1):
+            world_x = gx * tile_size
+            p1 = camera.world_to_screen(world_x, 0)
+            p2 = camera.world_to_screen(world_x, dungeon.height * tile_size)
+            pygame.draw.line(screen, self.GRID_LINE_COLOR, p1, p2)
+
+        if spawn_preview is not None:
+            gx, gy = spawn_preview
+            wx, wy = dungeon.grid_to_world(gx, gy)
+            sx, sy = camera.world_to_screen(wx, wy)
+
+            pygame.draw.circle(
+                screen,
+                self.SPAWN_PREVIEW_COLOR,
+                (int(sx), int(sy)),
+                int(tile_size * zoom / 4),
+                2,
+            )
