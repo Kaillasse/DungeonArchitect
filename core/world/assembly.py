@@ -11,7 +11,8 @@ import json
 import random
 
 from core.world.dungeon import Dungeon
-from core.editor.autotile import EMPTY, WALL
+from core.world.object_manager import OBJECT_TYPES
+from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DONJONS_DIRECTORY
 
 ENTRY_EXIT_TYPES = ("gate", "wall")
@@ -79,19 +80,134 @@ class DungeonAssembly:
                 return room
         return None
 
-    def render(self, screen, camera, active_floor, player_global_pos=None, hide_object_types=None):
+    # ------------------------------------------------------------------
+    # Live exploration -- crossing between rooms/floors as the player moves
+    # ------------------------------------------------------------------
+
+    def locate_room(self, global_x, global_y, prefer_room=None):
+        """The room (any floor) that actually occupies (global_x, global_y).
+
+        Prefers staying in `prefer_room` (the room the player was in last
+        frame) if it still claims the cell -- otherwise searches every room
+        in the assembly. This is what lets the player cross from one room
+        into another, possibly on a different floor, just by walking there:
+        there's no separate "enter this room" trigger, only ordinary movement.
+
+        Checks FLOOR ownership first, before falling back to "any non-empty
+        cell" (i.e. WALL). Two rooms on different floors can coincidentally
+        share a global position where one has real FLOOR and the other only
+        has an unrelated auto-generated WALL cell from its own layout -- the
+        FLOOR is what actually matters for "which room is this", so it must
+        win even when checking prefer_room second (or not at all).
+        """
+        candidates = ([prefer_room] if prefer_room is not None else []) + self.rooms
+
+        for room in candidates:
+            local_x, local_y = global_x - room.offset_x, global_y - room.offset_y
+            if 0 <= local_x < room.dungeon.width and 0 <= local_y < room.dungeon.height:
+                if room.dungeon.logical_grid[local_y][local_x] == FLOOR:
+                    return room
+
+        for room in candidates:
+            local_x, local_y = global_x - room.offset_x, global_y - room.offset_y
+            if 0 <= local_x < room.dungeon.width and 0 <= local_y < room.dungeon.height:
+                if room.dungeon.logical_grid[local_y][local_x] != EMPTY:
+                    return room
+
+        return None
+
+    def is_global_cell_walkable(self, global_x, global_y, prefer_room=None):
+        room = self.locate_room(global_x, global_y, prefer_room=prefer_room)
+        if room is None:
+            return False
+        return room.dungeon.object_manager.is_cell_walkable(global_x - room.offset_x, global_y - room.offset_y)
+
+    def is_rect_walkable(self, rect, prefer_room=None):
+        tile_size = Dungeon.TILE_SIZE
+        corners = (
+            (rect.left, rect.top),
+            (rect.right - 1, rect.top),
+            (rect.left, rect.bottom - 1),
+            (rect.right - 1, rect.bottom - 1),
+        )
+
+        for x, y in corners:
+            grid_x = x // tile_size
+            grid_y = y // tile_size
+            if not self.is_global_cell_walkable(grid_x, grid_y, prefer_room=prefer_room):
+                return False
+
+        return True
+
+    def check_button_trigger(self, global_x, global_y, prefer_room=None):
+        """Assembly-aware equivalent of ObjectManager.check_button_trigger -- resolves
+        both same-room links (local {"x","y"}) and cross-room ones
+        (assembly_links: {"floor","x","y"} in global coordinates, added at
+        generation time -- see generate_assembly).
+        """
+        room = self.locate_room(global_x, global_y, prefer_room=prefer_room)
+        if room is None:
+            return
+
+        local_x, local_y = global_x - room.offset_x, global_y - room.offset_y
+        obj = room.dungeon.object_manager.get_object_at(local_x, local_y)
+
+        if obj is None or obj["type"] != "button" or obj.get("activated"):
+            return
+
+        obj["activated"] = True
+        obj["frame"] = 0
+        obj["anim_timer"] = 0.0
+
+        for link_target in obj.get("links", []):
+            target = room.dungeon.object_manager.get_object_at(link_target["x"], link_target["y"])
+            self._open_if_blocking(target)
+
+        for link_target in obj.get("assembly_links", []):
+            target_room = self.room_at(link_target["floor"], link_target["x"], link_target["y"])
+            if target_room is None:
+                continue
+            target = target_room.dungeon.object_manager.get_object_at(
+                link_target["x"] - target_room.offset_x,
+                link_target["y"] - target_room.offset_y,
+            )
+            self._open_if_blocking(target)
+
+    @staticmethod
+    def _open_if_blocking(target):
+        if target is not None and OBJECT_TYPES[target["type"]].get("blocks_until_open") and not target.get("open"):
+            target["open"] = True
+            target["frame"] = 0
+            target["anim_timer"] = 0.0
+
+    def update(self, dt):
+        for room in self.rooms:
+            room.dungeon.object_manager.update(dt)
+
+    def render(self, screen, camera, active_floor, player_global_pos=None, hide_object_types=None, skip_active_floor_foreground=False):
         """Draw every floor relative to active_floor: floors below draw first (so
         active_floor's own tiles cover them wherever it has content, per gaps
         showing through elsewhere), active_floor draws normally, and floors
         above draw last (masking active_floor) except at player_global_pos,
         left unmasked so the player can always see the floor they're
         standing on rather than the ceiling above them.
+
+        skip_active_floor_foreground lets a caller that draws its own player
+        sprite (Explorator) leave out active_floor's foreground objects (an
+        L/R torch) here and draw them afterwards via
+        render_active_floor_foreground(), so the player ends up behind them.
+        Creator, which draws no player sprite, leaves this off and gets
+        everything in one pass.
         """
         for floor in self.floors():
             if floor < active_floor:
                 self._render_floor(screen, camera, floor, hide_object_types=hide_object_types)
 
-        self._render_floor(screen, camera, active_floor, hide_object_types=hide_object_types)
+        self._render_floor(
+            screen, camera, active_floor,
+            hide_object_types=hide_object_types,
+            skip_foreground=skip_active_floor_foreground,
+        )
 
         for floor in self.floors():
             if floor > active_floor:
@@ -101,7 +217,14 @@ class DungeonAssembly:
                     player_global_pos=player_global_pos,
                 )
 
-    def _render_floor(self, screen, camera, floor, hide_object_types=None, player_global_pos=None):
+    def render_active_floor_foreground(self, screen, camera, active_floor, hide_object_types=None):
+        """Objects ObjectManager.is_foreground_object() flags (e.g. an L/R torch) on active_floor -- call after drawing the player sprite."""
+        tile_size = Dungeon.TILE_SIZE
+        for room in self.rooms_on_floor(active_floor):
+            offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
+            room.dungeon.render_foreground(screen, offset_camera, hide_object_types=hide_object_types)
+
+    def _render_floor(self, screen, camera, floor, hide_object_types=None, player_global_pos=None, skip_foreground=False):
         tile_size = Dungeon.TILE_SIZE
 
         for room in self.rooms_on_floor(floor):
@@ -114,7 +237,12 @@ class DungeonAssembly:
                     hide_cells = {(local_x, local_y)}
 
             offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
-            room.dungeon.render(screen, offset_camera, hide_object_types=hide_object_types, hide_cells=hide_cells)
+            room.dungeon.render(
+                screen, offset_camera,
+                hide_object_types=hide_object_types,
+                hide_cells=hide_cells,
+                skip_foreground_objects=skip_foreground,
+            )
 
 
 class _OffsetCamera:
@@ -227,14 +355,23 @@ def generate_assembly(room_names, room_count, rng=None):
                 floor = anchor_room.floor - 1
                 candidate_room.floor = floor
 
-        # The new entry-exit inherits the anchor's link data -- note this is a
-        # data-level copy only: "links" addresses are still local (x, y)
-        # coordinates, meaningful within a single room's own object list.
-        # Making a button in one room actually trigger a linked gate/wall in a
-        # *different* room of the assembly requires check_button_trigger (and
-        # friends) to become assembly-aware, which isn't wired up yet -- that's
-        # follow-up work for when Explorator can traverse the assembly.
-        candidate_exit["links"] = [dict(link) for link in anchor_exit.get("links", [])]
+        # Any button in the anchor's room that links to the anchor's exit should
+        # also open the candidate's now-merged copy of that same door -- but a
+        # plain local {"x", "y"} link only resolves within one room's own object
+        # list, so this needs a global, floor-qualified reference instead
+        # (an "assembly_link"), which DungeonAssembly.check_button_trigger knows
+        # how to follow across rooms. The candidate exit's own pre-existing
+        # local links (if any) are untouched -- they're still valid as-is,
+        # since candidate room's internal layout doesn't change.
+        for source_obj in anchor_room.dungeon.object_manager.objects:
+            if source_obj["type"] != "button":
+                continue
+            for link_ref in source_obj.get("links", []):
+                if (link_ref["x"], link_ref["y"]) == (anchor_exit["x"], anchor_exit["y"]):
+                    source_obj.setdefault("assembly_links", []).append(
+                        {"floor": floor, "x": anchor_gx, "y": anchor_gy}
+                    )
+                    break
 
         assembly.add_room(candidate_room)
 
