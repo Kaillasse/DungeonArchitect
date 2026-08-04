@@ -17,6 +17,7 @@ class GameManager:
         headless = os.environ.get("DUNGEONARCHITECT_HEADLESS") == "1"
         self.state = GameState.CREATOR if headless else GameState.MENU
         self.running = True
+        self.pending_room = None
         self.clock = pygame.time.Clock()
         self.menu = Menu(self)
         self.creator = Creator(self)
@@ -26,7 +27,15 @@ class GameManager:
         while self.running:
             if self.state == GameState.MENU:
                 self.menu.run()
+
             elif self.state == GameState.CREATOR:
+                if self.pending_room is not None:
+                    self.creator.open_room(self.pending_room)
+                    self.pending_room = None
                 self.creator.run()
+
             elif self.state == GameState.EXPLORATION:
+                if self.pending_room is not None:
+                    self.explorator.open_room(self.pending_room)
+                    self.pending_room = None
                 self.explorator.run()
