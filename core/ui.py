@@ -149,13 +149,15 @@ class RoomBrowser:
     VISIBLE_ROWS = 5
     SLIDER_WIDTH = 12
 
-    def __init__(self, x, y, width=240):
+    def __init__(self, x, y, width=240, multi_select=False):
         self.x = x
         self.y = y
         self.width = width
+        self.multi_select = multi_select
 
         self.rooms = []
         self.selected = None
+        self.selected_set = set()
         self.scroll = 0
         self._dragging_slider = False
 
@@ -172,9 +174,14 @@ class RoomBrowser:
             return None
         return self.rooms[self.selected]
 
-    def set_rooms(self, rooms):
+    @property
+    def selected_names(self):
+        return [name for i, name in enumerate(self.rooms) if i in self.selected_set]
+
+    def set_rooms(self, rooms, preselect_all=False):
         self.rooms = list(rooms)
         self.selected = None
+        self.selected_set = set(range(len(self.rooms))) if preselect_all else set()
         self.scroll = 0
 
     def _max_scroll(self):
@@ -221,7 +228,14 @@ class RoomBrowser:
 
             for row_index in range(self._visible_count()):
                 if self._row_rect(row_index).collidepoint(event.pos):
-                    self.selected = self.scroll + row_index
+                    room_index = self.scroll + row_index
+                    if self.multi_select:
+                        if room_index in self.selected_set:
+                            self.selected_set.discard(room_index)
+                        else:
+                            self.selected_set.add(room_index)
+                    else:
+                        self.selected = room_index
                     return True
 
             return self.contains(event.pos)
@@ -250,9 +264,14 @@ class RoomBrowser:
             room_index = self.scroll + row_index
             rect = self._row_rect(row_index)
 
-            is_selected = room_index == self.selected
+            is_selected = room_index in self.selected_set if self.multi_select else room_index == self.selected
             color = (255, 220, 120) if is_selected else (255, 255, 255)
-            text = self.font.render(self.rooms[room_index], True, color)
+
+            label = self.rooms[room_index]
+            if self.multi_select:
+                label = ("[x] " if is_selected else "[ ] ") + label
+
+            text = self.font.render(label, True, color)
 
             screen.blit(text, (rect.x + 8, rect.centery - text.get_height() / 2))
 

@@ -4,12 +4,13 @@ import os
 import pygame
 
 from core.world.dungeon import DEFAULT_GRID_SAVE_PATH, Dungeon
+from core.world.assembly import generate_assembly
 from core.editor.ui import ToolPaletteUI
 from core.engine.gamestate import GameState
 from core.engine.room_manager import RoomManager
 from core.engine.camera import Camera
 from core.data.ressources import FLOOR
-from core.editor.ui import ObjectPalette, RoomPanelUI
+from core.editor.ui import GeneratorPanelUI, ObjectPalette, RoomPanelUI
 from core.editor.tools import ObjectTool
 
 class Creator:
@@ -28,6 +29,8 @@ class Creator:
         self.dungeon.load_from_json(self.current_room)
         self.palette = ToolPaletteUI()
         self.room_panel = RoomPanelUI(self.room_manager)
+        self.generator_panel = GeneratorPanelUI(self.room_manager)
+        self.last_assembly = None
 
         self.object_type = "spawn" # Type d'objet par défaut
         self.object_palette = ObjectPalette()
@@ -94,6 +97,22 @@ class Creator:
             self.room_manager.delete(name)
             if self.current_room == name:
                 self.current_room = None
+
+        self.generator_panel.refresh_rooms()
+
+    def _apply_generation(self, request):
+        room_names, room_count = request
+
+        assembly = generate_assembly(room_names, room_count)
+
+        if assembly is None:
+            self.generator_panel.status_text = "Aucune salle avec spawn + sortie dans la selection."
+            return
+
+        self.last_assembly = assembly
+        self.generator_panel.status_text = (
+            f"{len(assembly.rooms)} salle(s) sur {len(assembly.floors())} etage(s)."
+        )
 
     def _find_indicator_at(self, mouse_pos):
         mx, my = mouse_pos
@@ -175,15 +194,20 @@ class Creator:
 
                 if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP):
 
-                    panel_click = (
-                        event.type == pygame.MOUSEBUTTONDOWN
-                        and self.room_panel.contains(event.pos)
+                    panel_click = event.type == pygame.MOUSEBUTTONDOWN and (
+                        self.room_panel.contains(event.pos)
+                        or self.generator_panel.contains(event.pos)
                     )
 
                     room_action = self.room_panel.handle_event(event)
 
                     if room_action is not None:
                         self._apply_room_action(room_action)
+
+                    generation_request = self.generator_panel.handle_event(event)
+
+                    if generation_request is not None:
+                        self._apply_generation(generation_request)
 
                     if panel_click:
                         continue
@@ -390,6 +414,7 @@ class Creator:
                 self.screen.blit(sprite, rect)
             self.object_palette.render(self.screen)
             self.room_panel.render(self.screen)
+            self.generator_panel.render(self.screen)
 
             pygame.display.flip()
 

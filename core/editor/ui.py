@@ -309,3 +309,121 @@ class RoomPanelUI:
             text,
             (self.confirm_rect.centerx - text.get_width() / 2, self.confirm_rect.centery - text.get_height() / 2),
         )
+
+
+# ---------------------------------------------------------------------
+# Generator panel (procedural assembler)
+# ---------------------------------------------------------------------
+
+
+class GeneratorPanelUI:
+    """Procedural assembler settings: which rooms to draw from, how many to assemble, and a Generer button."""
+
+    STEP_BUTTON_SIZE = 32
+    COUNT_DISPLAY_WIDTH = 60
+    PANEL_WIDTH = 240
+    MIN_COUNT = 1
+    MAX_COUNT = 20
+
+    def __init__(self, room_manager, x=460, y=260):
+
+        self.room_manager = room_manager
+        self.x = x
+        self.y = y
+
+        self.border = BorderManager()
+        self.font = pygame.font.SysFont("arial", 16)
+        self.title_font = pygame.font.SysFont("arial", 18)
+
+        self.room_count = 3
+
+        self.pool_browser = RoomBrowser(x, y + 26, width=self.PANEL_WIDTH, multi_select=True)
+        self.pool_browser.set_rooms(self.room_manager.scan(), preselect_all=True)
+
+        stepper_y = self.pool_browser.y + self.pool_browser.height + 10
+        self.minus_rect = pygame.Rect(x, stepper_y, self.STEP_BUTTON_SIZE, self.STEP_BUTTON_SIZE)
+        self.count_rect = pygame.Rect(
+            self.minus_rect.right + 4, stepper_y, self.COUNT_DISPLAY_WIDTH, self.STEP_BUTTON_SIZE
+        )
+        self.plus_rect = pygame.Rect(self.count_rect.right + 4, stepper_y, self.STEP_BUTTON_SIZE, self.STEP_BUTTON_SIZE)
+
+        self.generate_rect = pygame.Rect(x, stepper_y + self.STEP_BUTTON_SIZE + 10, self.PANEL_WIDTH, 36)
+
+        self.status_text = ""
+
+    def refresh_rooms(self):
+        """Call when the room list on disk may have changed (e.g. after a save/delete)."""
+        previously_selected = set(self.pool_browser.selected_names)
+        self.pool_browser.set_rooms(self.room_manager.scan())
+        self.pool_browser.selected_set = {
+            i for i, name in enumerate(self.pool_browser.rooms) if name in previously_selected
+        }
+
+    def contains(self, pos):
+        return (
+            self.pool_browser.contains(pos)
+            or self.minus_rect.collidepoint(pos)
+            or self.plus_rect.collidepoint(pos)
+            or self.generate_rect.collidepoint(pos)
+        )
+
+    def handle_event(self, event):
+        """Returns (room_names, room_count) once "Generer" is clicked with a non-empty pool, else None."""
+
+        self.pool_browser.handle_event(event)
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+
+            if self.minus_rect.collidepoint(event.pos):
+                self.room_count = max(self.MIN_COUNT, self.room_count - 1)
+
+            elif self.plus_rect.collidepoint(event.pos):
+                self.room_count = min(self.MAX_COUNT, self.room_count + 1)
+
+            elif self.generate_rect.collidepoint(event.pos):
+                room_names = self.pool_browser.selected_names
+                if room_names:
+                    return (room_names, self.room_count)
+
+        return None
+
+    def render(self, screen):
+
+        title = self.title_font.render("Generation procedurale", True, (255, 255, 255))
+        screen.blit(title, (self.x, self.y))
+
+        self.pool_browser.render(screen)
+
+        self.border.draw(screen, self.minus_rect)
+        minus_text = self.font.render("-", True, (255, 255, 255))
+        screen.blit(
+            minus_text,
+            (self.minus_rect.centerx - minus_text.get_width() / 2, self.minus_rect.centery - minus_text.get_height() / 2),
+        )
+
+        self.border.draw(screen, self.count_rect)
+        count_text = self.font.render(str(self.room_count), True, (255, 255, 255))
+        screen.blit(
+            count_text,
+            (self.count_rect.centerx - count_text.get_width() / 2, self.count_rect.centery - count_text.get_height() / 2),
+        )
+
+        self.border.draw(screen, self.plus_rect)
+        plus_text = self.font.render("+", True, (255, 255, 255))
+        screen.blit(
+            plus_text,
+            (self.plus_rect.centerx - plus_text.get_width() / 2, self.plus_rect.centery - plus_text.get_height() / 2),
+        )
+
+        self.border.draw(screen, self.generate_rect)
+        enabled = bool(self.pool_browser.selected_names)
+        color = (255, 255, 255) if enabled else (110, 110, 110)
+        gen_text = self.font.render("Generer", True, color)
+        screen.blit(
+            gen_text,
+            (self.generate_rect.centerx - gen_text.get_width() / 2, self.generate_rect.centery - gen_text.get_height() / 2),
+        )
+
+        if self.status_text:
+            status = self.font.render(self.status_text, True, (200, 200, 200))
+            screen.blit(status, (self.x, self.generate_rect.bottom + 8))
