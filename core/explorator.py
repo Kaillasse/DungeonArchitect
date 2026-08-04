@@ -39,8 +39,23 @@ class Explorator:
         if not self.load_spawn_room():
             print("Aucune salle avec un spawn n'a été trouvée.")
 
+        self._position_player_at_spawn()
+
+        # -----------------------------
+        # Camera
+        # -----------------------------
+
+        self.camera = Camera(zoom=1.0)
+
+        self.clock = pygame.time.Clock()
+
+    def open_room(self, name):
+        """Load a specific room (chosen from the menu) and spawn the player in it."""
+        self.dungeon.load_from_json(name)
+        self._position_player_at_spawn()
+
+    def _position_player_at_spawn(self):
         spawn = self.dungeon.get_spawn_world_position()
-        print("spawn =", spawn)
 
         if spawn is None:
             print("Spawn invalide.")
@@ -50,16 +65,7 @@ class Explorator:
             )
 
         self.player.position.update(*spawn)
-        print("player =", self.player.position)
 
-        # -----------------------------
-        # Camera
-        # -----------------------------
-
-        self.camera = Camera(zoom=1.0)
-
-        self.clock = pygame.time.Clock()
-        
     def load_spawn_room(self):
 
         rooms = sorted(ROOMS_DIRECTORY.glob("*.json"))
