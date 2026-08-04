@@ -19,6 +19,7 @@ OBJECT_TYPES = {
         "size": (1, 1),
         "frames": 3,
         "linkable": True,
+        "walkable": True,
     },
     "gate": {
         "asset": "tiles/gateopenclose.png",
@@ -26,6 +27,7 @@ OBJECT_TYPES = {
         "size": (1, 1),
         "frames": 8,
         "linkable": True,
+        "blocks_until_open": True,
     },
     "wall": {
         "asset": "tiles/wallopenclose.png",
@@ -33,12 +35,15 @@ OBJECT_TYPES = {
         "size": (2, 1),
         "frames": 7,
         "linkable": True,
+        "blocks_until_open": True,
     },
     "torch": {
         "asset": "tiles/Torch Yellow.png",
         "placement": "wall",
         "size": (1, 1),
         "frames": 8,
+        "walkable": True,
+        "draw_after_player": True,
         # Wall-mounted variants: chosen at placement time from which side
         # of the wall the room's floor is on (see ObjectManager._torch_variant).
         "variants": {
@@ -82,6 +87,8 @@ def load_object_frames(object_type, variant=None):
 class ObjectManager:
     """Owns the placed-object list and the rules for placing them. The grid/size data it needs belongs to the Dungeon it's attached to."""
 
+    ANIM_SPEED = 0.12  # seconds per frame, matches the editor palette's hover animation
+
     def __init__(self, dungeon):
         self.dungeon = dungeon
         self.objects = []
@@ -119,6 +126,61 @@ class ObjectManager:
 
     def is_linkable(self, object_type):
         return OBJECT_TYPES[object_type].get("linkable", False)
+
+    def is_cell_walkable(self, grid_x, grid_y):
+        if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
+            return False
+
+        obj = self.get_object_at(grid_x, grid_y)
+
+        if obj is not None:
+            config = OBJECT_TYPES[obj["type"]]
+            if config.get("blocks_until_open"):
+                return obj.get("open", False)
+            if config.get("walkable"):
+                return True
+
+        return self.dungeon.logical_grid[grid_y][grid_x] != WALL
+
+    def check_button_trigger(self, grid_x, grid_y):
+        """Call every frame the player occupies (grid_x, grid_y); no-ops unless a fresh button is there."""
+        obj = self.get_object_at(grid_x, grid_y)
+
+        if obj is None or obj["type"] != "button" or obj.get("activated"):
+            return
+
+        obj["activated"] = True
+        obj["frame"] = 0
+        obj["anim_timer"] = 0.0
+
+        for link_target in obj.get("links", []):
+            target = self.get_object_at(link_target["x"], link_target["y"])
+
+            if target is not None and OBJECT_TYPES[target["type"]].get("blocks_until_open") and not target.get("open"):
+                target["open"] = True
+                target["frame"] = 0
+                target["anim_timer"] = 0.0
+
+    def update(self, dt):
+        """Advance animation for any activated/open object, holding on its last frame once reached."""
+        for obj in self.objects:
+            if not (obj.get("activated") or obj.get("open")):
+                continue
+
+            last_frame = OBJECT_TYPES[obj["type"]]["frames"] - 1
+            frame = obj.get("frame", 0)
+
+            if frame >= last_frame:
+                continue
+
+            timer = obj.get("anim_timer", 0.0) + dt
+
+            while timer >= self.ANIM_SPEED and frame < last_frame:
+                timer -= self.ANIM_SPEED
+                frame += 1
+
+            obj["frame"] = frame
+            obj["anim_timer"] = timer
 
     def link(self, obj_a, obj_b):
         """Symmetric link between two linkable objects (e.g. a button and the gate/wall it opens)."""

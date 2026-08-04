@@ -17,10 +17,10 @@ class WorldRenderer:
         self._tile_cache = {}
         self._object_sprites = {}
 
-    def _get_object_sprite(self, object_type, variant=None):
+    def _get_object_frames(self, object_type, variant=None):
         cache_key = (object_type, variant)
         if cache_key not in self._object_sprites:
-            self._object_sprites[cache_key] = load_object_frames(object_type, variant)[0]
+            self._object_sprites[cache_key] = load_object_frames(object_type, variant)
         return self._object_sprites[cache_key]
 
     def _get_scaled_tile(self, tile_index, zoom, tile_px, columns):
@@ -30,8 +30,7 @@ class WorldRenderer:
             self._tile_cache[cache_key] = pygame.transform.scale(tile_surface, (tile_px, tile_px))
         return self._tile_cache[cache_key]
 
-    def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False):
-        hide_object_types = hide_object_types or ()
+    def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False, skip_foreground_objects=False):
         zoom = camera.zoom
         tile_size = dungeon.tile_size
         tile_px = tile_size * zoom
@@ -49,29 +48,11 @@ class WorldRenderer:
                 screen_x, screen_y = camera.world_to_screen(world_x, world_y)
                 screen.blit(scaled, (screen_x, screen_y))
 
-        for obj in dungeon.object_manager.objects:
-            if obj["type"] in hide_object_types:
-                continue
-
-            sprite = self._get_object_sprite(obj["type"], obj.get("variant"))
-
-            size_cells_x, size_cells_y = OBJECT_TYPES[obj["type"]]["size"]
-            size = (
-                int(size_cells_x * tile_size * zoom),
-                int(size_cells_y * tile_size * zoom),
-            )
-            scaled_sprite = pygame.transform.scale(sprite, size)
-
-            wx, wy = dungeon.grid_to_world(obj["x"], obj["y"])
-            sx, sy = camera.world_to_screen(wx, wy)
-
-            screen.blit(
-                scaled_sprite,
-                (
-                    sx - scaled_sprite.get_width() / 2,
-                    sy - scaled_sprite.get_height(),
-                ),
-            )
+        self._draw_objects(
+            screen, dungeon, camera,
+            hide_object_types=hide_object_types,
+            skip_foreground=skip_foreground_objects,
+        )
 
         for gy in range(dungeon.height + 1):
             world_y = gy * tile_size
@@ -100,6 +81,48 @@ class WorldRenderer:
 
         if show_link_indicators:
             self._draw_link_indicators(screen, dungeon, camera)
+
+    def render_foreground_objects(self, screen, dungeon, camera, hide_object_types=None):
+        """Objects flagged draw_after_player (e.g. torch) -- call this after drawing the player sprite."""
+        self._draw_objects(screen, dungeon, camera, hide_object_types=hide_object_types, foreground_only=True)
+
+    def _draw_objects(self, screen, dungeon, camera, hide_object_types=None, foreground_only=False, skip_foreground=False):
+        hide_object_types = hide_object_types or ()
+        zoom = camera.zoom
+        tile_size = dungeon.tile_size
+
+        for obj in dungeon.object_manager.objects:
+            if obj["type"] in hide_object_types:
+                continue
+
+            is_foreground = OBJECT_TYPES[obj["type"]].get("draw_after_player", False)
+
+            if foreground_only and not is_foreground:
+                continue
+
+            if skip_foreground and is_foreground:
+                continue
+
+            frames = self._get_object_frames(obj["type"], obj.get("variant"))
+            sprite = frames[min(obj.get("frame", 0), len(frames) - 1)]
+
+            size_cells_x, size_cells_y = OBJECT_TYPES[obj["type"]]["size"]
+            size = (
+                int(size_cells_x * tile_size * zoom),
+                int(size_cells_y * tile_size * zoom),
+            )
+            scaled_sprite = pygame.transform.scale(sprite, size)
+
+            wx, wy = dungeon.grid_to_world(obj["x"], obj["y"])
+            sx, sy = camera.world_to_screen(wx, wy)
+
+            screen.blit(
+                scaled_sprite,
+                (
+                    sx - scaled_sprite.get_width() / 2,
+                    sy - scaled_sprite.get_height(),
+                ),
+            )
 
     def _draw_link_indicators(self, screen, dungeon, camera):
         for obj in dungeon.object_manager.objects:

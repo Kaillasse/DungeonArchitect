@@ -2,7 +2,7 @@ from core.world.object_manager import ObjectManager
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
 from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
-from core.editor.autotile import EMPTY, FLOOR, WALL, build_walls, erase_at, resolve_sprite_grid
+from core.editor.autotile import EMPTY, FLOOR, build_walls, erase_at, resolve_sprite_grid
 
 
 DEFAULT_GRID_SAVE_PATH = "room_001"
@@ -44,6 +44,9 @@ class Dungeon:
             self.logical_grid[grid_y][grid_x] = FLOOR
         self.rebuild()
         self.object_manager.prune_invalid()
+
+    def update(self, dt: float) -> None:
+        self.object_manager.update(dt)
 
     # ------------------------------------------------------------------
     # Sauvegarde
@@ -100,15 +103,7 @@ class Dungeon:
             grid_x = x // self.tile_size
             grid_y = y // self.tile_size
 
-            if (
-                grid_x < 0
-                or grid_y < 0
-                or grid_x >= self.width
-                or grid_y >= self.height
-            ):
-                return False
-
-            if self.logical_grid[grid_y][grid_x] == WALL:
+            if not self.object_manager.is_cell_walkable(grid_x, grid_y):
                 return False
 
         return True
@@ -117,10 +112,15 @@ class Dungeon:
     # Rendu
     # ------------------------------------------------------------------
 
-    def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False):
+    def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False, skip_foreground_objects=False):
         self.renderer.render(
             screen, self, camera,
             spawn_preview=spawn_preview,
             hide_object_types=hide_object_types,
             show_link_indicators=show_link_indicators,
+            skip_foreground_objects=skip_foreground_objects,
         )
+
+    def render_foreground(self, screen, camera, hide_object_types=None):
+        """Objects flagged draw_after_player (e.g. torch), meant to be drawn after the player sprite."""
+        self.renderer.render_foreground_objects(screen, self, camera, hide_object_types=hide_object_types)

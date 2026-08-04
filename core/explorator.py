@@ -164,6 +164,19 @@ class Explorator:
         self.player.update(dt)
 
         # -----------------------------
+        # Boutons / portes
+        # -----------------------------
+
+        self.dungeon.update(dt)
+
+        hitbox = self.player.get_hitbox()
+        player_grid_x, player_grid_y = self.dungeon.world_to_grid(
+            hitbox.centerx,
+            hitbox.bottom - 1,
+        )
+        self.dungeon.object_manager.check_button_trigger(player_grid_x, player_grid_y)
+
+        # -----------------------------
         # Camera suit le joueur
         # -----------------------------
 
@@ -184,11 +197,18 @@ class Explorator:
             self.screen,
             self.camera,
             hide_object_types={"spawn"},
+            skip_foreground_objects=True,
         )
 
         self.player.draw(
             self.screen,
             self.camera,
+        )
+
+        self.dungeon.render_foreground(
+            self.screen,
+            self.camera,
+            hide_object_types={"spawn"},
         )
 
         pygame.display.flip()
