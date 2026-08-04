@@ -83,7 +83,7 @@ class WorldRenderer:
             self._draw_link_indicators(screen, dungeon, camera)
 
     def render_foreground_objects(self, screen, dungeon, camera, hide_object_types=None):
-        """Objects flagged draw_after_player (e.g. torch) -- call this after drawing the player sprite."""
+        """Objects ObjectManager.is_foreground_object() flags (e.g. an L/R torch) -- call this after drawing the player sprite."""
         self._draw_objects(screen, dungeon, camera, hide_object_types=hide_object_types, foreground_only=True)
 
     def _draw_objects(self, screen, dungeon, camera, hide_object_types=None, foreground_only=False, skip_foreground=False):
@@ -95,7 +95,7 @@ class WorldRenderer:
             if obj["type"] in hide_object_types:
                 continue
 
-            is_foreground = OBJECT_TYPES[obj["type"]].get("draw_after_player", False)
+            is_foreground = dungeon.object_manager.is_foreground_object(obj)
 
             if foreground_only and not is_foreground:
                 continue

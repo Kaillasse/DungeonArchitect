@@ -42,10 +42,12 @@ OBJECT_TYPES = {
         "placement": "wall",
         "size": (1, 1),
         "frames": 8,
-        "walkable": True,
-        "draw_after_player": True,
         # Wall-mounted variants: chosen at placement time from which side
-        # of the wall the room's floor is on (see ObjectManager._torch_variant).
+        # of the wall the room's floor is on (see ObjectManager._wall_variant).
+        # Only the L/R variants are walkable/drawn in front of the player
+        # (ObjectManager.is_foreground_object) -- a straight torch sits on a
+        # plain back wall, and walking through it would mean walking through
+        # that wall.
         "variants": {
             "L": "tiles/Torch Yellow L.png",
             "R": "tiles/Torch Yellow R.png",
@@ -56,6 +58,7 @@ OBJECT_TYPES = {
         "placement": "floor",
         "size": (1, 1),
         "frames": 16,
+        "blocks_movement": True,
     },
 }
 OBJECT_LIST = [
@@ -119,13 +122,19 @@ class ObjectManager:
         return True
 
     def get_object_at(self, grid_x, grid_y):
+        """The object whose footprint (OBJECT_TYPES[type]["size"]) covers this cell -- not just its origin, so a 2-wide "wall" is found from either cell it occupies."""
         for obj in self.objects:
-            if obj["x"] == grid_x and obj["y"] == grid_y:
+            size_x, size_y = OBJECT_TYPES[obj["type"]]["size"]
+            if obj["x"] <= grid_x < obj["x"] + size_x and obj["y"] <= grid_y < obj["y"] + size_y:
                 return obj
         return None
 
     def is_linkable(self, object_type):
         return OBJECT_TYPES[object_type].get("linkable", False)
+
+    def is_foreground_object(self, obj):
+        """Drawn after (in front of) the player, and walkable despite sitting on a WALL cell -- currently just L/R wall-mounted torches; a straight torch stays a plain blocking wall decoration."""
+        return obj["type"] == "torch" and obj.get("variant") in ("L", "R")
 
     def is_cell_walkable(self, grid_x, grid_y):
         if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
@@ -135,9 +144,14 @@ class ObjectManager:
 
         if obj is not None:
             config = OBJECT_TYPES[obj["type"]]
+
+            if config.get("blocks_movement"):
+                return False
+
             if config.get("blocks_until_open"):
                 return obj.get("open", False)
-            if config.get("walkable"):
+
+            if config.get("walkable") or self.is_foreground_object(obj):
                 return True
 
         return self.dungeon.logical_grid[grid_y][grid_x] != WALL
