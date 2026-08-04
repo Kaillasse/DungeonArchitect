@@ -168,15 +168,25 @@ class RoomBrowser:
     def height(self):
         return self.ROW_HEIGHT * self.VISIBLE_ROWS
 
+    @staticmethod
+    def _label(entry):
+        """Entries are either a plain string, or a (label, value) tuple -- e.g. to
+        distinguish two kinds of entry (room vs. donjon) sharing one list."""
+        return entry[0] if isinstance(entry, tuple) else entry
+
+    @staticmethod
+    def _value(entry):
+        return entry[1] if isinstance(entry, tuple) else entry
+
     @property
     def selected_name(self):
         if self.selected is None or self.selected >= len(self.rooms):
             return None
-        return self.rooms[self.selected]
+        return self._value(self.rooms[self.selected])
 
     @property
     def selected_names(self):
-        return [name for i, name in enumerate(self.rooms) if i in self.selected_set]
+        return [self._value(entry) for i, entry in enumerate(self.rooms) if i in self.selected_set]
 
     def set_rooms(self, rooms, preselect_all=False):
         self.rooms = list(rooms)
@@ -267,7 +277,7 @@ class RoomBrowser:
             is_selected = room_index in self.selected_set if self.multi_select else room_index == self.selected
             color = (255, 220, 120) if is_selected else (255, 255, 255)
 
-            label = self.rooms[room_index]
+            label = self._label(self.rooms[room_index])
             if self.multi_select:
                 label = ("[x] " if is_selected else "[ ] ") + label
 

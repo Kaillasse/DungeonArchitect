@@ -6,6 +6,7 @@ import pygame
 
 from core.ui import BorderManager, RoomBrowser
 from core.world.object_manager import OBJECT_LIST, load_object_frames
+from core.data.ressources import list_donjons
 
 # ---------------------------------------------------------------------
 # Tool palette
@@ -239,6 +240,13 @@ class RoomPanelUI:
 
     def _open(self, mode):
         self.mode = mode
+
+        if mode == "load":
+            entries = [(f"[Salle] {name}", ("room", name)) for name in self.room_manager.scan()]
+            entries += [(f"[Donjon] {name}", ("donjon", name)) for name in list_donjons()]
+            self.browser.set_rooms(entries)
+            return
+
         rooms = self.room_manager.scan()
         if mode == "save":
             rooms = [self.NEW_ROOM_LABEL] + rooms
