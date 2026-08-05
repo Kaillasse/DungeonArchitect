@@ -101,7 +101,7 @@ class Dungeon:
         self.animal_manager.update(dt, player_hitbox=player_hitbox)
         self.enemy_manager.update(dt, player=player, player_hitbox=player_hitbox)
         self.pickup_manager.update(dt)
-        self.projectile_manager.update(dt)
+        self.projectile_manager.update(dt, player=player, player_hitbox=player_hitbox)
 
     def destroy_area(self, center_x: int, center_y: int, radius_tiles: int) -> None:
         """Carves a circular hole into the terrain -- both FLOOR and WALL

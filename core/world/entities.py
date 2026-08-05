@@ -422,6 +422,12 @@ class Animal(_WanderingEntity):
     HITBOX_WIDTH = 14
     HITBOX_HEIGHT = 8
 
+    # A tuning default, not from any design doc (mirrors ENEMY_STATS' own
+    # comment) -- animals have no death animation, so unlike Enemy this is
+    # the only thing standing between "hit" and "gone" (see take_damage/
+    # AnimalManager.update's dead-animal filter).
+    HEALTH = 2
+
     def __init__(self, animal_type, grid_x, grid_y, dungeon):
         self.animal_type = animal_type
         self.frames = load_animal_frames(animal_type)
@@ -436,7 +442,20 @@ class Animal(_WanderingEntity):
         self.animation_timer = 0
         self.state_timer = random.uniform(*self.IDLE_DURATION)
 
+        self.health = self.HEALTH
+        self.alive = True
+
         self._render_cache = {}
+
+    def take_damage(self, amount):
+        """No "damaged"/"death" states or animation like Enemy -- an animal
+        that runs out of health just disappears (see AnimalManager.update's
+        dead-animal filter), there's nothing else to play out."""
+        if not self.alive:
+            return
+        self.health -= amount
+        if self.health <= 0:
+            self.alive = False
 
     def update(self, dt, is_walkable):
         self.state_timer -= dt
@@ -503,6 +522,9 @@ class AnimalManager:
                 dt,
                 lambda rect, _animal=animal: self._is_free(rect, _animal, player_hitbox),
             )
+        # No death animation to play out (unlike Enemy) -- a dead animal
+        # just disappears the moment its health runs out.
+        self.animals = [animal for animal in self.animals if animal.alive]
 
     def draw(self, screen, camera):
         for animal in self.animals:
@@ -877,6 +899,7 @@ class ThrownDynamite:
     THROW_SPEED = 220  # pixels/second
     FRAME_DURATION = 0.15  # seconds per frame -- 4 frames = 0.6s flight
     BLAST_RADIUS_TILES = 2
+    BLAST_DAMAGE = 1  # dealt to the player and any live Animal/Enemy in range
 
     def __init__(self, world_x, world_y, direction):
         self.position = pygame.Vector2(world_x, world_y)
@@ -987,18 +1010,44 @@ class ProjectileManager:
     def throw_dynamite(self, world_x, world_y, direction):
         self.dynamites.append(ThrownDynamite(world_x, world_y, direction))
 
-    def update(self, dt):
+    def update(self, dt, player=None, player_hitbox=None):
         for dynamite in self.dynamites:
             dynamite.update(dt)
             if dynamite.exploded:
                 grid_x, grid_y = self.dungeon.world_to_grid(dynamite.position.x, dynamite.position.y)
                 self.dungeon.destroy_area(grid_x, grid_y, dynamite.BLAST_RADIUS_TILES)
+                self._apply_blast_damage(dynamite, player, player_hitbox)
                 self.explosions.append(Explosion(dynamite.position.x, dynamite.position.y))
         self.dynamites = [dynamite for dynamite in self.dynamites if not dynamite.exploded]
 
         for explosion in self.explosions:
             explosion.update(dt)
         self.explosions = [explosion for explosion in self.explosions if not explosion.finished]
+
+    def _apply_blast_damage(self, dynamite, player, player_hitbox):
+        """Deals dynamite.BLAST_DAMAGE to the player (if in this room right
+        now -- player_hitbox is None otherwise, see Dungeon.update) and every
+        live Animal/Enemy in this room, whenever their hitbox center falls
+        within the same circular radius destroy_area just carved into the
+        terrain. No immunity for whoever threw it -- standing too close to
+        your own blast hurts just the same."""
+        radius_px = dynamite.BLAST_RADIUS_TILES * self.dungeon.tile_size
+
+        def _in_blast(hitbox):
+            dx = hitbox.centerx - dynamite.position.x
+            dy = hitbox.centery - dynamite.position.y
+            return dx * dx + dy * dy <= radius_px * radius_px
+
+        if player_hitbox is not None and _in_blast(player_hitbox):
+            player.take_damage(dynamite.BLAST_DAMAGE)
+
+        for animal in self.dungeon.animal_manager.animals:
+            if animal.alive and _in_blast(animal.get_hitbox()):
+                animal.take_damage(dynamite.BLAST_DAMAGE)
+
+        for enemy in self.dungeon.enemy_manager.enemies:
+            if enemy.alive and _in_blast(enemy.get_hitbox()):
+                enemy.take_damage(dynamite.BLAST_DAMAGE)
 
     def draw(self, screen, camera):
         for dynamite in self.dynamites:

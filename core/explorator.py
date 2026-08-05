@@ -510,7 +510,12 @@ class Explorator:
             if self.assembly is not None:
                 self._update_current_room()
 
-            if self._is_void(self.player.get_hitbox()):
+            # Suppressed mid-jump so the player can actually clear a gap by
+            # jumping over it instead of falling the instant their feet pass
+            # over void while airborne -- the check resumes the very next
+            # frame the one-shot jump animation ends (Player.action reverts
+            # to None on its own), so landing on void still falls normally.
+            if self.player.action != "jump" and self._is_void(self.player.get_hitbox()):
                 self._attempt_fall()
 
             # -----------------------------
