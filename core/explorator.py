@@ -218,17 +218,34 @@ class Explorator:
         printed message identifying which candidate move (e.g. "x"/"y") this
         check was for, so a blocked move's cause (wall vs. animal/enemy) shows
         up in the console instead of only being inferred from what's on
-        screen."""
-        if self.assembly is not None:
-            if not self.assembly.is_rect_walkable(
-                rect, self.current_placed_room.floor, prefer_room=self.current_placed_room
-            ):
-                self._debug_log(debug_label, "wall")
-                return False
-        else:
-            if not self.dungeon.is_rect_walkable(rect):
-                self._debug_log(debug_label, "wall")
-                return False
+        screen.
+
+        Checks each of the 4 corners individually (not a single aggregate
+        is_rect_walkable call) so a corner that has crossed into void (see
+        _is_void_at) is treated as passable right there, instead of only
+        being excused by a single center-anchored point elsewhere. That old
+        approach (a plain "is_rect_walkable(rect) or self._is_void(rect)" in
+        update()) tested rect.centerx/rect.bottom-1 for void -- a point that
+        lags behind the hitbox's leading edge by up to half its width/height
+        while moving, so a corner could already be sitting past a room
+        boundary or an open gate (making is_rect_walkable False) while the
+        center hadn't crossed yet (making the old is_void check also False)
+        -- deadlocking the player exactly at that edge, indistinguishable
+        from a real wall. Checking void at the same per-corner granularity as
+        the wall check removes that gap entirely."""
+        tile_size = Dungeon.TILE_SIZE
+        corners = (
+            (rect.left, rect.top),
+            (rect.right - 1, rect.top),
+            (rect.left, rect.bottom - 1),
+            (rect.right - 1, rect.bottom - 1),
+        )
+        for x, y in corners:
+            grid_x, grid_y = x // tile_size, y // tile_size
+            if self._is_void_at(grid_x, grid_y) or self._is_cell_walkable(grid_x, grid_y):
+                continue
+            self._debug_log(debug_label, "wall")
+            return False
 
         for animal, animal_rect in self._visible_animals_global():
             if rect.colliderect(animal_rect):
@@ -242,6 +259,21 @@ class Explorator:
 
         self._last_debug_message = None  # unblocked -- next block (even the same reason) should log again
         return True
+
+    def _is_cell_walkable(self, grid_x, grid_y):
+        """Real wall/closed-door/etc. walkability for a single global cell on
+        the player's current floor -- ignores void (see _is_void_at, checked
+        separately by _is_walkable's caller) and other entities (also
+        checked separately), so it's exactly the "is there a real obstacle
+        here" half of the corner check."""
+        if self.assembly is not None:
+            room = self.assembly.locate_room(
+                grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
+            )
+            if room is None:
+                return False
+            return room.dungeon.object_manager.is_cell_walkable(grid_x - room.offset_x, grid_y - room.offset_y)
+        return self.dungeon.object_manager.is_cell_walkable(grid_x, grid_y)
 
     def _debug_log(self, label, reason):
         if not self.debug_mode or label is None:
@@ -390,18 +422,19 @@ class Explorator:
                 * dt
             )
 
-            # Void cells are traversable now (instead of a hard block) -- a
-            # single consolidated fall-check runs below, after both axes and
-            # the door transition, rather than blocking movement at the
-            # boundary of whatever room happens to own the active floor.
+            # Void cells are traversable now (instead of a hard block) -- see
+            # _is_walkable's per-corner void handling. A single consolidated
+            # fall-check runs below, after both axes and the door transition,
+            # rather than blocking movement at the boundary of whatever room
+            # happens to own the active floor.
             future_hitbox = self.player.get_hitbox()
             future_hitbox.x += movement.x
-            if self._is_walkable(future_hitbox, debug_label="x") or self._is_void(future_hitbox):
+            if self._is_walkable(future_hitbox, debug_label="x"):
                 self.player.position.x += movement.x
 
             future_hitbox = self.player.get_hitbox()
             future_hitbox.y += movement.y
-            if self._is_walkable(future_hitbox, debug_label="y") or self._is_void(future_hitbox):
+            if self._is_walkable(future_hitbox, debug_label="y"):
                 self.player.position.y += movement.y
 
             if self.assembly is not None:
