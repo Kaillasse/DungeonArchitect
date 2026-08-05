@@ -104,11 +104,18 @@ class Explorator:
         self.dungeon.spawn_animals()
         self.dungeon.spawn_enemies()
         self._position_player_at_spawn()
+        # The Player instance is reused across menu <-> exploration
+        # transitions (never recreated), so a death from the last run would
+        # otherwise leave health at 0 and trigger _game_over again on the
+        # very next frame -- reset it here, same idea as re-placing position
+        # at the spawn point above.
+        self.player.health = self.player.MAX_HEALTH
 
     def open_donjon(self, name):
         """Load a saved procedurally-assembled dungeon and spawn the player in its starting room."""
         self.assembly = load_assembly(name)
         self._last_door_obj = None
+        self.player.health = self.player.MAX_HEALTH
 
         for room in self.assembly.rooms:
             room.dungeon.spawn_animals()
@@ -314,7 +321,7 @@ class Explorator:
         free). No assembly (single-room mode) or nothing below at all: falls
         out of the map entirely."""
         if self.assembly is None:
-            self._fall_out_of_map()
+            self._game_over("Chute hors de la carte")
             return
 
         hitbox = self.player.get_hitbox()
@@ -330,13 +337,14 @@ class Explorator:
                 self.player.play_fall()
                 return
 
-        self._fall_out_of_map()
+        self._game_over("Chute hors de la carte")
 
-    def _fall_out_of_map(self):
-        """No floor anywhere below catches the fall -- game over. The real
-        "monde de base" (étage system) doesn't exist yet, so this returns to
-        the main Menu for now, same as ECHAP."""
-        print("[game] Chute hors de la carte -- retour au menu.")
+    def _game_over(self, reason):
+        """No floor anywhere below catches a fall, or the player's health
+        hit 0 -- either way, game over. The real "monde de base" (étage
+        system) doesn't exist yet, so this returns to the main Menu for now,
+        same as ECHAP."""
+        print(f"[game] {reason} -- retour au menu.")
         self.game_manager.state = GameState.MENU
 
     def _update_current_room(self):
@@ -551,6 +559,10 @@ class Explorator:
             )
             self.dungeon.object_manager.check_button_trigger(player_grid_x, player_grid_y)
 
+        if self.player.health <= 0:
+            self._game_over("Le joueur est mort")
+            return
+
         # -----------------------------
         # Camera suit le joueur
         # -----------------------------
@@ -747,7 +759,7 @@ class Explorator:
 
             self.update(dt)
 
-            # Only _fall_out_of_map() can change game_manager.state during
+            # Only _game_over() can change game_manager.state during
             # update() -- same clean exit TAB/ECHAP already do (no stale
             # frame rendered into a state we're about to leave).
             if self.game_manager.state != GameState.EXPLORATION:
