@@ -31,6 +31,9 @@ ACTIONS = (
     ("jump", "Sauter", {"kind": "key", "code": pygame.K_SPACE}, ("key", "mouse")),
     ("attack", "Attaquer", {"kind": "mouse", "button": 1}, ("key", "mouse")),
     ("interact", "Interagir", {"kind": "mouse", "button": 3}, ("key", "mouse")),
+    # One-shot like jump/attack/interact, but keyboard-only -- toggling a UI
+    # panel from a mouse button would be an odd default to offer.
+    ("inventory", "Inventaire", {"kind": "key", "code": pygame.K_e}, ("key",)),
 )
 
 ACTION_LABELS = {action_id: label for action_id, label, _, _ in ACTIONS}

@@ -8,6 +8,8 @@ from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player
 from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES
+from core.world.inventory import Inventory, Item
+from core.inventory_ui import InventoryPanel
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
 
@@ -65,6 +67,22 @@ class Explorator:
             print("Aucune salle avec un spawn n'a été trouvée.")
 
         self._position_player_at_spawn()
+
+        # -----------------------------
+        # Inventaire (overlay -- pas de GameState dédié, juste met le monde
+        # en pause pendant que le panel est affiché, voir update()/run())
+        # -----------------------------
+
+        self.inventory = Inventory()
+        # Objets de test TEMPORAIRES pour vérifier visuellement le panel --
+        # aucun système de loot/ramassage n'existe encore ; à retirer une
+        # fois qu'un vrai système d'objets existe.
+        self.inventory.main_slots["attack"] = Item("torch_test", "Torche (test)", "tiles/Torch Yellow.png")
+        self.inventory.grid_slots[0] = Item("vase_test", "Vase (test)", "tiles/Vase.png")
+        self.inventory.grid_slots[7] = Item("button_test", "Bouton (test)", "tiles/Button.png")
+
+        self.inventory_panel = InventoryPanel(self.inventory)
+        self.inventory_open = False
 
         # -----------------------------
         # Camera
@@ -236,6 +254,15 @@ class Explorator:
     # ------------------------------------------------------
 
     def update(self, dt):
+
+        if self.inventory_open:
+            # Monde entièrement en pause -- seule l'anim idle du joueur (pour
+            # la preview du panel) et le panel lui-même continuent de tourner.
+            if self.player.action is None:
+                self.player.animation = "idle"
+            self.player.update(dt)
+            self.inventory_panel.update(dt)
+            return
 
         keys = pygame.key.get_pressed()
 
@@ -439,6 +466,9 @@ class Explorator:
         if self.debug_mode:
             self._draw_debug_hitboxes()
 
+        if self.inventory_open:
+            self.inventory_panel.render(self.screen, self.player)
+
         pygame.display.flip()
 
     def _draw_debug_hitboxes(self):
@@ -484,6 +514,15 @@ class Explorator:
 
                     self.game_manager.running = False
                     running = False
+
+                elif event.type == pygame.KEYDOWN and self.settings.matches_event("inventory", event):
+                    self.inventory_open = not self.inventory_open
+
+                elif self.inventory_open and event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    self.inventory_open = False
+
+                elif self.inventory_open:
+                    continue  # avale tout le reste (clics, TAB, F3...) tant que le panel est ouvert
 
                 elif event.type == pygame.MOUSEWHEEL:
                     mouse_x, mouse_y = pygame.mouse.get_pos()
