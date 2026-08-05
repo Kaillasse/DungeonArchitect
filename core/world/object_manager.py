@@ -125,6 +125,35 @@ OBJECT_TYPES = {
         "frame_size": 32,
         "enemy": True,
     },
+    "lilchest": {
+        # 4 columns x 2 rows: row 0 idle/closed, row 1 the opening animation
+        # -- "frames" is the TOTAL flat count load_object_frames slices into
+        # (4 * 2 = 8), "rows" tells it to read both rows instead of just row
+        # 0 (see load_object_frames). A freshly-placed chest just sits at
+        # frame 0 (idle) forever until opened -- see
+        # ObjectManager.add_object seeding "loot"/"item_loot" from
+        # default_loot/default_item_loot below, and
+        # Explorator._interact_with_chest, which sets "open": True and
+        # "frame": 4 (the start of row 1) so ObjectManager.update's existing
+        # activated/open animation-advance takes it from there and holds on
+        # frame 7 (row 1's last frame) once open, exactly like any other
+        # blocks_until_open object.
+        "asset": "tiles/lilchest.png",
+        "placement": "floor",
+        "size": (1, 1),
+        "frames": 8,
+        "rows": 2,
+        "frame_size": 16,
+        "blocks_movement": True,
+        "chest": True,
+        # Reuses the indicator-dot rendering/hit-testing "linkable" already
+        # drives (Creator draws/hit-tests it identically), but a chest's dot
+        # opens ChestPanelUI instead of starting a link-drag -- see
+        # Creator's indicator-click handler, which checks is_chest() first.
+        "linkable": True,
+        "default_loot": {"gold": 5, "blue": 5},
+        "default_item_loot": {"dynamite": 2},
+    },
 }
 OBJECT_LIST = [
     "spawn",
@@ -139,6 +168,7 @@ OBJECT_LIST = [
     "sheep",
     "skeleton1",
     "skeleton2",
+    "lilchest",
 ]
 
 # Object types backed by a live, wandering entity (core.world.entities.Animal)
@@ -259,18 +289,29 @@ def make_item(item_id):
 
 
 def load_object_frames(object_type, variant=None):
-    """Slice an object's sprite sheet into its animation frames."""
+    """Slice an object's sprite sheet into its animation frames -- a flat
+    list, "frames" cells read left-to-right then row by row. Almost every
+    object type is a single row ("rows" defaults to 1, in which case this is
+    exactly the old behavior: "frames" columns from row 0). A chest-like
+    type with "rows": 2 instead has "frames" as the TOTAL count across both
+    rows (e.g. 8 for lilchest's 4-idle + 4-open sheet), so row 1 continues
+    the flat list right where row 0 left off -- obj["frame"] can then just
+    keep counting upward across the "seam" between rows without needing to
+    know rows exist at all (see OBJECT_TYPES["lilchest"])."""
     config = OBJECT_TYPES[object_type]
     asset_path = config.get("variants", {}).get(variant, config["asset"])
     asset = PROJECT_ROOT / "assets" / asset_path
     sheet = pygame.image.load(asset).convert_alpha()
 
     frame_size = config.get("frame_size", 24 if object_type == "spawn" else 16)
+    rows = config.get("rows", 1)
+    columns = config["frames"] // rows
 
     frames = []
-    for i in range(config["frames"]):
-        rect = pygame.Rect(i * frame_size, 0, frame_size, frame_size)
-        frames.append(sheet.subsurface(rect).copy())
+    for row in range(rows):
+        for col in range(columns):
+            rect = pygame.Rect(col * frame_size, row * frame_size, frame_size, frame_size)
+            frames.append(sheet.subsurface(rect).copy())
     return frames
 
 
@@ -347,6 +388,14 @@ class ObjectManager:
         if variant is not None:
             placed["variant"] = variant
 
+        config = OBJECT_TYPES[object_type]
+        if config.get("chest"):
+            # Own dict copies, not the OBJECT_TYPES default objects themselves
+            # -- ChestPanelUI mutates these per-placed-chest (see Creator),
+            # which must never leak back into the shared registry entry.
+            placed["loot"] = dict(config.get("default_loot", {}))
+            placed["item_loot"] = dict(config.get("default_item_loot", {}))
+
         self.objects.append(placed)
 
         return True
@@ -358,6 +407,13 @@ class ObjectManager:
             if obj["x"] <= grid_x < obj["x"] + size_x and obj["y"] <= grid_y < obj["y"] + size_y:
                 return obj
         return None
+
+    def is_chest(self, object_type):
+        """True for a chest-like type (currently just lilchest) -- its
+        indicator dot (drawn/hit-tested via is_linkable, which chest types
+        also set) opens ChestPanelUI in Creator instead of starting a
+        link-drag; see Creator's indicator-click handler."""
+        return OBJECT_TYPES[object_type].get("chest", False)
 
     def is_linkable(self, object_type):
         return OBJECT_TYPES[object_type].get("linkable", False)

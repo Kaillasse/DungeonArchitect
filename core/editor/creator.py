@@ -10,7 +10,7 @@ from core.engine.gamestate import GameState
 from core.engine.room_manager import RoomManager
 from core.engine.camera import Camera
 from core.data.ressources import FLOOR, next_new_donjon_name
-from core.editor.ui import GeneratorPanelUI, ObjectPalette, RoomPanelUI
+from core.editor.ui import GeneratorPanelUI, ObjectPalette, RoomPanelUI, ChestPanelUI
 from core.editor.tools import ObjectTool
 
 class Creator:
@@ -41,6 +41,10 @@ class Creator:
             self.room_manager,
             x=10,
             y=self.object_palette.y + self.object_palette.height + 20,
+        )
+        self.chest_panel = ChestPanelUI(
+            x=self.screen.get_width() / 2 - 130,
+            y=180,
         )
 
         self.painting = False
@@ -88,6 +92,7 @@ class Creator:
     def open_room(self, name):
         self.current_room = name
         self.last_assembly = None
+        self.chest_panel.close()
         self.dungeon.load_from_json(name)
 
     def open_donjon(self, name):
@@ -95,6 +100,7 @@ class Creator:
         self.last_assembly = load_assembly(name)
         self.assembly_active_floor = 0
         self.current_room = None
+        self.chest_panel.close()
 
     def _apply_room_action(self, action):
         mode, selection = action
@@ -196,6 +202,21 @@ class Creator:
             # -------------------------------------------------
 
             for event in pygame.event.get():
+
+                if self.chest_panel.is_open:
+                    # Fully modal -- every other tool/panel acts on
+                    # self.dungeon, which is exactly what the open chest
+                    # belongs to, so letting painting/saving/etc. run
+                    # "underneath" it would be confusing at best. QUIT must
+                    # still always work.
+                    if event.type == pygame.QUIT:
+                        running = False
+                        self.game_manager.running = False
+                        break
+                    if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
+                        self.chest_panel.handle_event(event)
+                    continue
+
                 self.object_tool.handle_event(event)
 
                 if event.type == pygame.MOUSEBUTTONDOWN:
@@ -259,8 +280,11 @@ class Creator:
 
                         if indicator_obj is not None:
 
-                            self.link_source = indicator_obj
-                            self.link_drag_pos = event.pos
+                            if self.dungeon.object_manager.is_chest(indicator_obj["type"]):
+                                self.chest_panel.open(indicator_obj)
+                            else:
+                                self.link_source = indicator_obj
+                                self.link_drag_pos = event.pos
                             continue
 
                         if self._is_valid_grid_cell(event.pos):
@@ -468,6 +492,7 @@ class Creator:
             self.object_palette.render(self.screen)
             self.room_panel.render(self.screen)
             self.generator_panel.render(self.screen)
+            self.chest_panel.render(self.screen)
 
             pygame.display.flip()
 

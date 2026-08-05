@@ -9,7 +9,7 @@ from core.world.dungeon import Dungeon, corner_cells
 from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player
-from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item
+from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES
 from core.world.inventory import Inventory, Item
 from core.inventory_ui import InventoryPanel
 from core.editor.autotile import EMPTY
@@ -87,6 +87,13 @@ class Explorator:
         self.inventory_panel = InventoryPanel(self.inventory)
         self.inventory_open = False
 
+        # The only win condition that exists right now (see
+        # _interact_with_chest): freezes gameplay and shows a victory banner
+        # once True, same "world paused, just an overlay" shape as
+        # inventory_open. No dedicated GameState -- ESC still returns to the
+        # menu normally from here.
+        self.victory = False
+
         # -----------------------------
         # Camera
         # -----------------------------
@@ -108,14 +115,18 @@ class Explorator:
         # transitions (never recreated), so a death from the last run would
         # otherwise leave health at 0 and trigger _game_over again on the
         # very next frame -- reset it here, same idea as re-placing position
-        # at the spawn point above.
+        # at the spawn point above. Same reasoning for victory (see
+        # _interact_with_chest) -- otherwise re-entering exploration would
+        # start right back on the frozen victory screen from last time.
         self.player.health = self.player.MAX_HEALTH
+        self.victory = False
 
     def open_donjon(self, name):
         """Load a saved procedurally-assembled dungeon and spawn the player in its starting room."""
         self.assembly = load_assembly(name)
         self._last_door_obj = None
         self.player.health = self.player.MAX_HEALTH
+        self.victory = False
 
         for room in self.assembly.rooms:
             room.dungeon.spawn_animals()
@@ -233,13 +244,28 @@ class Explorator:
 
     def _trigger_action(self, action_id):
         """Fires action_id's one-shot behavior -- normally just
-        Player.play_action, but "interact" is intercepted first when the
-        interact slot holds a throwable item (see _throw_interact_item), so
-        equipping dynamite there repurposes the interact input into a throw
-        instead of the plain interact animation."""
-        if action_id == "interact" and self._throw_interact_item():
+        Player.play_action, but "interact" is intercepted first for a chest
+        the player is facing (see _interact_with_chest), then for a
+        throwable item equipped in the interact slot (see
+        _throw_interact_item), either of which repurposes the interact input
+        instead of just playing the plain interact animation. A facing chest
+        wins over a held item -- interacting with the world takes priority
+        over the player's own inventory."""
+        if action_id == "interact" and (self._interact_with_chest() or self._throw_interact_item()):
             return
         self.player.play_action(action_id)
+
+    def _current_room_and_offset(self):
+        """(dungeon, offset_x, offset_y) for whichever room the player is
+        currently in -- offset is (0, 0) in single-room mode. Shared by
+        anything that needs to convert the player's (always-global)
+        position/hitbox into that room's own local coordinates, the same way
+        every other per-room live entity's position already works (see
+        _throw_interact_item/_interact_with_chest)."""
+        if self.assembly is not None:
+            room = self.current_placed_room
+            return room.dungeon, room.offset_x, room.offset_y
+        return self.dungeon, 0, 0
 
     def _throw_interact_item(self):
         """Returns True if the interact slot held a throwable item (see
@@ -260,16 +286,65 @@ class Explorator:
         dx, dy = Player.DIRECTION_VECTORS.get(self.player.direction, (0, 1))
         direction = pygame.Vector2(dx, dy)
 
-        if self.assembly is not None:
-            room = self.current_placed_room
-            tile_size = Dungeon.TILE_SIZE
-            local_x = self.player.position.x - room.offset_x * tile_size
-            local_y = self.player.position.y - room.offset_y * tile_size
-            room.dungeon.projectile_manager.throw_dynamite(local_x, local_y, direction)
-        else:
-            self.dungeon.projectile_manager.throw_dynamite(self.player.position.x, self.player.position.y, direction)
+        dungeon, offset_x, offset_y = self._current_room_and_offset()
+        tile_size = dungeon.tile_size
+        local_x = self.player.position.x - offset_x * tile_size
+        local_y = self.player.position.y - offset_y * tile_size
+        dungeon.projectile_manager.throw_dynamite(local_x, local_y, direction)
 
         self.player.play_action("interact")
+        return True
+
+    def _interact_with_chest(self):
+        """Returns True if the player was facing an unopened chest (e.g.
+        lilchest) within melee reach and interacted with it: starts its
+        opening animation (frame 4, the first frame of row 1 -- see
+        OBJECT_TYPES["lilchest"] -- ObjectManager.update takes it from there
+        and holds on the last frame once reached, same mechanism as any
+        other blocks_until_open object), spawns its configured currency/item
+        loot scattered around its own position, and triggers the victory
+        screen -- the only win condition that exists right now. Reuses the
+        player's own melee reach (get_attack_hitbox: their hitbox shifted one
+        tile in their facing direction) rather than a separate "interact
+        range", since a chest blocks movement (blocks_movement) so the player
+        can only ever be standing right next to it, never on top of it.
+        Returns False (no-op) if there's no such chest in reach or it's
+        already open, leaving _trigger_action to fall back to throwing/the
+        plain interact animation."""
+        dungeon, offset_x, offset_y = self._current_room_and_offset()
+        tile_size = dungeon.tile_size
+
+        reach_hitbox = self.player.get_attack_hitbox()
+        grid_x = int((reach_hitbox.centerx - offset_x * tile_size) // tile_size)
+        grid_y = int((reach_hitbox.centery - offset_y * tile_size) // tile_size)
+
+        obj = dungeon.object_manager.get_object_at(grid_x, grid_y)
+        if obj is None or not dungeon.object_manager.is_chest(obj["type"]) or obj.get("open"):
+            return False
+
+        obj["open"] = True
+        obj["frame"] = OBJECT_TYPES[obj["type"]]["frames"] // OBJECT_TYPES[obj["type"]]["rows"]
+        obj["anim_timer"] = 0.0
+
+        chest_x, chest_y = dungeon.grid_to_world(obj["x"], obj["y"])
+        for currency_type, count in obj.get("loot", {}).items():
+            for _ in range(count):
+                dungeon.pickup_manager.spawn(
+                    currency_type,
+                    chest_x + random.uniform(-12, 12),
+                    chest_y + random.uniform(-12, 12),
+                )
+        for item_id, count in obj.get("item_loot", {}).items():
+            for _ in range(count):
+                dungeon.pickup_manager.spawn_item(
+                    make_item(item_id),
+                    ITEM_DEFINITIONS[item_id]["slot"],
+                    chest_x + random.uniform(-12, 12),
+                    chest_y + random.uniform(-12, 12),
+                )
+
+        self.player.play_action("interact")
+        self.victory = True
         return True
 
     def _is_walkable(self, rect, debug_label=None):
@@ -457,6 +532,22 @@ class Explorator:
                 self.player.animation = "idle"
             self.player.update(dt)
             self.inventory_panel.update(dt)
+            return
+
+        if self.victory:
+            # Player input is frozen (no movement/combat), but the room
+            # itself keeps updating so the chest's own opening animation
+            # actually finishes playing instead of freezing mid-swing.
+            if self.player.action is None:
+                self.player.animation = "idle"
+            self.player.update(dt)
+            hitbox = self.player.get_hitbox()
+            if self.assembly is not None:
+                self.assembly.update(
+                    dt, player=self.player, player_hitbox=hitbox, player_floor=self.current_placed_room.floor
+                )
+            else:
+                self.dungeon.update(dt, player=self.player, player_hitbox=hitbox)
             return
 
         keys = pygame.key.get_pressed()
@@ -690,7 +781,24 @@ class Explorator:
         if self.inventory_open:
             self.inventory_panel.render(self.screen, self.player)
 
+        if self.victory:
+            self._draw_victory_banner()
+
         pygame.display.flip()
+
+    def _draw_victory_banner(self):
+        """The only win condition that exists right now (see
+        _interact_with_chest) -- a plain centered text overlay, no dedicated
+        art. Drawn every frame the flag stays set; ESC still returns to the
+        menu normally, same as any other time in Exploration."""
+        overlay = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 120))
+        self.screen.blit(overlay, (0, 0))
+
+        font = pygame.font.SysFont("arial", 64)
+        text = font.render("VICTOIRE !", True, (255, 220, 90))
+        rect = text.get_rect(center=(self.screen.get_width() / 2, self.screen.get_height() / 2))
+        self.screen.blit(text, rect)
 
     DEBUG_VOID_RADIUS_TILES = 3
 
