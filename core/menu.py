@@ -341,22 +341,12 @@ class Menu:
             self.room_browser.render(self.screen)
 
             confirm_rect = self._room_confirm_rect()
-            self.border.draw(self.screen, confirm_rect)
             enabled = self.room_browser.selected_name is not None
             color = (255, 255, 255) if enabled else (110, 110, 110)
-            confirm_text = self.option_font.render("Valider", True, color)
-            self.screen.blit(
-                confirm_text,
-                (confirm_rect.centerx - confirm_text.get_width() / 2, confirm_rect.centery - confirm_text.get_height() / 2),
-            )
+            self.border.draw_centered_label(self.screen, confirm_rect, self.option_font, "Valider", color)
 
             back_rect = self._room_back_rect()
-            self.border.draw(self.screen, back_rect)
-            back_text = self.option_font.render("Retour", True, (255, 255, 255))
-            self.screen.blit(
-                back_text,
-                (back_rect.centerx - back_text.get_width() / 2, back_rect.centery - back_text.get_height() / 2),
-            )
+            self.border.draw_centered_label(self.screen, back_rect, self.option_font, "Retour")
 
         elif self.mode == "settings_keys":
 
@@ -364,7 +354,6 @@ class Menu:
 
             for index, (action_id, label, _, _) in enumerate(ACTIONS):
                 rect = self._keybind_row_rect(index)
-                self.border.draw(self.screen, rect)
 
                 if self.awaiting_action == action_id:
                     row_text = "En attente d'une touche/clic... (ECHAP annule)"
@@ -373,76 +362,40 @@ class Menu:
                     row_text = f"{label} : {settings.display_name(action_id)}"
                     color = (255, 255, 255)
 
-                text = self.small_font.render(row_text, True, color)
-                self.screen.blit(
-                    text,
-                    (rect.centerx - text.get_width() / 2, rect.centery - text.get_height() / 2),
-                )
+                self.border.draw_centered_label(self.screen, rect, self.small_font, row_text, color)
 
             back_rect = self._keybind_row_rect(len(ACTIONS))
-            self.border.draw(self.screen, back_rect)
-            back_text = self.small_font.render("Retour", True, (255, 255, 255))
-            self.screen.blit(
-                back_text,
-                (back_rect.centerx - back_text.get_width() / 2, back_rect.centery - back_text.get_height() / 2),
-            )
+            self.border.draw_centered_label(self.screen, back_rect, self.small_font, "Retour")
 
         elif self.mode == "settings_display":
 
             settings = self.game_manager.settings
             fullscreen_rect, resolution_rect, back_rect = self._display_rects()
 
-            self.border.draw(self.screen, fullscreen_rect)
-            fs_text = self.option_font.render(
-                f"Plein ecran : {'ON' if settings.display['fullscreen'] else 'OFF'}", True, (255, 255, 255)
-            )
-            self.screen.blit(
-                fs_text,
-                (fullscreen_rect.centerx - fs_text.get_width() / 2, fullscreen_rect.centery - fs_text.get_height() / 2),
-            )
+            fs_label = f"Plein ecran : {'ON' if settings.display['fullscreen'] else 'OFF'}"
+            self.border.draw_centered_label(self.screen, fullscreen_rect, self.option_font, fs_label)
 
-            self.border.draw(self.screen, resolution_rect)
             width, height = settings.display["resolution"]
             res_color = (110, 110, 110) if settings.display["fullscreen"] else (255, 255, 255)
-            res_text = self.option_font.render(f"Resolution : {width}x{height}", True, res_color)
-            self.screen.blit(
-                res_text,
-                (resolution_rect.centerx - res_text.get_width() / 2, resolution_rect.centery - res_text.get_height() / 2),
-            )
+            res_label = f"Resolution : {width}x{height}"
+            self.border.draw_centered_label(self.screen, resolution_rect, self.option_font, res_label, res_color)
 
-            self.border.draw(self.screen, back_rect)
-            back_text = self.option_font.render("Retour", True, (255, 255, 255))
-            self.screen.blit(
-                back_text,
-                (back_rect.centerx - back_text.get_width() / 2, back_rect.centery - back_text.get_height() / 2),
-            )
+            self.border.draw_centered_label(self.screen, back_rect, self.option_font, "Retour")
 
         elif self.mode == "settings_border":
 
             self.border_picker.render(self.screen)
 
             back_rect = self._border_back_rect()
-            self.border.draw(self.screen, back_rect)
-            back_text = self.option_font.render("Retour", True, (255, 255, 255))
-            self.screen.blit(
-                back_text,
-                (back_rect.centerx - back_text.get_width() / 2, back_rect.centery - back_text.get_height() / 2),
-            )
+            self.border.draw_centered_label(self.screen, back_rect, self.option_font, "Retour")
 
         else:
 
             for index, (label, _) in enumerate(self._options()):
 
                 rect = self._option_rect(index)
-                self.border.draw(self.screen, rect)
-
                 is_selected = index == self.selected
                 color = (255, 220, 120) if is_selected else (255, 255, 255)
-                text = self.option_font.render(label, True, color)
-
-                self.screen.blit(
-                    text,
-                    (rect.centerx - text.get_width() / 2, rect.centery - text.get_height() / 2),
-                )
+                self.border.draw_centered_label(self.screen, rect, self.option_font, label, color)
 
         pygame.display.flip()

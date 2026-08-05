@@ -321,27 +321,16 @@ class RoomPanelUI:
     def render(self, screen):
 
         for index, (label, _) in enumerate(self.LABELS_ACTIONS):
-
-            rect = self._button_rect(index)
-            self.border.draw(screen, rect)
-
-            text = self.font.render(label, True, (255, 255, 255))
-            screen.blit(text, (rect.centerx - text.get_width() / 2, rect.centery - text.get_height() / 2))
+            self.border.draw_centered_label(screen, self._button_rect(index), self.font, label)
 
         if self.mode is None:
             return
 
         self.browser.render(screen)
 
-        self.border.draw(screen, self.confirm_rect)
-
         enabled = self.browser.selected_name is not None
         color = (255, 255, 255) if enabled else (110, 110, 110)
-        text = self.font.render("Valider", True, color)
-        screen.blit(
-            text,
-            (self.confirm_rect.centerx - text.get_width() / 2, self.confirm_rect.centery - text.get_height() / 2),
-        )
+        self.border.draw_centered_label(screen, self.confirm_rect, self.font, "Valider", color)
 
 
 # ---------------------------------------------------------------------
@@ -427,35 +416,13 @@ class GeneratorPanelUI:
 
         self.pool_browser.render(screen)
 
-        self.border.draw(screen, self.minus_rect)
-        minus_text = self.font.render("-", True, (255, 255, 255))
-        screen.blit(
-            minus_text,
-            (self.minus_rect.centerx - minus_text.get_width() / 2, self.minus_rect.centery - minus_text.get_height() / 2),
-        )
+        self.border.draw_centered_label(screen, self.minus_rect, self.font, "-")
+        self.border.draw_centered_label(screen, self.count_rect, self.font, str(self.room_count))
+        self.border.draw_centered_label(screen, self.plus_rect, self.font, "+")
 
-        self.border.draw(screen, self.count_rect)
-        count_text = self.font.render(str(self.room_count), True, (255, 255, 255))
-        screen.blit(
-            count_text,
-            (self.count_rect.centerx - count_text.get_width() / 2, self.count_rect.centery - count_text.get_height() / 2),
-        )
-
-        self.border.draw(screen, self.plus_rect)
-        plus_text = self.font.render("+", True, (255, 255, 255))
-        screen.blit(
-            plus_text,
-            (self.plus_rect.centerx - plus_text.get_width() / 2, self.plus_rect.centery - plus_text.get_height() / 2),
-        )
-
-        self.border.draw(screen, self.generate_rect)
         enabled = bool(self.pool_browser.selected_names)
         color = (255, 255, 255) if enabled else (110, 110, 110)
-        gen_text = self.font.render("Generer", True, color)
-        screen.blit(
-            gen_text,
-            (self.generate_rect.centerx - gen_text.get_width() / 2, self.generate_rect.centery - gen_text.get_height() / 2),
-        )
+        self.border.draw_centered_label(screen, self.generate_rect, self.font, "Generer", color)
 
         if self.status_text:
             status = self.font.render(self.status_text, True, (200, 200, 200))

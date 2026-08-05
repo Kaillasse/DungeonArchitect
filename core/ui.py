@@ -159,6 +159,18 @@ class BorderManager:
         screen.blit(b["bl"], (x, y + h - c))
         screen.blit(b["br"], (x + w - c, y + h - c))
 
+    # -------------------------------------------------------------
+
+    def draw_centered_label(self, screen, rect, font, text, color=(255, 255, 255)):
+        """The "bordered button" pattern repeated throughout menu.py and
+        editor/ui.py: this border's 9-slice drawn at `rect`, then `text`
+        (rendered with `font`) centered inside it. Callers that need the
+        rendered Surface itself (none currently do) can still call draw()
+        and font.render() by hand -- this is just the common case."""
+        self.draw(screen, rect)
+        surface = font.render(text, True, color)
+        screen.blit(surface, (rect.centerx - surface.get_width() / 2, rect.centery - surface.get_height() / 2))
+
 
 # ---------------------------------------------------------------------
 # Border picker (Settings > Bordure)

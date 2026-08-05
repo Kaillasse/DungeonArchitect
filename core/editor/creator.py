@@ -188,10 +188,8 @@ class Creator:
             return
 
         running = True
-        
-        while running:
 
-            dt = clock.tick(60) / 1000
+        while running:
 
             # -------------------------------------------------
             # Events
