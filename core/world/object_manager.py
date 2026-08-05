@@ -3,6 +3,7 @@ from pathlib import Path
 import pygame
 
 from core.editor.autotile import EMPTY, FLOOR, WALL
+from core.data.sound_manager import SoundManager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -452,6 +453,7 @@ class ObjectManager:
         obj["activated"] = True
         obj["frame"] = 0
         obj["anim_timer"] = 0.0
+        SoundManager().play("button_pressed")
 
         for link_target in obj.get("links", []):
             target = self.get_object_at(link_target["x"], link_target["y"])

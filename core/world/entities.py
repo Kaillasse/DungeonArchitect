@@ -6,6 +6,7 @@ from pathlib import Path
 import pygame
 
 from core.data.ressources import WORLD_SCALE, TILE_SIZE
+from core.data.sound_manager import SoundManager
 from core.world.object_manager import (
     ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, ENEMY_STATS, load_enemy_frames, load_currency_frames,
     load_dynamite_frames, load_explosion_frames,
@@ -603,6 +604,7 @@ class Enemy(_WanderingEntity):
             self.state = "death"
         else:
             self.state = "damaged"
+            SoundManager().play("skeleton_damaged")
 
     def _enter_state(self, state):
         if self.state == state:
@@ -612,6 +614,7 @@ class Enemy(_WanderingEntity):
         self.animation_timer = 0
         if state == "attack":
             self._hit_delivered_this_swing = False
+            SoundManager().play(f"{self.enemy_type}_attack")
 
     def _update_wander(self, dt, is_walkable):
         """Ambient background behavior, identical in spirit to Animal.update:
@@ -867,6 +870,7 @@ class PickupManager:
             if pickup.state == "spin" and player_hitbox.colliderect(pickup.get_hitbox()):
                 inventory.currency[pickup.currency_type] += 1
                 pickup.begin_collect()
+                SoundManager().play(f"{pickup.currency_type}_collect")
 
         for item_pickup in self.item_pickups:
             if (

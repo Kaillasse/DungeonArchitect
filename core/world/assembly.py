@@ -16,6 +16,7 @@ from core.world.dungeon import Dungeon, corner_cells
 from core.world.object_manager import OBJECT_TYPES
 from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DONJONS_DIRECTORY
+from core.data.sound_manager import SoundManager
 
 ENTRY_EXIT_TYPES = ("gate", "wall")
 
@@ -253,6 +254,7 @@ class DungeonAssembly:
         obj["activated"] = True
         obj["frame"] = 0
         obj["anim_timer"] = 0.0
+        SoundManager().play("button_pressed")
 
         for link_target in obj.get("links", []):
             target = room.dungeon.object_manager.get_object_at(link_target["x"], link_target["y"])

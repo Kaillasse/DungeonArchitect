@@ -15,6 +15,7 @@ from core.inventory_ui import InventoryPanel
 from core.editor.autotile import EMPTY
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
+from core.data.sound_manager import SoundManager
 
 # Placed objects that are only ever markers during exploration -- a spawn
 # point and each animal's/enemy's placement cell -- and get replaced by a
@@ -26,6 +27,14 @@ class Explorator:
 
     MOVE_SPEED = 180  # pixels/seconde
     RUN_SPEED = 260  # pixels/seconde -- held with SHIFT
+
+    # Footstep sound cadence -- alternates player_footstep_1/2 (see
+    # SoundManager) on a plain timer rather than specific walk/run animation
+    # frames (not precisely known for these sheets), reset to 0 the instant
+    # movement stops so the first step after starting again always plays
+    # right away instead of waiting out a stale partial interval.
+    FOOTSTEP_INTERVAL_WALK = 0.35
+    FOOTSTEP_INTERVAL_RUN = 0.22
 
     # One-shot actions (Player.play_action), checked against a single event
     # (KEYDOWN or MOUSEBUTTONDOWN) via Settings.matches_event rather than
@@ -59,6 +68,9 @@ class Explorator:
         self.grid_offset_x = 0
         self.grid_offset_y = 0
         self.grid_zoom = 1
+
+        self._footstep_timer = 0.0
+        self._footstep_alt = 0
 
         # -----------------------------
         # Joueur
@@ -253,6 +265,8 @@ class Explorator:
         over the player's own inventory."""
         if action_id == "interact" and (self._interact_with_chest() or self._throw_interact_item()):
             return
+        if action_id == "attack" and self.player.action is None:
+            SoundManager().play("player_attack")
         self.player.play_action(action_id)
 
     def _current_room_and_offset(self):
@@ -291,6 +305,7 @@ class Explorator:
         local_x = self.player.position.x - offset_x * tile_size
         local_y = self.player.position.y - offset_y * tile_size
         dungeon.projectile_manager.throw_dynamite(local_x, local_y, direction)
+        SoundManager().play("dynamite_interact")
 
         self.player.play_action("interact")
         return True
@@ -646,10 +661,20 @@ class Explorator:
             if self.player.action is None:
                 self.player.animation = "run" if running else "walk"
 
+            if self.player.action != "jump":
+                self._footstep_timer += dt
+                interval = self.FOOTSTEP_INTERVAL_RUN if running else self.FOOTSTEP_INTERVAL_WALK
+                if self._footstep_timer >= interval:
+                    self._footstep_timer = 0.0
+                    SoundManager().play(f"player_footstep_{self._footstep_alt + 1}")
+                    self._footstep_alt = 1 - self._footstep_alt
+
         else:
 
             if self.player.action is None:
                 self.player.animation = "idle"
+
+            self._footstep_timer = 0.0
 
         self.player.update(dt)
 
