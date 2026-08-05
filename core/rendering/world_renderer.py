@@ -17,6 +17,7 @@ class WorldRenderer:
         self.tileset = load_tileset()
         self._tile_cache = {}
         self._object_sprites = {}
+        self._object_sprite_cache = {}
 
     def _get_object_frames(self, object_type, variant=None):
         cache_key = (object_type, variant)
@@ -132,14 +133,18 @@ class WorldRenderer:
                 continue
 
             frames = self._get_object_frames(obj["type"], obj.get("variant"))
-            sprite = frames[min(obj.get("frame", 0), len(frames) - 1)]
+            frame_index = min(obj.get("frame", 0), len(frames) - 1)
 
             size_cells_x, size_cells_y = OBJECT_TYPES[obj["type"]]["size"]
-            size = (
-                int(size_cells_x * tile_size * zoom),
-                int(size_cells_y * tile_size * zoom),
-            )
-            scaled_sprite = pygame.transform.scale(sprite, size)
+            cache_key = (obj["type"], obj.get("variant"), frame_index, zoom)
+            scaled_sprite = self._object_sprite_cache.get(cache_key)
+            if scaled_sprite is None:
+                size = (
+                    int(size_cells_x * tile_size * zoom),
+                    int(size_cells_y * tile_size * zoom),
+                )
+                scaled_sprite = pygame.transform.scale(frames[frame_index], size)
+                self._object_sprite_cache[cache_key] = scaled_sprite
 
             # Anchored to the footprint's left/bottom edge (not the origin cell's
             # center) so a multi-cell object like "wall" fills exactly the cells

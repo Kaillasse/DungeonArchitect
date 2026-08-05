@@ -75,6 +75,7 @@ class DungeonAssembly:
 
     def __init__(self):
         self.rooms = []
+        self._shadow_cache = {}
         self._gradient_hole_cache = {}
 
     def add_room(self, placed_room):
@@ -263,35 +264,35 @@ class DungeonAssembly:
             room.dungeon.update(dt, player_hitbox=hitbox)
 
     # ------------------------------------------------------------------
-    # Rendering -- active floor drawn normally; floors below get a faint
-    # constant tint; floors above act as an opaque "ceiling" that's punched
-    # through by a circular hole around the player, revealing the active
-    # floor underneath as the player's field of view gets close to it.
+    # Rendering -- the active floor is drawn normally (full tiles/objects/
+    # animals); every other floor is drawn as a cheap cached "shadow" of its
+    # rooms' logical footprints only (see _render_floor_shadow), never a full
+    # re-render, since it's never interacted with directly. Floor distance
+    # from active_floor picks both the tint (black above, grey below) and the
+    # opacity; anything more than SHADOW_MAX_DISTANCE floors away isn't drawn
+    # at all.
+    #
+    # Floors BELOW draw before the active floor (underneath it, a floor you
+    # glimpse through gaps) -- a flat, constant tint, no hole. Floors ABOVE
+    # draw AFTER the active floor (a ceiling on top of it, blocking the view)
+    # with a soft-edged hole cut out around the player so their own floor
+    # stays visible close to them, exactly like the pre-shadow-cache version.
     # ------------------------------------------------------------------
 
-    BELOW_FLOOR_ALPHA = 45
-    # Kept close to BELOW_FLOOR_ALPHA on purpose -- floors above used to render
-    # almost fully opaque (235), which read as "not actually masked" and made
-    # the view cluttered/unreadable. Only a hair brighter than the floors
-    # below since the ceiling sits directly overhead rather than further away.
-    ABOVE_FLOOR_ALPHA = 60
-    VISION_RADIUS_TILES = 4.5  # was 2.5; +2 tiles
+    SHADOW_OPACITY_STEP = 0.34  # opacity lost per floor of distance from active_floor
+    SHADOW_MAX_DISTANCE = 2  # floors beyond this aren't drawn at all
+    SHADOW_COLOR_ABOVE = (0, 0, 0)
+    SHADOW_COLOR_BELOW = (150, 150, 150)
+    VISION_RADIUS_TILES = 4.5
     VISION_FALLOFF_TILES = 1.5  # width of the soft edge just inside VISION_RADIUS_TILES
 
     def render(self, screen, camera, active_floor, player_world_pos=None, hide_object_types=None,
-               skip_active_floor_foreground=False, skip_active_floor_animals=False,
-               vision_radius_tiles=None, vision_falloff_tiles=None, show_grid=True):
-        """Draw every floor relative to active_floor: floors below first (faintly
-        tinted), active_floor normally, floors above last as a dim mask with a
-        soft-edged hole (vision_radius_tiles, in tiles, with a gradient falloff
-        band vision_falloff_tiles wide just inside it) cut out around
-        player_world_pos so the player can see their own floor through it as
-        they approach -- fully clear up to (vision_radius_tiles -
-        vision_falloff_tiles), fading to the mask's base opacity by
-        vision_radius_tiles. player_world_pos is a continuous (world_x,
-        world_y) pixel position, not a grid cell -- omit it (e.g. Creator's
-        static preview, which has no player) to render floors above at their
-        flat, un-punched mask opacity everywhere.
+               skip_active_floor_foreground=False, skip_active_floor_animals=False, show_grid=True):
+        """Draw every floor relative to active_floor: floors below first
+        (flat-tinted shadow, no hole), the active floor with full detail,
+        floors above last (shadow with a soft hole around player_world_pos --
+        a continuous world pixel position, omit it, e.g. Creator's static
+        preview with no player, to render them with no hole at all).
 
         skip_active_floor_foreground lets a caller that draws its own player
         sprite (Explorator) leave out active_floor's foreground objects (an
@@ -300,20 +301,12 @@ class DungeonAssembly:
         skip_active_floor_animals works the same way for active_floor's live
         Animals, letting Explorator draw them together with the player via
         render_active_floor_entities() instead, sorted by feet position so
-        whichever is lower on screen draws in front. Floors below/above never
-        skip their animals -- there's no player there to sort against, and
-        they're just tinted/masked background dressing either way.
-        Creator, which draws no player sprite, leaves both off and gets
-        everything in one pass.
+        whichever is lower on screen draws in front. Creator, which draws no
+        player sprite, leaves both off and gets everything in one pass.
         """
-        if vision_radius_tiles is None:
-            vision_radius_tiles = self.VISION_RADIUS_TILES
-        if vision_falloff_tiles is None:
-            vision_falloff_tiles = self.VISION_FALLOFF_TILES
-
         for floor in self.floors():
             if floor < active_floor:
-                self._render_floor_tinted(screen, camera, floor, hide_object_types=hide_object_types)
+                self._render_floor_shadow(screen, camera, floor, active_floor)
 
         self._render_floor(
             screen, camera, active_floor,
@@ -325,13 +318,7 @@ class DungeonAssembly:
 
         for floor in self.floors():
             if floor > active_floor:
-                self._render_floor_masked(
-                    screen, camera, floor,
-                    hide_object_types=hide_object_types,
-                    player_world_pos=player_world_pos,
-                    vision_radius_tiles=vision_radius_tiles,
-                    vision_falloff_tiles=vision_falloff_tiles,
-                )
+                self._render_floor_shadow(screen, camera, floor, active_floor, player_world_pos=player_world_pos)
 
     def render_active_floor_foreground(self, screen, camera, active_floor, hide_object_types=None):
         """Objects ObjectManager.is_foreground_object() flags (e.g. an L/R torch) on active_floor -- call after drawing the player sprite."""
@@ -382,65 +369,79 @@ class DungeonAssembly:
                 show_grid=show_grid,
             )
 
-    def _draw_floor_layer(self, screen, camera, floor, hide_object_types):
-        """Render `floor`'s rooms onto a fresh per-pixel-alpha surface the same size as `screen`."""
-        layer = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+    def _render_floor_shadow(self, screen, camera, floor, active_floor, player_world_pos=None):
+        """player_world_pos only ever matters for a floor ABOVE active_floor
+        (see render()'s docstring) -- a floor below never gets a hole."""
+        distance = abs(floor - active_floor)
+        if distance == 0 or distance > self.SHADOW_MAX_DISTANCE:
+            return
+
+        opacity = max(0.0, 1.0 - self.SHADOW_OPACITY_STEP * distance)
+        tone = self.SHADOW_COLOR_ABOVE if floor > active_floor else self.SHADOW_COLOR_BELOW
+        color = (*tone, int(255 * opacity))
+
+        hole_patch = hole_center = None
+        if player_world_pos is not None:
+            radius_px = int(self.VISION_RADIUS_TILES * Dungeon.TILE_SIZE * camera.zoom)
+            falloff_px = int(self.VISION_FALLOFF_TILES * Dungeon.TILE_SIZE * camera.zoom)
+            hole_patch = self._gradient_hole(radius_px, falloff_px)
+            hole_center = camera.world_to_screen(*player_world_pos)
+
         tile_size = Dungeon.TILE_SIZE
         for room in self.rooms_on_floor(floor):
-            offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
-            room.dungeon.render(layer, offset_camera, hide_object_types=hide_object_types)
-        return layer
+            shadow = self._get_shadow(room, color, camera.zoom)
+            screen_pos = camera.world_to_screen(room.offset_x * tile_size, room.offset_y * tile_size)
+            room_rect = pygame.Rect(screen_pos, shadow.get_size())
 
-    @staticmethod
-    def _multiply_alpha(layer, alpha):
-        """Scale every drawn pixel's alpha by alpha/255, leaving untouched (fully
-        transparent) background pixels at 0 -- a plain Surface.set_alpha() would
-        be ignored here since `layer` already has per-pixel alpha (SRCALPHA)."""
-        tint = pygame.Surface(layer.get_size(), pygame.SRCALPHA)
-        tint.fill((255, 255, 255, alpha))
-        layer.blit(tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+            if hole_patch is not None:
+                hole_rect = hole_patch.get_rect(center=(int(hole_center[0]), int(hole_center[1])))
+                if room_rect.colliderect(hole_rect):
+                    # Only rooms the vision circle actually overlaps pay for a
+                    # copy + patch blit -- every other room (the common case)
+                    # stays on the plain cached-blit-only path above. MULT
+                    # (not MIN) because the shadow's own alpha is already
+                    # below 255 (its distance-based opacity) -- multiplying
+                    # scales it proportionally by the hole's 0..255 gradient,
+                    # so the falloff still spans the whole band instead of
+                    # clamping flat as soon as the hole's alpha passes the
+                    # shadow's own (which MIN would do).
+                    shadow = shadow.copy()
+                    local_pos = (hole_rect.x - room_rect.x, hole_rect.y - room_rect.y)
+                    shadow.blit(hole_patch, local_pos, special_flags=pygame.BLEND_RGBA_MULT)
 
-    def _render_floor_tinted(self, screen, camera, floor, hide_object_types=None):
-        layer = self._draw_floor_layer(screen, camera, floor, hide_object_types)
-        self._multiply_alpha(layer, self.BELOW_FLOOR_ALPHA)
-        screen.blit(layer, (0, 0))
+            screen.blit(shadow, screen_pos)
 
-    def _render_floor_masked(self, screen, camera, floor, hide_object_types=None,
-                              player_world_pos=None, vision_radius_tiles=None, vision_falloff_tiles=None):
-        if vision_radius_tiles is None:
-            vision_radius_tiles = self.VISION_RADIUS_TILES
-        if vision_falloff_tiles is None:
-            vision_falloff_tiles = self.VISION_FALLOFF_TILES
+    def _get_shadow(self, room, color, zoom):
+        """A cached, pre-tinted silhouette of `room`'s logical footprint --
+        every non-EMPTY cell filled with `color` (an (r, g, b, alpha) tuple),
+        no tiles/objects/animals at all -- scaled to `zoom`. Built once per
+        (room, color, zoom): color is fully determined by floor distance and
+        direction (see _render_floor_shadow), so at most 2*SHADOW_MAX_DISTANCE
+        variants of a given room's shadow are ever cached, each a single blit
+        per frame afterwards instead of a full tile-by-tile re-render."""
+        key = (room, color, zoom)
+        cached = self._shadow_cache.get(key)
+        if cached is not None:
+            return cached
 
-        layer = self._draw_floor_layer(screen, camera, floor, hide_object_types)
-        self._multiply_alpha(layer, self.ABOVE_FLOOR_ALPHA)
+        tile_size = Dungeon.TILE_SIZE
+        base = pygame.Surface((room.dungeon.width * tile_size, room.dungeon.height * tile_size), pygame.SRCALPHA)
+        for y, row in enumerate(room.dungeon.logical_grid):
+            for x, cell in enumerate(row):
+                if cell != EMPTY:
+                    base.fill(color, (x * tile_size, y * tile_size, tile_size, tile_size))
 
-        if player_world_pos is not None:
-            radius_px = int(vision_radius_tiles * Dungeon.TILE_SIZE * camera.zoom)
-            falloff_px = int(vision_falloff_tiles * Dungeon.TILE_SIZE * camera.zoom)
-            player_screen_x, player_screen_y = camera.world_to_screen(*player_world_pos)
-
-            hole = pygame.Surface(layer.get_size(), pygame.SRCALPHA)
-            hole.fill((255, 255, 255, 255))
-
-            patch = self._gradient_hole(radius_px, falloff_px)
-            patch_rect = patch.get_rect(center=(int(player_screen_x), int(player_screen_y)))
-            # BLEND_RGBA_MIN keeps whichever alpha is smaller at each pixel --
-            # since `hole` starts at 255 everywhere, this just stamps the
-            # patch's own (0 at center -> 255 at/beyond its radius) alpha onto
-            # it in one blit, instead of hand-rolling the same math per pixel.
-            hole.blit(patch, patch_rect.topleft, special_flags=pygame.BLEND_RGBA_MIN)
-
-            layer.blit(hole, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-
-        screen.blit(layer, (0, 0))
+        size = (max(1, round(base.get_width() * zoom)), max(1, round(base.get_height() * zoom)))
+        scaled = pygame.transform.scale(base, size)
+        self._shadow_cache[key] = scaled
+        return scaled
 
     def _gradient_hole(self, radius_px, falloff_px):
         """A small cached SRCALPHA patch: alpha 0 (fully punched) out to
         (radius_px - falloff_px), then a linear ramp up to alpha 255 (no
-        effect once multiplied into the mask) at radius_px and beyond --
-        replaces the old hard-edged single circle with a soft one. Built once
-        per (radius_px, falloff_px) pair (both vary only with zoom, not every
+        effect once multiplied into a shadow) at radius_px and beyond -- a
+        soft-edged hole instead of a hard-edged circle. Built once per
+        (radius_px, falloff_px) pair (both vary only with zoom, not every
         frame) by stamping successively smaller filled circles from the
         outside in, each one's alpha computed for its own radius -- O(radius_px)
         draw calls on a cache miss instead of a per-pixel loop.
