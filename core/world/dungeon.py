@@ -1,4 +1,5 @@
 from core.world.object_manager import ObjectManager
+from core.world.entities import AnimalManager
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
 from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
@@ -24,6 +25,7 @@ class Dungeon:
         self.sprite_grid = [[-1 for _ in range(width)] for _ in range(height)]
 
         self.object_manager = ObjectManager(self)
+        self.animal_manager = AnimalManager(self)
         self.renderer = WorldRenderer()
         self.save = SaveManager()
 
@@ -45,8 +47,16 @@ class Dungeon:
         self.rebuild()
         self.object_manager.prune_invalid()
 
-    def update(self, dt: float) -> None:
+    def update(self, dt: float, player_hitbox=None) -> None:
         self.object_manager.update(dt)
+        self.animal_manager.update(dt, player_hitbox=player_hitbox)
+
+    def spawn_animals(self) -> None:
+        """(Re)build the live wandering Animal entities for this room's placed
+        animal objects -- call once after loading, not on every edit. See
+        AnimalManager.spawn(); Creator never calls this, so its static preview
+        only ever shows a placed animal's frame-0 icon, not a live one."""
+        self.animal_manager.spawn()
 
     # ------------------------------------------------------------------
     # Sauvegarde
@@ -120,6 +130,7 @@ class Dungeon:
             show_link_indicators=show_link_indicators,
             skip_foreground_objects=skip_foreground_objects,
         )
+        self.animal_manager.draw(screen, camera)
 
     def render_foreground(self, screen, camera, hide_object_types=None):
         """Objects flagged draw_after_player (e.g. torch), meant to be drawn after the player sprite."""

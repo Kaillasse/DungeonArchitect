@@ -82,6 +82,8 @@ class ToolPaletteUI:
 
 class ObjectPalette:
 
+    COLUMNS = 5
+
     def __init__(self):
 
         self.border = BorderManager()
@@ -111,11 +113,16 @@ class ObjectPalette:
 
     def load_icons(self):
 
-        x = self.x + 10
+        origin_x = self.x + 10
+        origin_y = self.y + 30
+        step = self.icon_size + self.spacing
 
-        for obj_type in OBJECT_LIST:
+        for index, obj_type in enumerate(OBJECT_LIST):
 
             frames = load_object_frames(obj_type)
+
+            column = index % self.COLUMNS
+            row = index // self.COLUMNS
 
             self.icons[obj_type] = {
 
@@ -124,16 +131,17 @@ class ObjectPalette:
                 "timer": 0,
 
                 "rect": pygame.Rect(
-                    x,
-                    self.y + 30,
+                    origin_x + column * step,
+                    origin_y + row * step,
                     32,
                     32,
                 )
 
             }
 
-            x += self.icon_size + self.spacing
-            
+        rows = -(-len(OBJECT_LIST) // self.COLUMNS)  # ceil division
+        self.height = 30 + rows * step + 10
+
 
 
     def render(self, screen):

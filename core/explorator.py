@@ -7,8 +7,15 @@ from core.world.dungeon import Dungeon
 from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player
+from core.world.object_manager import ANIMAL_TYPES
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
+
+# Placed objects that are only ever markers during exploration -- a spawn
+# point and each animal's placement cell -- and get replaced by a live entity
+# (the Player, an AnimalManager-owned Animal) instead of being drawn as a
+# static object sprite.
+HIDDEN_OBJECT_TYPES = {"spawn", *ANIMAL_TYPES}
 
 class Explorator:
 
@@ -55,11 +62,15 @@ class Explorator:
         self.assembly = None
         self.current_placed_room = None
         self.dungeon.load_from_json(name)
+        self.dungeon.spawn_animals()
         self._position_player_at_spawn()
 
     def open_donjon(self, name):
         """Load a saved procedurally-assembled dungeon and spawn the player in its starting room."""
         self.assembly = load_assembly(name)
+
+        for room in self.assembly.rooms:
+            room.dungeon.spawn_animals()
 
         start_room = next(
             (room for room in self.assembly.rooms if room.has_spawn()),
@@ -91,10 +102,17 @@ class Explorator:
 
     def _is_walkable(self, rect):
         if self.assembly is not None:
-            return self.assembly.is_rect_walkable(
+            if not self.assembly.is_rect_walkable(
                 rect, self.current_placed_room.floor, prefer_room=self.current_placed_room
-            )
-        return self.dungeon.is_rect_walkable(rect)
+            ):
+                return False
+            animals = self.current_placed_room.dungeon.animal_manager.animals
+        else:
+            if not self.dungeon.is_rect_walkable(rect):
+                return False
+            animals = self.dungeon.animal_manager.animals
+
+        return not any(rect.colliderect(animal.get_hitbox()) for animal in animals)
 
     def _update_current_room(self):
         """Resolve which room the player occupies now: same-floor room-crossing
@@ -131,6 +149,7 @@ class Explorator:
             if self.dungeon.get_spawn_world_position() is not None:
 
                 print(f"Spawn trouvé dans : {room.stem}")
+                self.dungeon.spawn_animals()
                 return True
 
         print("Aucune salle ne contient de spawn.")
@@ -227,14 +246,14 @@ class Explorator:
         hitbox = self.player.get_hitbox()
 
         if self.assembly is not None:
-            self.assembly.update(dt)
+            self.assembly.update(dt, player_hitbox=hitbox, player_floor=self.current_placed_room.floor)
             player_grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
             player_grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
             self.assembly.check_button_trigger(
                 player_grid_x, player_grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
             )
         else:
-            self.dungeon.update(dt)
+            self.dungeon.update(dt, player_hitbox=hitbox)
             player_grid_x, player_grid_y = self.dungeon.world_to_grid(
                 hitbox.centerx,
                 hitbox.bottom - 1,
@@ -265,7 +284,7 @@ class Explorator:
                 self.camera,
                 active_floor=self.current_placed_room.floor,
                 player_world_pos=(self.player.position.x, self.player.position.y),
-                hide_object_types={"spawn"},
+                hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_active_floor_foreground=True,
             )
 
@@ -278,7 +297,7 @@ class Explorator:
                 self.screen,
                 self.camera,
                 self.current_placed_room.floor,
-                hide_object_types={"spawn"},
+                hide_object_types=HIDDEN_OBJECT_TYPES,
             )
 
         else:
@@ -286,7 +305,7 @@ class Explorator:
             self.dungeon.render(
                 self.screen,
                 self.camera,
-                hide_object_types={"spawn"},
+                hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_foreground_objects=True,
             )
 
@@ -298,7 +317,7 @@ class Explorator:
             self.dungeon.render_foreground(
                 self.screen,
                 self.camera,
-                hide_object_types={"spawn"},
+                hide_object_types=HIDDEN_OBJECT_TYPES,
             )
 
         pygame.display.flip()

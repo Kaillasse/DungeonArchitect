@@ -29,7 +29,6 @@ class Creator:
         self.dungeon.load_from_json(self.current_room)
         self.palette = ToolPaletteUI()
         self.room_panel = RoomPanelUI(self.room_manager)
-        self.generator_panel = GeneratorPanelUI(self.room_manager, x=10, y=240)
         self.last_assembly = None
         self.assembly_active_floor = 0
 
@@ -37,6 +36,12 @@ class Creator:
         self.object_palette = ObjectPalette()
         self.object_tool = ObjectTool(self.object_palette)
         self.object_palette.tool = self.object_tool
+
+        self.generator_panel = GeneratorPanelUI(
+            self.room_manager,
+            x=10,
+            y=self.object_palette.y + self.object_palette.height + 20,
+        )
 
         self.painting = False
         self.erasing = False

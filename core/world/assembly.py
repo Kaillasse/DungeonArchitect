@@ -220,9 +220,14 @@ class DungeonAssembly:
             target["frame"] = 0
             target["anim_timer"] = 0.0
 
-    def update(self, dt):
+    def update(self, dt, player_hitbox=None, player_floor=None):
+        """player_hitbox only ever gets passed down to rooms on player_floor
+        -- an animal on another floor has no business colliding with a
+        player who isn't physically there (mirrors locate_room's per-floor
+        scoping)."""
         for room in self.rooms:
-            room.dungeon.object_manager.update(dt)
+            hitbox = player_hitbox if room.floor == player_floor else None
+            room.dungeon.update(dt, player_hitbox=hitbox)
 
     # ------------------------------------------------------------------
     # Rendering -- active floor drawn normally; floors below get a faint

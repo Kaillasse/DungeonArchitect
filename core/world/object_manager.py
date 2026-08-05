@@ -72,6 +72,38 @@ OBJECT_TYPES = {
         "frames": 16,
         "blocks_movement": True,
     },
+    "chicken": {
+        "asset": "characters/Animals/Chicken.png",
+        "placement": "floor",
+        "size": (1, 1),
+        "frames": 2,
+        "frame_size": 32,
+        "animal": True,
+    },
+    "cow": {
+        "asset": "characters/Animals/Cow.png",
+        "placement": "floor",
+        "size": (1, 1),
+        "frames": 2,
+        "frame_size": 32,
+        "animal": True,
+    },
+    "pig": {
+        "asset": "characters/Animals/Pig.png",
+        "placement": "floor",
+        "size": (1, 1),
+        "frames": 2,
+        "frame_size": 32,
+        "animal": True,
+    },
+    "sheep": {
+        "asset": "characters/Animals/Sheep.png",
+        "placement": "floor",
+        "size": (1, 1),
+        "frames": 2,
+        "frame_size": 32,
+        "animal": True,
+    },
 }
 OBJECT_LIST = [
     "spawn",
@@ -80,7 +112,17 @@ OBJECT_LIST = [
     "wall",
     "torch",
     "vase",
+    "chicken",
+    "cow",
+    "pig",
+    "sheep",
 ]
+
+# Object types backed by a live, wandering entity (core.world.entities.Animal)
+# during exploration rather than just a static placed sprite -- see
+# entities.AnimalManager. Derived from the "animal" flag above instead of a
+# separately-maintained list, so OBJECT_TYPES stays the single registry.
+ANIMAL_TYPES = tuple(name for name, config in OBJECT_TYPES.items() if config.get("animal"))
 
 
 def load_object_frames(object_type, variant=None):
@@ -90,13 +132,35 @@ def load_object_frames(object_type, variant=None):
     asset = PROJECT_ROOT / "assets" / asset_path
     sheet = pygame.image.load(asset).convert_alpha()
 
-    frame_size = 24 if object_type == "spawn" else 16
+    frame_size = config.get("frame_size", 24 if object_type == "spawn" else 16)
 
     frames = []
     for i in range(config["frames"]):
         rect = pygame.Rect(i * frame_size, 0, frame_size, frame_size)
         frames.append(sheet.subsurface(rect).copy())
     return frames
+
+
+def load_animal_frames(object_type):
+    """Full idle+move animation set for an animal NPC sheet (a 2x2 grid: row 0
+    idle, row 1 move, each row 2 frames of frame_size px). Used by
+    core.world.entities.Animal for live wandering during exploration -- the
+    static editor palette/placed-object preview keeps using
+    load_object_frames, which only reads the idle row (config["frames"])."""
+    config = OBJECT_TYPES[object_type]
+    asset = PROJECT_ROOT / "assets" / config["asset"]
+    sheet = pygame.image.load(asset).convert_alpha()
+    frame_size = config["frame_size"]
+
+    def _row(row_index):
+        return [
+            sheet.subsurface(
+                pygame.Rect(i * frame_size, row_index * frame_size, frame_size, frame_size)
+            ).copy()
+            for i in range(2)
+        ]
+
+    return {"idle": _row(0), "move": _row(1)}
 
 
 class ObjectManager:
