@@ -67,7 +67,7 @@ class Player:
     # see play_action()/update().
     ONE_SHOT_ANIMATIONS = ("attack", "interact", "jump")
 
-    MAX_HEALTH = 10
+    MAX_HEALTH = 2
 
     # 0-based frames (3, 4, 5) == the to-do's 1-based "frames 4, 5, 6" of the
     # 6-frame attack.png -- the window during which a swing actually deals
@@ -203,6 +203,7 @@ class Player:
 
     def take_damage(self, amount):
         self.health = max(0, self.health - amount)
+        print(f"[combat] Player took {amount} damage (health: {self.health}/{self.MAX_HEALTH})")
 
     def play_action(self, name):
         """Trigger a one-shot action animation (attack/interact/jump) --

@@ -636,20 +636,32 @@ class Explorator:
     def _draw_debug_hitboxes(self):
         """F3 overlay: the player's hitbox in red (plus its attack reach in
         orange while actually active), animals in yellow, enemies in purple
-        -- all already in the exact world coordinates _is_walkable/combat
-        compare, so any gap between "what looks like it's touching" and
-        "what's actually colliding" is directly visible instead of guessed.
-        Also outlines every cell _is_void_at considers void (cyan) within a
-        few tiles of the player -- to diagnose exactly which cells near a
-        gate/wall entry-exit read as void vs not, rather than guessing."""
+        (plus each attacking enemy's own melee reach in magenta, same idea as
+        the player's orange one) -- all already in the exact world
+        coordinates _is_walkable/combat compare, so any gap between "what
+        looks like it's touching" and "what's actually colliding" is
+        directly visible instead of guessed. Also outlines every cell
+        _is_void_at considers void (cyan) within a few tiles of the player --
+        to diagnose exactly which cells near a gate/wall entry-exit read as
+        void vs not, rather than guessing."""
         self._draw_debug_void_grid()
         self._draw_debug_rect(self.player.get_hitbox(), (255, 60, 60))
         if self.player.is_attack_active():
             self._draw_debug_rect(self.player.get_attack_hitbox(), (255, 150, 30))
         for _animal, animal_rect in self._visible_animals_global():
             self._draw_debug_rect(animal_rect, (255, 220, 60))
-        for _enemy, enemy_rect, _dungeon in self._visible_enemies_global():
+        for enemy, enemy_rect, _dungeon in self._visible_enemies_global():
             self._draw_debug_rect(enemy_rect, (200, 60, 255))
+            if enemy.state == "attack":
+                # get_attack_hitbox() is local to the enemy's own room's
+                # Dungeon (same convention as get_hitbox()) -- enemy_rect is
+                # that same body hitbox already shifted to global/world
+                # coordinates, so re-using the delta between the two gets the
+                # attack hitbox into global coordinates too, without needing
+                # this method to know the room's offset directly.
+                local_hitbox = enemy.get_hitbox()
+                offset = (enemy_rect.x - local_hitbox.x, enemy_rect.y - local_hitbox.y)
+                self._draw_debug_rect(enemy.get_attack_hitbox().move(offset), (255, 60, 220))
 
     def _draw_debug_void_grid(self):
         hitbox = self.player.get_hitbox()
