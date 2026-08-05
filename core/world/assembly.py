@@ -702,14 +702,22 @@ def generate_assembly(room_names, room_count, rng=None):
         anchor_exit["door_target_room"] = candidate_index
         candidate_exit["door_target_room"] = anchor_room.index
 
-        # Any button in the anchor's room that links to the anchor's exit should
-        # also open the candidate's now-merged copy of that same door -- but a
-        # plain local {"x", "y"} link only resolves within one room's own object
-        # list, so this needs a global, floor-qualified reference instead
-        # (an "assembly_link"), which DungeonAssembly.check_button_trigger knows
-        # how to follow across rooms. The candidate exit's own pre-existing
-        # local links (if any) are untouched -- they're still valid as-is,
-        # since candidate room's internal layout doesn't change.
+        # A button in EITHER room that links (locally) to ITS OWN half of the
+        # merged doorway should also open the OTHER half -- the two halves
+        # are separate objects (one per room's own object list) that just
+        # happen to share one global cell, each with its own independent
+        # "open" flag, so opening one side alone leaves the other room's
+        # collision still reading closed. A plain local {"x", "y"} link only
+        # resolves within one room's own object list, so each direction needs
+        # a global, floor-qualified reference instead (an "assembly_link"),
+        # which DungeonAssembly.check_button_trigger knows how to follow
+        # across rooms. Only the anchor-side half of this used to be handled
+        # here, which is exactly why one physical doorway could open cleanly
+        # from one room's button but stay closed as seen from the other
+        # room's side -- whichever side happened to hold the button "won",
+        # the other never got told to open. The candidate/anchor exits' own
+        # pre-existing local links (if any) are untouched either way -- they're
+        # still valid as-is, since neither room's internal layout changes.
         for source_obj in anchor_room.dungeon.object_manager.objects:
             if source_obj["type"] != "button":
                 continue
@@ -717,6 +725,16 @@ def generate_assembly(room_names, room_count, rng=None):
                 if (link_ref["x"], link_ref["y"]) == (anchor_exit["x"], anchor_exit["y"]):
                     source_obj.setdefault("assembly_links", []).append(
                         {"floor": floor, "x": anchor_gx, "y": anchor_gy}
+                    )
+                    break
+
+        for source_obj in candidate_room.dungeon.object_manager.objects:
+            if source_obj["type"] != "button":
+                continue
+            for link_ref in source_obj.get("links", []):
+                if (link_ref["x"], link_ref["y"]) == (candidate_exit["x"], candidate_exit["y"]):
+                    source_obj.setdefault("assembly_links", []).append(
+                        {"floor": anchor_room.floor, "x": anchor_gx, "y": anchor_gy}
                     )
                     break
 
