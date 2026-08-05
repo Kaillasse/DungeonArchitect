@@ -6,13 +6,10 @@ own panels."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pygame
 
 from core.ui import BorderManager
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+from core.world.object_manager import CURRENCY_FILES, load_currency_frames
 
 
 class InventoryPanel:
@@ -28,7 +25,6 @@ class InventoryPanel:
     OVERLAY_ALPHA = 150
 
     MAIN_SLOT_LABELS = (("attack", "Attaque"), ("interact", "Interaction"), ("passive", "Passif"))
-    CURRENCY_FILES = {"gold": "Coin Sheet.png", "blue": "BlueCoin Sheet.png"}
 
     def __init__(self, inventory):
         self.inventory = inventory
@@ -42,16 +38,9 @@ class InventoryPanel:
         self._preview_frame = 0
         self._preview_timer = 0.0
 
-        self._currency_frames = {key: self._load_currency_frames(path) for key, path in self.CURRENCY_FILES.items()}
+        self._currency_frames = {key: load_currency_frames(key) for key in CURRENCY_FILES}
         self._currency_frame_index = 0
         self._currency_timer = 0.0
-
-    @staticmethod
-    def _load_currency_frames(filename):
-        sheet = pygame.image.load(PROJECT_ROOT / "assets" / filename).convert_alpha()
-        size = sheet.get_height()
-        columns = sheet.get_width() // size
-        return [sheet.subsurface((i * size, 0, size, size)).copy() for i in range(columns)]
 
     def update(self, dt):
         self._preview_timer += dt

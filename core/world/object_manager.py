@@ -164,17 +164,34 @@ ENEMY_ANIMATIONS = ("idle", "movement", "attack", "damaged", "death")
 # actually deals damage: skeleton1's is as specified (frames 7-8 of 9,
 # 1-based); skeleton2 has a different attack frame count (15) with no given
 # mapping, so its window is derived from skeleton1's *relative* position
-# (~75%-87% through the swing) rather than guessed outright.
+# (~75%-87% through the swing) rather than guessed outright. "loot" (currency
+# type -> count) is read once, on death, by Explorator._spawn_loot -- an
+# enemy with no "loot" key (or an empty one) simply drops nothing.
 ENEMY_STATS = {
     "skeleton1": {
-        "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
+        "health": 1, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
         "active_attack_frames": (6, 7),
+        "loot": {"gold": 2, "blue": 1},
     },
     "skeleton2": {
-        "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
+        "health": 1, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
         "active_attack_frames": (11, 12),
+        "loot": {"gold": 2, "blue": 1},
     },
 }
+
+# Currency pickup sheets (assets/ root, not under a themed folder): one row
+# of 4 32x32 frames each (a coin spinning). Shared by InventoryPanel's
+# counter icon and core.world.entities.Pickup, so both stay visually
+# identical to a single source of truth.
+CURRENCY_FILES = {"gold": "Coin Sheet.png", "blue": "BlueCoin Sheet.png"}
+
+
+def load_currency_frames(currency_type):
+    sheet = pygame.image.load(PROJECT_ROOT / "assets" / CURRENCY_FILES[currency_type]).convert_alpha()
+    size = sheet.get_height()
+    columns = sheet.get_width() // size
+    return [sheet.subsurface((i * size, 0, size, size)).copy() for i in range(columns)]
 
 
 def load_object_frames(object_type, variant=None):

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import random
+
 import pygame
 from core.world.dungeon import Dungeon
 from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player
-from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES
+from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS
 from core.world.inventory import Inventory, Item
 from core.inventory_ui import InventoryPanel
 from core.engine.gamestate import GameState
@@ -160,21 +162,55 @@ class Explorator:
     def _visible_enemies_global(self):
         """Same idea as _visible_animals_global, but for live (alive) Enemy
         entities -- a corpse doesn't block the player, mirroring
-        EnemyManager._is_free's own "other.alive" check for enemy-vs-enemy."""
+        EnemyManager._is_free's own "other.alive" check for enemy-vs-enemy.
+        Yields (enemy, hitbox, dungeon) rather than just (enemy, hitbox) --
+        the third element is whichever room's own Dungeon actually owns this
+        enemy, needed by the combat code below to drop loot into the right
+        room's PickupManager rather than always self.dungeon (wrong in
+        assembly mode whenever the enemy isn't in current_placed_room)."""
         if self.assembly is not None:
             tile_size = Dungeon.TILE_SIZE
-            pairs = []
+            triples = []
             for room in self.assembly.rooms_on_floor(self.current_placed_room.floor):
                 offset = (room.offset_x * tile_size, room.offset_y * tile_size)
                 for enemy in room.dungeon.enemy_manager.enemies:
                     if enemy.alive:
-                        pairs.append((enemy, enemy.get_hitbox().move(offset)))
-            return pairs
+                        triples.append((enemy, enemy.get_hitbox().move(offset), room.dungeon))
+            return triples
         return [
-            (enemy, enemy.get_hitbox())
+            (enemy, enemy.get_hitbox(), self.dungeon)
             for enemy in self.dungeon.enemy_manager.enemies
             if enemy.alive
         ]
+
+    @staticmethod
+    def _spawn_loot(enemy, enemy_dungeon):
+        """Drops ENEMY_STATS[enemy.enemy_type]["loot"] as individual coin
+        Pickups (2 gold + 1 blue -> 3 separate coins, not one "x2" stack),
+        scattered a few pixels around the death spot. enemy.position is
+        already local to enemy_dungeon (never offset-translated -- see
+        Animal/Enemy's own coordinate convention), so no conversion is
+        needed before handing it to that same dungeon's PickupManager."""
+        loot = ENEMY_STATS[enemy.enemy_type].get("loot", {})
+        for currency_type, count in loot.items():
+            for _ in range(count):
+                enemy_dungeon.pickup_manager.spawn(
+                    currency_type,
+                    enemy.position.x + random.uniform(-10, 10),
+                    enemy.position.y + random.uniform(-10, 10),
+                )
+
+    def _collect_pickups(self, player_hitbox):
+        """Credits self.inventory.currency for every ground Pickup the
+        player's hitbox touches this frame, across whichever room(s) that's
+        meaningful for -- same per-floor scope as _visible_animals_global."""
+        if self.assembly is not None:
+            tile_size = Dungeon.TILE_SIZE
+            for room in self.assembly.rooms_on_floor(self.current_placed_room.floor):
+                local_hitbox = player_hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size)
+                room.dungeon.pickup_manager.collect(local_hitbox, self.inventory)
+        else:
+            self.dungeon.pickup_manager.collect(player_hitbox, self.inventory)
 
     def _is_walkable(self, rect, debug_label=None):
         """debug_label, only used when self.debug_mode is True, tags a
@@ -198,7 +234,7 @@ class Explorator:
                 self._debug_log(debug_label, f"animal({animal.animal_type} at {animal_rect.center})")
                 return False
 
-        for enemy, enemy_rect in self._visible_enemies_global():
+        for enemy, enemy_rect, _dungeon in self._visible_enemies_global():
             if rect.colliderect(enemy_rect):
                 self._debug_log(debug_label, f"enemy({enemy.enemy_type} at {enemy_rect.center})")
                 return False
@@ -361,12 +397,21 @@ class Explorator:
         if self.player.is_attack_active():
             attack_hitbox = self.player.get_attack_hitbox()
             hit_landed = False
-            for enemy, enemy_rect in self._visible_enemies_global():
+            for enemy, enemy_rect, enemy_dungeon in self._visible_enemies_global():
                 if attack_hitbox.colliderect(enemy_rect):
+                    was_alive = enemy.alive
                     enemy.take_damage(1)
                     hit_landed = True
+                    if was_alive and not enemy.alive:
+                        self._spawn_loot(enemy, enemy_dungeon)
             if hit_landed:
                 self.player._hit_delivered_this_swing = True
+
+        # -----------------------------
+        # Ramassage des pièces au sol
+        # -----------------------------
+
+        self._collect_pickups(self.player.get_hitbox())
 
         # -----------------------------
         # Boutons / portes
@@ -482,7 +527,7 @@ class Explorator:
             self._draw_debug_rect(self.player.get_attack_hitbox(), (255, 150, 30))
         for _animal, animal_rect in self._visible_animals_global():
             self._draw_debug_rect(animal_rect, (255, 220, 60))
-        for _enemy, enemy_rect in self._visible_enemies_global():
+        for _enemy, enemy_rect, _dungeon in self._visible_enemies_global():
             self._draw_debug_rect(enemy_rect, (200, 60, 255))
 
     def _draw_debug_rect(self, world_rect, color):

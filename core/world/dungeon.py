@@ -1,5 +1,5 @@
 from core.world.object_manager import ObjectManager
-from core.world.entities import AnimalManager, EnemyManager
+from core.world.entities import AnimalManager, EnemyManager, PickupManager
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
 from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
@@ -27,6 +27,7 @@ class Dungeon:
         self.object_manager = ObjectManager(self)
         self.animal_manager = AnimalManager(self)
         self.enemy_manager = EnemyManager(self)
+        self.pickup_manager = PickupManager(self)
         self.renderer = WorldRenderer()
         self.save = SaveManager()
 
@@ -52,6 +53,7 @@ class Dungeon:
         self.object_manager.update(dt)
         self.animal_manager.update(dt, player_hitbox=player_hitbox)
         self.enemy_manager.update(dt, player=player, player_hitbox=player_hitbox)
+        self.pickup_manager.update(dt)
 
     def spawn_animals(self) -> None:
         """(Re)build the live wandering Animal entities for this room's placed
@@ -143,6 +145,7 @@ class Dungeon:
             self.animal_manager.draw(screen, camera)
         if not skip_enemies:
             self.enemy_manager.draw(screen, camera)
+        self.pickup_manager.draw(screen, camera)
 
     def render_foreground(self, screen, camera, hide_object_types=None):
         """Objects flagged draw_after_player (e.g. torch), meant to be drawn after the player sprite."""

@@ -6,7 +6,9 @@ from pathlib import Path
 import pygame
 
 from core.data.ressources import WORLD_SCALE, TILE_SIZE
-from core.world.object_manager import ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, ENEMY_STATS, load_enemy_frames
+from core.world.object_manager import (
+    ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, ENEMY_STATS, load_enemy_frames, load_currency_frames,
+)
 
 class SpriteAnimation:
     def __init__(self, image, frame_w, frame_h, animations):
@@ -680,3 +682,88 @@ class EnemyManager:
     def draw(self, screen, camera):
         for enemy in self.enemies:
             enemy.draw(screen, camera)
+
+
+class Pickup:
+    """A static, spinning currency pickup dropped by a dead enemy (see
+    Explorator._spawn_loot) -- never saved to room.json (created at runtime,
+    not authored), never blocks movement (not consulted by
+    is_rect_walkable/_is_free), just sits until the player's hitbox touches
+    it (PickupManager.collect)."""
+
+    FRAME_SIZE = 32
+    HITBOX_SIZE = 16
+    ANIMATION_SPEED = 0.15
+
+    def __init__(self, currency_type, world_x, world_y):
+        self.currency_type = currency_type
+        self.position = pygame.Vector2(world_x, world_y)
+        self.frames = load_currency_frames(currency_type)
+
+        self.frame = 0
+        self.animation_timer = 0.0
+
+        self._render_cache = {}
+
+    def get_hitbox(self):
+        return pygame.Rect(
+            int(self.position.x - self.HITBOX_SIZE / 2),
+            int(self.position.y - self.HITBOX_SIZE / 2),
+            self.HITBOX_SIZE,
+            self.HITBOX_SIZE,
+        )
+
+    def update(self, dt):
+        self.animation_timer += dt
+        if self.animation_timer >= self.ANIMATION_SPEED:
+            self.animation_timer = 0
+            self.frame = (self.frame + 1) % len(self.frames)
+
+    def draw(self, screen, camera):
+        sprite = self.frames[self.frame]
+
+        render_scale = camera.zoom * WORLD_SCALE
+        zoom_key = max(1, int(round(render_scale * 100)))
+        cache_key = (self.frame, zoom_key)
+        if cache_key not in self._render_cache:
+            self._render_cache[cache_key] = pygame.transform.scale_by(sprite, render_scale)
+        scaled = self._render_cache[cache_key]
+
+        sprite_left_world = self.position.x - self.FRAME_SIZE * WORLD_SCALE / 2
+        sprite_top_world = self.position.y - self.FRAME_SIZE * WORLD_SCALE / 2
+        sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
+
+        screen.blit(scaled, (int(sx), int(sy)))
+
+
+class PickupManager:
+    """Owns the live Pickup entities dropped in a room. Unlike
+    Animal/EnemyManager there's no spawn() from placed objects -- pickups
+    only ever come from Explorator._spawn_loot calling spawn() directly at
+    an enemy's death position, and are never persisted."""
+
+    def __init__(self, dungeon):
+        self.dungeon = dungeon
+        self.pickups = []
+
+    def spawn(self, currency_type, world_x, world_y):
+        self.pickups.append(Pickup(currency_type, world_x, world_y))
+
+    def update(self, dt):
+        for pickup in self.pickups:
+            pickup.update(dt)
+
+    def collect(self, player_hitbox, inventory):
+        """Removes every Pickup the player's hitbox touches, crediting
+        inventory.currency[pickup.currency_type] += 1 each."""
+        remaining = []
+        for pickup in self.pickups:
+            if player_hitbox.colliderect(pickup.get_hitbox()):
+                inventory.currency[pickup.currency_type] += 1
+            else:
+                remaining.append(pickup)
+        self.pickups = remaining
+
+    def draw(self, screen, camera):
+        for pickup in self.pickups:
+            pickup.draw(screen, camera)
