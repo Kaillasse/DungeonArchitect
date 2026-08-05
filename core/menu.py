@@ -6,7 +6,8 @@ import pygame
 
 from core.engine.gamestate import GameState
 from core.data.ressources import list_rooms, list_donjons, next_new_room_name
-from core.ui import BorderManager, RoomBrowser
+from core.data.settings import ACTIONS, ACTION_KINDS
+from core.ui import BorderManager, BorderPicker, RoomBrowser
 
 
 class Menu:
@@ -19,8 +20,14 @@ class Menu:
     )
 
     SETTINGS_OPTIONS = (
+        ("Touches", "keys"),
+        ("Affichage", "display"),
+        ("Bordure", "border"),
         ("Retour", "back"),
     )
+
+    # Windowed-mode presets cycled by the "Affichage" screen's resolution button.
+    DISPLAY_PRESETS = ((1280, 720), (1600, 900), (1920, 1080))
 
     NEW_ROOM_LABEL = "+ Nouvelle salle"
 
@@ -36,6 +43,7 @@ class Menu:
         self.border = BorderManager()
         self.title_font = pygame.font.SysFont("arial", 48)
         self.option_font = pygame.font.SysFont("arial", 28)
+        self.small_font = pygame.font.SysFont("arial", 18)
 
         self.mode = "main"
         self.selected = 0
@@ -43,6 +51,18 @@ class Menu:
         self.room_target_state = None
         x = self.screen.get_width() / 2 - self.OPTION_WIDTH / 2
         self.room_browser = RoomBrowser(x, self.OPTIONS_TOP, width=self.OPTION_WIDTH)
+
+        # "Touches" sub-screen: action_id awaiting a new key/click, or None.
+        self.awaiting_action = None
+
+        # "Bordure" sub-screen -- same "computed once from the screen size at
+        # construction time" limitation RoomBrowser already has above, so a
+        # display-resolution change afterwards leaves it positioned for the
+        # old size (pre-existing pattern, not new here).
+        border_manager = BorderManager()
+        picker_width = max(1, border_manager.cols) * (BorderPicker.CELL_SIZE + BorderPicker.GAP) + BorderPicker.GAP
+        border_x = self.screen.get_width() / 2 - picker_width / 2
+        self.border_picker = BorderPicker(border_x, self.OPTIONS_TOP, border_manager, on_select=self._on_border_selected)
 
         self.clock = pygame.time.Clock()
 
@@ -62,6 +82,35 @@ class Menu:
     def _room_back_rect(self):
         confirm = self._room_confirm_rect()
         return pygame.Rect(confirm.x, confirm.y + confirm.height + 12, confirm.width, 44)
+
+    # -- "Touches" sub-screen: one compact row per action, plus a back row.
+    # Deliberately smaller/tighter than _option_rect's rows -- 8 actions + a
+    # back row at the main OPTION_HEIGHT/SPACING would run off the bottom of
+    # a 720px-tall window.
+    KEYBIND_ROW_HEIGHT = 36
+    KEYBIND_ROW_SPACING = 6
+    KEYBIND_TOP = 200
+    KEYBIND_WIDTH = 420
+
+    def _keybind_row_rect(self, index):
+        x = self.screen.get_width() / 2 - self.KEYBIND_WIDTH / 2
+        y = self.KEYBIND_TOP + index * (self.KEYBIND_ROW_HEIGHT + self.KEYBIND_ROW_SPACING)
+        return pygame.Rect(x, y, self.KEYBIND_WIDTH, self.KEYBIND_ROW_HEIGHT)
+
+    # -- "Affichage" sub-screen: fullscreen toggle, resolution cycle, back --
+    # reuses the same row layout as the main/settings option list.
+    def _display_rects(self):
+        return self._option_rect(0), self._option_rect(1), self._option_rect(2)
+
+    # -- "Bordure" sub-screen: back button positioned right under the picker.
+    def _border_back_rect(self):
+        x = self.border_picker.x
+        y = self.border_picker.y + self.border_picker.height + 12
+        return pygame.Rect(x, y, self.border_picker.width, 44)
+
+    def _on_border_selected(self, row, col):
+        self.game_manager.settings.border_cell = [row, col]
+        self.game_manager.settings.save()
 
     def _open_room_browser(self, target_state):
         self.mode = "rooms"
@@ -87,6 +136,19 @@ class Menu:
         if action == "back":
             self.mode = "main"
             self.selected = 0
+            return False
+
+        if action == "keys":
+            self.mode = "settings_keys"
+            self.awaiting_action = None
+            return False
+
+        if action == "display":
+            self.mode = "settings_display"
+            return False
+
+        if action == "border":
+            self.mode = "settings_border"
             return False
 
         if action == "quit":
@@ -133,8 +195,20 @@ class Menu:
 
                 elif event.type == pygame.KEYDOWN:
 
-                    if event.key == pygame.K_ESCAPE:
-                        if self.mode != "main":
+                    if self.mode == "settings_keys" and self.awaiting_action is not None:
+                        # ESCAPE cancels the capture instead of navigating away
+                        # -- any other key becomes the new binding (every
+                        # action accepts a "key" binding, see ACTION_KINDS).
+                        if event.key != pygame.K_ESCAPE:
+                            self.game_manager.settings.set_binding(
+                                self.awaiting_action, {"kind": "key", "code": event.key}
+                            )
+                        self.awaiting_action = None
+
+                    elif event.key == pygame.K_ESCAPE:
+                        if self.mode in ("settings_keys", "settings_display", "settings_border"):
+                            self.mode = "settings"
+                        elif self.mode != "main":
                             self.mode = "main"
                             self.selected = 0
                         else:
@@ -160,7 +234,18 @@ class Menu:
 
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
 
-                    if self.mode in ("main", "settings"):
+                    if self.mode == "settings_keys" and self.awaiting_action is not None:
+                        # Only counts as the capture if this action accepts a
+                        # mouse binding -- otherwise ignored, still awaiting a
+                        # key. Either way this click is consumed here, so it
+                        # can't also hit-test a row below in the same frame.
+                        if "mouse" in ACTION_KINDS[self.awaiting_action]:
+                            self.game_manager.settings.set_binding(
+                                self.awaiting_action, {"kind": "mouse", "button": event.button}
+                            )
+                            self.awaiting_action = None
+
+                    elif self.mode in ("main", "settings"):
 
                         options = self._options()
                         for index in range(len(options)):
@@ -169,6 +254,39 @@ class Menu:
                                 if self._activate(action):
                                     running = False
                                 break
+
+                    elif self.mode == "settings_keys":
+
+                        for index, (action_id, _, _, _) in enumerate(ACTIONS):
+                            if self._keybind_row_rect(index).collidepoint(event.pos):
+                                self.awaiting_action = action_id
+                                break
+                        else:
+                            if self._keybind_row_rect(len(ACTIONS)).collidepoint(event.pos):
+                                self.mode = "settings"
+
+                    elif self.mode == "settings_display":
+
+                        settings = self.game_manager.settings
+                        fullscreen_rect, resolution_rect, back_rect = self._display_rects()
+
+                        if fullscreen_rect.collidepoint(event.pos):
+                            self.game_manager.apply_display_settings(not settings.display["fullscreen"])
+
+                        elif not settings.display["fullscreen"] and resolution_rect.collidepoint(event.pos):
+                            current = tuple(settings.display["resolution"])
+                            current_index = self.DISPLAY_PRESETS.index(current) if current in self.DISPLAY_PRESETS else -1
+                            next_preset = self.DISPLAY_PRESETS[(current_index + 1) % len(self.DISPLAY_PRESETS)]
+                            self.game_manager.apply_display_settings(False, resolution=next_preset)
+
+                        elif back_rect.collidepoint(event.pos):
+                            self.mode = "settings"
+
+                    elif self.mode == "settings_border":
+
+                        if not self.border_picker.handle_event(event):
+                            if self._border_back_rect().collidepoint(event.pos):
+                                self.mode = "settings"
 
                     elif self.mode == "rooms":
 
@@ -203,26 +321,20 @@ class Menu:
 
         self.screen.fill((20, 20, 30))
 
-        if self.mode == "rooms":
-            title_text = "Choisir une salle"
-        elif self.mode == "settings":
-            title_text = "Parametres"
-        else:
-            title_text = "Dungeon Architect"
+        TITLES = {
+            "rooms": "Choisir une salle",
+            "settings": "Parametres",
+            "settings_keys": "Touches",
+            "settings_display": "Affichage",
+            "settings_border": "Bordure",
+        }
+        title_text = TITLES.get(self.mode, "Dungeon Architect")
 
         title = self.title_font.render(title_text, True, (255, 255, 255))
         self.screen.blit(
             title,
             (self.screen.get_width() / 2 - title.get_width() / 2, 140),
         )
-
-        if self.mode == "settings":
-
-            placeholder = self.option_font.render("(a venir)", True, (150, 150, 150))
-            self.screen.blit(
-                placeholder,
-                (self.screen.get_width() / 2 - placeholder.get_width() / 2, 200),
-            )
 
         if self.mode == "rooms":
 
@@ -239,6 +351,77 @@ class Menu:
             )
 
             back_rect = self._room_back_rect()
+            self.border.draw(self.screen, back_rect)
+            back_text = self.option_font.render("Retour", True, (255, 255, 255))
+            self.screen.blit(
+                back_text,
+                (back_rect.centerx - back_text.get_width() / 2, back_rect.centery - back_text.get_height() / 2),
+            )
+
+        elif self.mode == "settings_keys":
+
+            settings = self.game_manager.settings
+
+            for index, (action_id, label, _, _) in enumerate(ACTIONS):
+                rect = self._keybind_row_rect(index)
+                self.border.draw(self.screen, rect)
+
+                if self.awaiting_action == action_id:
+                    row_text = "En attente d'une touche/clic... (ECHAP annule)"
+                    color = (255, 220, 120)
+                else:
+                    row_text = f"{label} : {settings.display_name(action_id)}"
+                    color = (255, 255, 255)
+
+                text = self.small_font.render(row_text, True, color)
+                self.screen.blit(
+                    text,
+                    (rect.centerx - text.get_width() / 2, rect.centery - text.get_height() / 2),
+                )
+
+            back_rect = self._keybind_row_rect(len(ACTIONS))
+            self.border.draw(self.screen, back_rect)
+            back_text = self.small_font.render("Retour", True, (255, 255, 255))
+            self.screen.blit(
+                back_text,
+                (back_rect.centerx - back_text.get_width() / 2, back_rect.centery - back_text.get_height() / 2),
+            )
+
+        elif self.mode == "settings_display":
+
+            settings = self.game_manager.settings
+            fullscreen_rect, resolution_rect, back_rect = self._display_rects()
+
+            self.border.draw(self.screen, fullscreen_rect)
+            fs_text = self.option_font.render(
+                f"Plein ecran : {'ON' if settings.display['fullscreen'] else 'OFF'}", True, (255, 255, 255)
+            )
+            self.screen.blit(
+                fs_text,
+                (fullscreen_rect.centerx - fs_text.get_width() / 2, fullscreen_rect.centery - fs_text.get_height() / 2),
+            )
+
+            self.border.draw(self.screen, resolution_rect)
+            width, height = settings.display["resolution"]
+            res_color = (110, 110, 110) if settings.display["fullscreen"] else (255, 255, 255)
+            res_text = self.option_font.render(f"Resolution : {width}x{height}", True, res_color)
+            self.screen.blit(
+                res_text,
+                (resolution_rect.centerx - res_text.get_width() / 2, resolution_rect.centery - res_text.get_height() / 2),
+            )
+
+            self.border.draw(self.screen, back_rect)
+            back_text = self.option_font.render("Retour", True, (255, 255, 255))
+            self.screen.blit(
+                back_text,
+                (back_rect.centerx - back_text.get_width() / 2, back_rect.centery - back_text.get_height() / 2),
+            )
+
+        elif self.mode == "settings_border":
+
+            self.border_picker.render(self.screen)
+
+            back_rect = self._border_back_rect()
             self.border.draw(self.screen, back_rect)
             back_text = self.option_font.render("Retour", True, (255, 255, 255))
             self.screen.blit(

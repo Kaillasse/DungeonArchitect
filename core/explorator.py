@@ -22,10 +22,16 @@ class Explorator:
     MOVE_SPEED = 180  # pixels/seconde
     RUN_SPEED = 260  # pixels/seconde -- held with SHIFT
 
+    # One-shot actions (Player.play_action), checked against a single event
+    # (KEYDOWN or MOUSEBUTTONDOWN) via Settings.matches_event rather than
+    # polled -- unlike movement/run, either input kind is valid for these.
+    ONE_SHOT_ACTIONS = ("jump", "attack", "interact")
+
     def __init__(self, game_manager):
 
         self.game_manager = game_manager
         self.screen = game_manager.screen
+        self.settings = game_manager.settings
 
         # -----------------------------
         # Monde
@@ -34,6 +40,16 @@ class Explorator:
         self.dungeon = Dungeon(width=22, height=18)
         self.assembly = None
         self.current_placed_room = None
+        self._last_door_obj = None
+
+        # Debug mode (F3 toggles): shows/hides the logical grid overlay and
+        # every live hitbox on screen (red for the player, yellow for
+        # animals), and logs *why* a blocked move was rejected, so a mismatch
+        # between what's visually touching and what's actually colliding is
+        # directly observable instead of guessed at. Off by default -- the
+        # grid is normally only useful while editing, not exploring.
+        self.debug_mode = False
+        self._last_debug_message = None
 
         self.grid_offset_x = 0
         self.grid_offset_y = 0
@@ -62,6 +78,7 @@ class Explorator:
         """Load a specific room (chosen from the menu) and spawn the player in it."""
         self.assembly = None
         self.current_placed_room = None
+        self._last_door_obj = None
         self.dungeon.load_from_json(name)
         self.dungeon.spawn_animals()
         self._position_player_at_spawn()
@@ -69,6 +86,7 @@ class Explorator:
     def open_donjon(self, name):
         """Load a saved procedurally-assembled dungeon and spawn the player in its starting room."""
         self.assembly = load_assembly(name)
+        self._last_door_obj = None
 
         for room in self.assembly.rooms:
             room.dungeon.spawn_animals()
@@ -101,39 +119,71 @@ class Explorator:
 
         self.player.position.update(*spawn)
 
-    def _is_walkable(self, rect):
+    def _visible_animals_global(self):
+        """(animal, hitbox) pairs for every animal that could plausibly collide
+        with the player right now, hitbox already in global/world coordinates
+        -- current room's animals in single-room mode, every animal on the
+        player's current floor (shifted by each room's offset) in assembly
+        mode, since DungeonAssembly.update already hands the player's hitbox
+        to all of them regardless of which specific room the player is
+        registered as standing in."""
+        if self.assembly is not None:
+            tile_size = Dungeon.TILE_SIZE
+            pairs = []
+            for room in self.assembly.rooms_on_floor(self.current_placed_room.floor):
+                offset = (room.offset_x * tile_size, room.offset_y * tile_size)
+                for animal in room.dungeon.animal_manager.animals:
+                    pairs.append((animal, animal.get_hitbox().move(offset)))
+            return pairs
+        return [(animal, animal.get_hitbox()) for animal in self.dungeon.animal_manager.animals]
+
+    def _is_walkable(self, rect, debug_label=None):
+        """debug_label, only used when self.debug_mode is True, tags a
+        printed message identifying which candidate move (e.g. "x"/"y") this
+        check was for, so a blocked move's cause (wall vs. animal) shows up in
+        the console instead of only being inferred from what's on screen."""
         if self.assembly is not None:
             if not self.assembly.is_rect_walkable(
                 rect, self.current_placed_room.floor, prefer_room=self.current_placed_room
             ):
+                self._debug_log(debug_label, "wall")
                 return False
-            animals = self.current_placed_room.dungeon.animal_manager.animals
         else:
             if not self.dungeon.is_rect_walkable(rect):
+                self._debug_log(debug_label, "wall")
                 return False
-            animals = self.dungeon.animal_manager.animals
 
-        return not any(rect.colliderect(animal.get_hitbox()) for animal in animals)
+        for animal, animal_rect in self._visible_animals_global():
+            if rect.colliderect(animal_rect):
+                self._debug_log(debug_label, f"animal({animal.animal_type} at {animal_rect.center})")
+                return False
+
+        self._last_debug_message = None  # unblocked -- next block (even the same reason) should log again
+        return True
+
+    def _debug_log(self, label, reason):
+        if not self.debug_mode or label is None:
+            return
+        message = f"[debug] move '{label}' blocked by {reason}"
+        if message != self._last_debug_message:
+            print(message)
+            self._last_debug_message = message
 
     def _update_current_room(self):
-        """Resolve which room the player occupies now: same-floor room-crossing
-        via locate_room, then a portal check to actually flip floors (see
-        DungeonAssembly.locate_room/find_portal for why these are separate)."""
+        """Edge-triggered room switch: stepping onto a gate/wall entry-exit
+        that connects to another room (door_target_room, stamped at
+        generation time -- see DungeonAssembly.resolve_room_transition) flips
+        current_placed_room exactly once, on entry, whether that door happens
+        to lead to a room on the same floor or a different one. Standing on
+        the door doesn't re-trigger, and going back requires fully leaving
+        the door cell and stepping onto it again from the other side."""
         hitbox = self.player.get_hitbox()
         grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
         grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
 
-        located = self.assembly.locate_room(
-            grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
+        self.current_placed_room, self._last_door_obj = self.assembly.resolve_room_transition(
+            self.current_placed_room, self._last_door_obj, grid_x, grid_y
         )
-        if located is not None:
-            self.current_placed_room = located
-
-        target_floor = self.assembly.find_portal(self.current_placed_room, grid_x, grid_y)
-        if target_floor is not None:
-            target_room = self.assembly.room_at(target_floor, grid_x, grid_y)
-            if target_room is not None:
-                self.current_placed_room = target_room
 
     def load_spawn_room(self):
 
@@ -163,19 +213,22 @@ class Explorator:
 
         direction = pygame.Vector2()
 
-        if keys[pygame.K_z]:
+        if self.settings.is_action_pressed("move_up", keys):
             direction.y -= 1
 
-        if keys[pygame.K_s]:
+        if self.settings.is_action_pressed("move_down", keys):
             direction.y += 1
 
-        if keys[pygame.K_q]:
+        if self.settings.is_action_pressed("move_left", keys):
             direction.x -= 1
 
-        if keys[pygame.K_d]:
+        if self.settings.is_action_pressed("move_right", keys):
             direction.x += 1
 
-        running = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
+        # A single rebindable "run" binding replaces the old hardcoded
+        # "either shift key" check -- a deliberate scope trade-off, see
+        # core/data/settings.py.
+        running = self.settings.is_action_pressed("run", keys)
 
         if direction.length_squared() > 0:
 
@@ -191,12 +244,12 @@ class Explorator:
 
             future_hitbox = self.player.get_hitbox()
             future_hitbox.x += movement.x
-            if self._is_walkable(future_hitbox):
+            if self._is_walkable(future_hitbox, debug_label="x"):
                 self.player.position.x += movement.x
 
             future_hitbox = self.player.get_hitbox()
             future_hitbox.y += movement.y
-            if self._is_walkable(future_hitbox):
+            if self._is_walkable(future_hitbox, debug_label="y"):
                 self.player.position.y += movement.y
 
             if self.assembly is not None:
@@ -294,6 +347,7 @@ class Explorator:
                 hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_active_floor_foreground=True,
                 skip_active_floor_animals=True,
+                show_grid=self.debug_mode,
             )
 
             self.assembly.render_active_floor_entities(
@@ -318,6 +372,7 @@ class Explorator:
                 hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_foreground_objects=True,
                 skip_animals=True,
+                show_grid=self.debug_mode,
             )
 
             entities = list(self.dungeon.animal_manager.animals) + [self.player]
@@ -331,7 +386,28 @@ class Explorator:
                 hide_object_types=HIDDEN_OBJECT_TYPES,
             )
 
+        if self.debug_mode:
+            self._draw_debug_hitboxes()
+
         pygame.display.flip()
+
+    def _draw_debug_hitboxes(self):
+        """F3 overlay: the player's hitbox in red, every collidable animal's in
+        yellow -- both already in the exact world coordinates _is_walkable
+        compares, so any gap between "what looks like it's touching" and
+        "what's actually colliding" is directly visible instead of guessed."""
+        self._draw_debug_rect(self.player.get_hitbox(), (255, 60, 60))
+        for _animal, animal_rect in self._visible_animals_global():
+            self._draw_debug_rect(animal_rect, (255, 220, 60))
+
+    def _draw_debug_rect(self, world_rect, color):
+        top_left = self.camera.world_to_screen(world_rect.left, world_rect.top)
+        bottom_right = self.camera.world_to_screen(world_rect.right, world_rect.bottom)
+        screen_rect = pygame.Rect(
+            int(top_left[0]), int(top_left[1]),
+            int(bottom_right[0] - top_left[0]), int(bottom_right[1] - top_left[1]),
+        )
+        pygame.draw.rect(self.screen, color, screen_rect, 2)
 
     # ------------------------------------------------------
 
@@ -360,11 +436,9 @@ class Explorator:
 
                 elif event.type == pygame.MOUSEBUTTONDOWN:
 
-                    if event.button == 1:
-                        self.player.play_action("attack")
-
-                    elif event.button == 3:
-                        self.player.play_action("interact")
+                    for action_id in self.ONE_SHOT_ACTIONS:
+                        if self.settings.matches_event(action_id, event):
+                            self.player.play_action(action_id)
 
                 elif event.type == pygame.KEYDOWN:
 
@@ -376,8 +450,15 @@ class Explorator:
                         self.game_manager.state = GameState.MENU
                         running = False
 
-                    elif event.key == pygame.K_SPACE:
-                        self.player.play_action("jump")
+                    elif event.key == pygame.K_F3:
+                        self.debug_mode = not self.debug_mode
+                        self._last_debug_message = None
+                        print(f"[debug] debug mode {'ON' if self.debug_mode else 'OFF'} (grid + hitboxes)")
+
+                    else:
+                        for action_id in self.ONE_SHOT_ACTIONS:
+                            if self.settings.matches_event(action_id, event):
+                                self.player.play_action(action_id)
 
             self.update(dt)
 

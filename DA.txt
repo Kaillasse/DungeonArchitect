@@ -13,14 +13,10 @@ Entre chaques run le joueur reviendra a son monde d'origines qui est entierement
 Chaques mondes est diviser en etages eux meme divisé en salles, salles qui respectent une grille avec des cellules de 16x16 pixel ou chaques cellules peut etre remplie par des tuiles.
 L'objectif est d'avoir un environnement en 2D top down entierement destructible, customisable.
 
-Fonctionnalités ATM :
--éditeur de salle 20% : fait : grille logique, autotile (fonction qui placent les murs automatiquement et logiquement les murs en fonction du sol placé)
-30 tuiles basiques relié a l'autotile et classé par type mur ou sol, chacunes avec un code qui permet a l'autotile de savoir par le calcul des tuiles voisines,
-de savoir quel tuiles placer, gomme (fonction qui supprimes les sol et mur placé)
+Random to-do list :
 
-Priorités AF:
--Ameliorer/simplifier/stabiliser la logique du game_manager qui permettra de gerer/changer de game state entre les menus, les editeurs et le jeu top down
--finir l'editeur : pouvoir sauvegarder des salles, stabiliser les outils actuel (placer et detruire) et ajouter les autres outils (activer/desactiver l'autotile)
-placer des tuiles interactives (coffres, portes pour commencer), placer les premieres entités (joueur et mob pour commencer)
--Implementer d'autres game states : le top down avec controle du joueur et les menus.
-
+-debug mode : press F3 affiche le mode debug il ne fera que afficher masquer la grille logique et les hitbox
+-completer les reglages, changer les inputs et le sprite utiliser pour le 9slice du bordermanager.
+-nouvelle objet/entités : 2 ennemies skeleton1 et skeleton2 leur asset est deja dans assets/characters/Ennemies/skeleton1 ou skeleton2 chaque dossier comprend 1 sprite par comportement : idle, attack, damaged, death et movement. Tous sont des lignes de frame en 32x32 pxl les ennemies doivent avoir le meme comportement et collisions que les animaux avec un nouveau trait : attack le joueur a vue (quand joueur rentre dans range de l'ennemie celui si se rapproche jusqu'a etre a porté du player et declenché l'animation attack
+-systeme de combat : si player.attack frame 4 et 5 /6 touche une autre entité cette entité prend 1 dmg fonctionne dans l'autre sens pour les ennemie sur le player sauf que pour les skeletons c'est les frames 7 et 8 sur les 9 frames de l'animation qui sont effective
+-système d'inventaire : 3 slot principaux (item attack, item interact et passif),2 compteur de monnaie et 15 slot d'inventaires (3 rangé de 5 slot), ce systeme sera porté par le state menu, avec un gros pannel (accessible par input e par defaut) ce pannel affichera le joueur avec l'animation sont animation idle, les 3 slot principaux a droite avec les portes monnaie et les slots d'inventaire en dessous.

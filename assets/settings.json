@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "bindings": {
+    "move_up": {
+      "kind": "key",
+      "name": "z"
+    },
+    "move_down": {
+      "kind": "key",
+      "name": "s"
+    },
+    "move_left": {
+      "kind": "key",
+      "name": "q"
+    },
+    "move_right": {
+      "kind": "key",
+      "name": "d"
+    },
+    "run": {
+      "kind": "key",
+      "name": "left shift"
+    },
+    "jump": {
+      "kind": "key",
+      "name": "space"
+    },
+    "attack": {
+      "kind": "mouse",
+      "button": 1
+    },
+    "interact": {
+      "kind": "mouse",
+      "button": 3
+    }
+  },
+  "display": {
+    "fullscreen": true,
+    "resolution": [
+      1280,
+      720
+    ]
+  },
+  "border_cell": [
+    7,
+    0
+  ]
+}

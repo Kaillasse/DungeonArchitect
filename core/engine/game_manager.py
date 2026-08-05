@@ -7,10 +7,13 @@ from core.editor.creator import Creator
 from core.explorator import Explorator
 from core.menu import Menu
 from core.engine.gamestate import GameState
+from core.data.settings import Settings
+from core.ui import BorderManager
 
 class GameManager:
-    def __init__(self, screen):
+    def __init__(self, screen, settings=None):
         self.screen = screen
+        self.settings = settings if settings is not None else Settings()
         # Le smoke-test headless (DUNGEONARCHITECT_HEADLESS) attend le comportement
         # historique de Creator.run() (sauvegarde immediate + sortie) ; le menu n'a
         # pas de bypass headless, donc on saute directement l'editeur.
@@ -22,6 +25,32 @@ class GameManager:
         self.menu = Menu(self)
         self.creator = Creator(self)
         self.explorator = Explorator(self)
+
+        # BorderManager is a singleton first-initialized by whichever of the
+        # above constructed it first (Menu, in practice) -- apply the
+        # persisted border choice once construction is done, same spirit as
+        # loading any other saved setting.
+        BorderManager().set_tile(*self.settings.border_cell)
+
+    def apply_display_settings(self, fullscreen, resolution=None):
+        """Switch fullscreen/windowed (and optionally resolution) immediately,
+        propagating the new screen Surface to every state that caches one --
+        Menu/Creator/Explorator each store self.screen once at construction
+        (their child widgets always take screen as a render() parameter, never
+        cache it, so nothing else needs updating). Persists via Settings.save()."""
+        self.settings.display["fullscreen"] = fullscreen
+        if resolution is not None:
+            self.settings.display["resolution"] = list(resolution)
+
+        size, flags = self.settings.display_mode()
+        screen = pygame.display.set_mode(size, flags)
+
+        self.screen = screen
+        self.menu.screen = screen
+        self.creator.screen = screen
+        self.explorator.screen = screen
+
+        self.settings.save()
 
     def run(self):
         while self.running:

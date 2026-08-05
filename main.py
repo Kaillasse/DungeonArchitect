@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 import pygame
 from core.engine.game_manager import GameManager
+from core.data.settings import load_settings
 
 
 # Allow "Run Python File" on core/main.py (script mode).
@@ -17,9 +18,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 def main():
     pygame.init()
-    screen = pygame.display.set_mode((1280, 720))
+    settings = load_settings()
+    size, flags = settings.display_mode()
+    screen = pygame.display.set_mode(size, flags)
     pygame.display.set_caption("DungeonArchitect")
-    GameManager(screen).run()
+    GameManager(screen, settings).run()
 
 if __name__ == "__main__":
     main()

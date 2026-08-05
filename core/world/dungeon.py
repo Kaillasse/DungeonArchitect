@@ -123,13 +123,14 @@ class Dungeon:
     # ------------------------------------------------------------------
 
     def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
-               skip_foreground_objects=False, skip_animals=False):
+               skip_foreground_objects=False, skip_animals=False, show_grid=True):
         self.renderer.render(
             screen, self, camera,
             spawn_preview=spawn_preview,
             hide_object_types=hide_object_types,
             show_link_indicators=show_link_indicators,
             skip_foreground_objects=skip_foreground_objects,
+            show_grid=show_grid,
         )
         if not skip_animals:
             self.animal_manager.draw(screen, camera)

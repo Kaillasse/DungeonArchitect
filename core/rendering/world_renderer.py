@@ -1,6 +1,7 @@
 import pygame
 
 from core.data.ressources import TILE_SIZE, load_tileset, get_tile_surface
+from core.editor.autotile import DEFAULT_FLOOR_SPRITE
 from core.world.object_manager import OBJECT_TYPES, load_object_frames
 
 
@@ -30,16 +31,20 @@ class WorldRenderer:
             self._tile_cache[cache_key] = pygame.transform.scale(tile_surface, (tile_px, tile_px))
         return self._tile_cache[cache_key]
 
-    def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False, skip_foreground_objects=False):
+    def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False, skip_foreground_objects=False, show_grid=True):
         zoom = camera.zoom
         tile_size = dungeon.tile_size
         tile_px = tile_size * zoom
         columns = self.tileset.get_width() // TILE_SIZE
+        doorway_cells = self._doorway_cells(dungeon)
 
         for y, row in enumerate(dungeon.sprite_grid):
             for x, tile_index in enumerate(row):
                 if tile_index < 0:
                     continue
+
+                if (x, y) in doorway_cells:
+                    tile_index = DEFAULT_FLOOR_SPRITE
 
                 scaled = self._get_scaled_tile(tile_index, zoom, tile_px, columns)
 
@@ -54,17 +59,18 @@ class WorldRenderer:
             skip_foreground=skip_foreground_objects,
         )
 
-        for gy in range(dungeon.height + 1):
-            world_y = gy * tile_size
-            p1 = camera.world_to_screen(0, world_y)
-            p2 = camera.world_to_screen(dungeon.width * tile_size, world_y)
-            pygame.draw.line(screen, self.GRID_LINE_COLOR, p1, p2)
+        if show_grid:
+            for gy in range(dungeon.height + 1):
+                world_y = gy * tile_size
+                p1 = camera.world_to_screen(0, world_y)
+                p2 = camera.world_to_screen(dungeon.width * tile_size, world_y)
+                pygame.draw.line(screen, self.GRID_LINE_COLOR, p1, p2)
 
-        for gx in range(dungeon.width + 1):
-            world_x = gx * tile_size
-            p1 = camera.world_to_screen(world_x, 0)
-            p2 = camera.world_to_screen(world_x, dungeon.height * tile_size)
-            pygame.draw.line(screen, self.GRID_LINE_COLOR, p1, p2)
+            for gx in range(dungeon.width + 1):
+                world_x = gx * tile_size
+                p1 = camera.world_to_screen(world_x, 0)
+                p2 = camera.world_to_screen(world_x, dungeon.height * tile_size)
+                pygame.draw.line(screen, self.GRID_LINE_COLOR, p1, p2)
 
         if spawn_preview is not None:
             gx, gy = spawn_preview
@@ -81,6 +87,28 @@ class WorldRenderer:
 
         if show_link_indicators:
             self._draw_link_indicators(screen, dungeon, camera)
+
+    @staticmethod
+    def _doorway_cells(dungeon):
+        """Every cell covered by a gate/wall entry-exit's footprint. A gate/wall
+        can only ever be placed on a WALL cell that already reads as a clean
+        doorway (ObjectManager.is_valid_doorway), so its mere presence is
+        enough -- no need to re-validate the shape here. Drawing FLOOR under
+        it instead of the underlying WALL sprite is purely cosmetic (the
+        logical_grid cell stays WALL, so autotiling/doorway-validity/the
+        procedural assembler are untouched) -- it just stops the player from
+        feeling like they're walking into solid wall texture when the
+        gate/wall itself is open (or even closed, since the door sprite is
+        what visually reads as blocking, not a wall texture peeking through)."""
+        cells = set()
+        for obj in dungeon.object_manager.objects:
+            if OBJECT_TYPES[obj["type"]]["placement"] != "doorway":
+                continue
+            size_x, size_y = OBJECT_TYPES[obj["type"]]["size"]
+            for dx in range(size_x):
+                for dy in range(size_y):
+                    cells.add((obj["x"] + dx, obj["y"] + dy))
+        return cells
 
     def render_foreground_objects(self, screen, dungeon, camera, hide_object_types=None):
         """Objects ObjectManager.is_foreground_object() flags (e.g. an L/R torch) -- call this after drawing the player sprite."""

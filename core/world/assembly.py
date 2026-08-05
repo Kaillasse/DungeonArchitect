@@ -35,14 +35,21 @@ def _valid_entry_exits(dungeon):
 
 
 class PlacedRoom:
-    """A Dungeon placed at a given floor and global grid offset within a DungeonAssembly."""
+    """A Dungeon placed at a given floor and global grid offset within a DungeonAssembly.
 
-    def __init__(self, dungeon, room_name, floor, offset_x, offset_y):
+    `index` is this room's position in the owning DungeonAssembly.rooms list,
+    known to the caller at construction time (generate_assembly/load_assembly
+    both add rooms in a stable, deterministic order) -- it's how a door object's
+    "door_target_room" reference resolves back to a specific PlacedRoom.
+    """
+
+    def __init__(self, dungeon, room_name, floor, offset_x, offset_y, index):
         self.dungeon = dungeon
         self.room_name = room_name
         self.floor = floor
         self.offset_x = offset_x
         self.offset_y = offset_y
+        self.index = index
 
     def to_global(self, local_x, local_y):
         return self.offset_x + local_x, self.offset_y + local_y
@@ -68,6 +75,7 @@ class DungeonAssembly:
 
     def __init__(self):
         self.rooms = []
+        self._gradient_hole_cache = {}
 
     def add_room(self, placed_room):
         self.rooms.append(placed_room)
@@ -105,8 +113,9 @@ class DungeonAssembly:
         box (they're built from the same source rooms, so this is common)
         could let the player "phase" through a wall that's solid on their
         own floor just because an unrelated room on another floor happens to
-        have FLOOR at that same global cell. Crossing floors is handled
-        separately, via `find_portal` -- see generate_assembly's portal_level.
+        have FLOOR at that same global cell. Crossing floors (or rooms) is
+        handled separately, via `resolve_room_transition` -- see
+        generate_assembly's door_target_room.
 
         Prefers staying in `prefer_room` if it still claims the cell (checked
         first), then falls back to any other room on `floor`. Checks FLOOR
@@ -130,29 +139,44 @@ class DungeonAssembly:
 
         return None
 
-    def find_portal(self, room, global_x, global_y):
-        """The target floor to cross to if the object at (global_x, global_y)
-        within `room` is a portal (an entry-exit with a "portal_level"), else
-        None.
+    def resolve_room_transition(self, current_room, last_door_obj, global_x, global_y):
+        """Edge-triggered room switch across a gate/wall entry-exit: stepping
+        onto a door cell that carries a "door_target_room" (stamped by
+        generate_assembly on both halves of a merged doorway, whether it's a
+        same-floor E/S or a cross-floor portal -- both use the identical
+        mechanism now) switches to that room exactly once, on entry.
 
-        portal_level is the half-integer midpoint between the two floors a
-        staircase connects (e.g. 0.5 between floors 0 and 1, 1.5 between 1
-        and 2 -- see generate_assembly) and is stored directly on the object,
-        the same value on both sides of the connection since it's the same
-        physical staircase either way; the actual target floor depends on
-        which side (which `room.floor`) you're asking from:
-        target = 2 * portal_level - room.floor.
+        This deliberately does NOT re-derive the current room from FLOOR
+        ownership every frame (that's what `locate_room` is for, and it's
+        still used for collision/button resolution) -- a door crossing is a
+        discrete event, not a continuous "which room owns this pixel" query.
+        Standing still on the shared door cell must not flip back and forth,
+        and going back the way you came requires fully leaving the door cell
+        and re-entering it from the other room's side.
 
-        Only reachable at all once the current floor's own collision already
-        allowed walking there (e.g. a gate opened by a button), so no extra
-        "is it open" check is needed here.
+        `last_door_obj` is the door object (a plain dict from some room's
+        object list) the player was resolved to be on last frame, or None.
+        Returns (room, last_door_obj) for the caller to store back.
         """
-        if room is None:
-            return None
-        obj = room.dungeon.object_manager.get_object_at(global_x - room.offset_x, global_y - room.offset_y)
-        if obj is None or "portal_level" not in obj:
-            return None
-        return round(2 * obj["portal_level"] - room.floor)
+        local_x, local_y = global_x - current_room.offset_x, global_y - current_room.offset_y
+        door_obj = current_room.dungeon.object_manager.get_object_at(local_x, local_y)
+
+        if door_obj is None:
+            return current_room, None
+
+        if door_obj is last_door_obj or "door_target_room" not in door_obj:
+            return current_room, last_door_obj
+
+        target_room = self.rooms[door_obj["door_target_room"]]
+        target_local_x = global_x - target_room.offset_x
+        target_local_y = global_y - target_room.offset_y
+        # Re-derive the door as seen from the *target* room, not the one we
+        # just left -- next frame's lookup happens via target_room, so
+        # comparing against door_obj (the source room's copy) would never
+        # match and would re-trigger a bounce straight back.
+        target_door_obj = target_room.dungeon.object_manager.get_object_at(target_local_x, target_local_y)
+
+        return target_room, target_door_obj
 
     def is_global_cell_walkable(self, global_x, global_y, floor, prefer_room=None):
         room = self.locate_room(global_x, global_y, floor, prefer_room=prefer_room)
@@ -246,18 +270,28 @@ class DungeonAssembly:
     # ------------------------------------------------------------------
 
     BELOW_FLOOR_ALPHA = 45
-    ABOVE_FLOOR_ALPHA = 235
-    VISION_RADIUS_TILES = 2.5
+    # Kept close to BELOW_FLOOR_ALPHA on purpose -- floors above used to render
+    # almost fully opaque (235), which read as "not actually masked" and made
+    # the view cluttered/unreadable. Only a hair brighter than the floors
+    # below since the ceiling sits directly overhead rather than further away.
+    ABOVE_FLOOR_ALPHA = 60
+    VISION_RADIUS_TILES = 4.5  # was 2.5; +2 tiles
+    VISION_FALLOFF_TILES = 1.5  # width of the soft edge just inside VISION_RADIUS_TILES
 
     def render(self, screen, camera, active_floor, player_world_pos=None, hide_object_types=None,
-               skip_active_floor_foreground=False, skip_active_floor_animals=False, vision_radius_tiles=None):
+               skip_active_floor_foreground=False, skip_active_floor_animals=False,
+               vision_radius_tiles=None, vision_falloff_tiles=None, show_grid=True):
         """Draw every floor relative to active_floor: floors below first (faintly
-        tinted), active_floor normally, floors above last as a near-opaque mask
-        with a circular hole (vision_radius_tiles, in tiles) cut out around
+        tinted), active_floor normally, floors above last as a dim mask with a
+        soft-edged hole (vision_radius_tiles, in tiles, with a gradient falloff
+        band vision_falloff_tiles wide just inside it) cut out around
         player_world_pos so the player can see their own floor through it as
-        they approach. player_world_pos is a continuous (world_x, world_y)
-        pixel position, not a grid cell -- omit it (e.g. Creator's static
-        preview, which has no player) to render floors above fully opaque.
+        they approach -- fully clear up to (vision_radius_tiles -
+        vision_falloff_tiles), fading to the mask's base opacity by
+        vision_radius_tiles. player_world_pos is a continuous (world_x,
+        world_y) pixel position, not a grid cell -- omit it (e.g. Creator's
+        static preview, which has no player) to render floors above at their
+        flat, un-punched mask opacity everywhere.
 
         skip_active_floor_foreground lets a caller that draws its own player
         sprite (Explorator) leave out active_floor's foreground objects (an
@@ -274,6 +308,8 @@ class DungeonAssembly:
         """
         if vision_radius_tiles is None:
             vision_radius_tiles = self.VISION_RADIUS_TILES
+        if vision_falloff_tiles is None:
+            vision_falloff_tiles = self.VISION_FALLOFF_TILES
 
         for floor in self.floors():
             if floor < active_floor:
@@ -284,6 +320,7 @@ class DungeonAssembly:
             hide_object_types=hide_object_types,
             skip_foreground=skip_active_floor_foreground,
             skip_animals=skip_active_floor_animals,
+            show_grid=show_grid,
         )
 
         for floor in self.floors():
@@ -293,6 +330,7 @@ class DungeonAssembly:
                     hide_object_types=hide_object_types,
                     player_world_pos=player_world_pos,
                     vision_radius_tiles=vision_radius_tiles,
+                    vision_falloff_tiles=vision_falloff_tiles,
                 )
 
     def render_active_floor_foreground(self, screen, camera, active_floor, hide_object_types=None):
@@ -332,7 +370,7 @@ class DungeonAssembly:
         for _, entity, entity_camera in entries:
             entity.draw(screen, entity_camera)
 
-    def _render_floor(self, screen, camera, floor, hide_object_types=None, skip_foreground=False, skip_animals=False):
+    def _render_floor(self, screen, camera, floor, hide_object_types=None, skip_foreground=False, skip_animals=False, show_grid=True):
         tile_size = Dungeon.TILE_SIZE
         for room in self.rooms_on_floor(floor):
             offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
@@ -341,6 +379,7 @@ class DungeonAssembly:
                 hide_object_types=hide_object_types,
                 skip_foreground_objects=skip_foreground,
                 skip_animals=skip_animals,
+                show_grid=show_grid,
             )
 
     def _draw_floor_layer(self, screen, camera, floor, hide_object_types):
@@ -367,23 +406,66 @@ class DungeonAssembly:
         screen.blit(layer, (0, 0))
 
     def _render_floor_masked(self, screen, camera, floor, hide_object_types=None,
-                              player_world_pos=None, vision_radius_tiles=None):
+                              player_world_pos=None, vision_radius_tiles=None, vision_falloff_tiles=None):
         if vision_radius_tiles is None:
             vision_radius_tiles = self.VISION_RADIUS_TILES
+        if vision_falloff_tiles is None:
+            vision_falloff_tiles = self.VISION_FALLOFF_TILES
 
         layer = self._draw_floor_layer(screen, camera, floor, hide_object_types)
         self._multiply_alpha(layer, self.ABOVE_FLOOR_ALPHA)
 
         if player_world_pos is not None:
             radius_px = int(vision_radius_tiles * Dungeon.TILE_SIZE * camera.zoom)
+            falloff_px = int(vision_falloff_tiles * Dungeon.TILE_SIZE * camera.zoom)
             player_screen_x, player_screen_y = camera.world_to_screen(*player_world_pos)
 
             hole = pygame.Surface(layer.get_size(), pygame.SRCALPHA)
             hole.fill((255, 255, 255, 255))
-            pygame.draw.circle(hole, (255, 255, 255, 0), (int(player_screen_x), int(player_screen_y)), radius_px)
+
+            patch = self._gradient_hole(radius_px, falloff_px)
+            patch_rect = patch.get_rect(center=(int(player_screen_x), int(player_screen_y)))
+            # BLEND_RGBA_MIN keeps whichever alpha is smaller at each pixel --
+            # since `hole` starts at 255 everywhere, this just stamps the
+            # patch's own (0 at center -> 255 at/beyond its radius) alpha onto
+            # it in one blit, instead of hand-rolling the same math per pixel.
+            hole.blit(patch, patch_rect.topleft, special_flags=pygame.BLEND_RGBA_MIN)
+
             layer.blit(hole, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
 
         screen.blit(layer, (0, 0))
+
+    def _gradient_hole(self, radius_px, falloff_px):
+        """A small cached SRCALPHA patch: alpha 0 (fully punched) out to
+        (radius_px - falloff_px), then a linear ramp up to alpha 255 (no
+        effect once multiplied into the mask) at radius_px and beyond --
+        replaces the old hard-edged single circle with a soft one. Built once
+        per (radius_px, falloff_px) pair (both vary only with zoom, not every
+        frame) by stamping successively smaller filled circles from the
+        outside in, each one's alpha computed for its own radius -- O(radius_px)
+        draw calls on a cache miss instead of a per-pixel loop.
+        """
+        key = (radius_px, falloff_px)
+        patch = self._gradient_hole_cache.get(key)
+        if patch is not None:
+            return patch
+
+        size = radius_px * 2 + 2
+        patch = pygame.Surface((size, size), pygame.SRCALPHA)
+        patch.fill((255, 255, 255, 255))
+        center = (radius_px + 1, radius_px + 1)
+        inner_radius = max(radius_px - falloff_px, 0)
+        falloff_span = max(radius_px - inner_radius, 1)
+
+        for r in range(radius_px, -1, -1):
+            if r <= inner_radius:
+                alpha = 0
+            else:
+                alpha = int(255 * (r - inner_radius) / falloff_span)
+            pygame.draw.circle(patch, (255, 255, 255, alpha), center, r)
+
+        self._gradient_hole_cache[key] = patch
+        return patch
 
 
 class _OffsetCamera:
@@ -460,7 +542,7 @@ def generate_assembly(room_names, room_count, rng=None):
         return None
 
     assembly = DungeonAssembly()
-    start_room = PlacedRoom(start_dungeon, start_name, floor=0, offset_x=0, offset_y=0)
+    start_room = PlacedRoom(start_dungeon, start_name, floor=0, offset_x=0, offset_y=0, index=0)
     assembly.add_room(start_room)
 
     pending = [(start_room, exit_obj) for exit_obj in start_room.entry_exits()]
@@ -474,7 +556,15 @@ def generate_assembly(room_names, room_count, rng=None):
         # Only align onto an exit of the SAME type as the anchor's (a gate
         # merges with a gate, a wall with a wall) -- otherwise the two halves
         # of one physical doorway would be different objects with unrelated
-        # sprites/animations.
+        # sprites/animations. Orientation doesn't need filtering here: two
+        # exits facing opposite directions land the candidate's interior
+        # exactly in the anchor's void (a same-floor connection), while two
+        # exits facing the same direction land the candidate's interior
+        # exactly on top of the anchor's own interior -- always a genuine
+        # FLOOR/FLOOR collision (is_valid_doorway guarantees a FLOOR neighbor
+        # right next to any doorway), so _fits() below always pushes that
+        # case to a different floor instead (a staircase-style connection).
+        # Either way the merge is coherent; _fits() is what actually decides.
         matching_exits = [obj for obj in candidate_exits if obj["type"] == anchor_exit["type"]]
         if not matching_exits:
             continue
@@ -485,29 +575,47 @@ def generate_assembly(room_names, room_count, rng=None):
         offset_x = anchor_gx - candidate_exit["x"]
         offset_y = anchor_gy - candidate_exit["y"]
 
-        candidate_room = PlacedRoom(candidate_dungeon, candidate_name, anchor_room.floor, offset_x, offset_y)
+        candidate_index = len(assembly.rooms)
+        candidate_room = PlacedRoom(
+            candidate_dungeon, candidate_name, anchor_room.floor, offset_x, offset_y, index=candidate_index
+        )
         candidate_cells = candidate_room.occupied_cells()
         shared_cell = (anchor_gx, anchor_gy)
 
-        floor = anchor_room.floor
-        if _collides(assembly.occupied_cells_on_floor(floor), candidate_cells, ignore=shared_cell):
-            floor = anchor_room.floor + 1
-            candidate_room.floor = floor
-            if _collides(assembly.occupied_cells_on_floor(floor), candidate_cells, ignore=shared_cell):
-                floor = anchor_room.floor - 1
-                candidate_room.floor = floor
+        def _fits(floor):
+            return not _collides(assembly.occupied_cells_on_floor(floor), candidate_cells, ignore=shared_cell)
 
-        if floor != anchor_room.floor:
-            # Genuine cross-floor connection: tag both halves of the doorway
-            # with the same portal_level (the half-integer midpoint between
-            # the two floors, e.g. 0.5 between 0 and 1) so
-            # DungeonAssembly.find_portal can flip the player's current floor
-            # when they step onto this shared cell (see locate_room's
-            # docstring for why floor-crossing can't just fall out of
-            # FLOOR-ownership checks the way same-floor room-crossing does).
-            portal_level = (anchor_room.floor + floor) / 2
-            anchor_exit["portal_level"] = portal_level
-            candidate_exit["portal_level"] = portal_level
+        # Try the anchor's own floor first, then alternate +1/-1, +2/-2, ...
+        # outward until a floor with no real conflict is found. This must
+        # never give up and place the room anyway -- two rooms actually
+        # overlapping on the same floor is exactly the "several rooms
+        # superimposed" bug that lets the player walk through a wall covering
+        # another room's floor, since collision is resolved per-floor
+        # (DungeonAssembly.locate_room) assuming at most one room ever claims
+        # a given floor cell.
+        floor = anchor_room.floor
+        if not _fits(floor):
+            step = 1
+            while True:
+                floor = anchor_room.floor + step
+                if _fits(floor):
+                    break
+                floor = anchor_room.floor - step
+                if _fits(floor):
+                    break
+                step += 1
+            candidate_room.floor = floor
+
+        # Tag both halves of the merged doorway with the other side's room
+        # index, whether this connection ended up same-floor or not -- a
+        # single edge-triggered mechanism (DungeonAssembly.resolve_room_transition)
+        # handles both an ordinary same-floor E/S and a cross-floor "portal"
+        # crossing identically: stepping onto the door cell switches straight
+        # to the room on the other end (see locate_room's docstring for why
+        # this can't just fall out of FLOOR-ownership checks the way ordinary
+        # movement within one room does).
+        anchor_exit["door_target_room"] = candidate_index
+        candidate_exit["door_target_room"] = anchor_room.index
 
         # Any button in the anchor's room that links to the anchor's exit should
         # also open the candidate's now-merged copy of that same door -- but a
@@ -590,6 +698,7 @@ def load_assembly(name):
             room_payload["floor"],
             room_payload["offset_x"],
             room_payload["offset_y"],
+            index=len(assembly.rooms),
         )
         assembly.add_room(placed)
 

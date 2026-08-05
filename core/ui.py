@@ -30,6 +30,10 @@ class BorderManager:
 
         self.border_asset_path = border_asset_path
         self.border = None
+        self._sheet = None
+        self.rows = 0
+        self.cols = 0
+        self.current_cell = (0, 0)
 
         self.load_border()
 
@@ -41,15 +45,34 @@ class BorderManager:
 
         if os.path.exists(self.border_asset_path):
 
-            sheet = pygame.image.load(self.border_asset_path).convert_alpha()
+            self._sheet = pygame.image.load(self.border_asset_path).convert_alpha()
+            self.rows = self._sheet.get_height() // self.BORDER_SIZE
+            self.cols = self._sheet.get_width() // self.BORDER_SIZE
 
-            first_border = sheet.subsurface((0, 0, 64, 64)).copy()
-
-            self.border = self._create_nine_slice(first_border)
+            self.set_tile(0, 0)
 
         else:
 
             self.border = self._create_fallback()
+
+    # -------------------------------------------------------------
+
+    def set_tile(self, row, col):
+        """Switch the active 9-slice to a different cell of the same border
+        sheet -- a no-op if no sheet was loaded (fallback mode). Since this
+        singleton is shared by every panel in the app (Menu, RoomBrowser,
+        Creator's UI), changing it here updates every panel's look the next
+        time it draws, with no other code needing to react."""
+        if self._sheet is None:
+            return
+
+        row = max(0, min(self.rows - 1, row))
+        col = max(0, min(self.cols - 1, col))
+
+        c = self.BORDER_SIZE
+        tile = self._sheet.subsurface((col * c, row * c, c, c)).copy()
+        self.border = self._create_nine_slice(tile)
+        self.current_cell = (row, col)
 
     # -------------------------------------------------------------
 
@@ -135,6 +158,82 @@ class BorderManager:
         screen.blit(b["tr"], (x + w - c, y))
         screen.blit(b["bl"], (x, y + h - c))
         screen.blit(b["br"], (x + w - c, y + h - c))
+
+
+# ---------------------------------------------------------------------
+# Border picker (Settings > Bordure)
+# ---------------------------------------------------------------------
+
+
+class BorderPicker:
+    """Clickable grid of every raw tile in a BorderManager's sheet -- clicking
+    one calls border_manager.set_tile(row, col) directly (so every panel in
+    the app, this picker's own background included, re-skins immediately)
+    and, if provided, on_select(row, col) so the caller can persist the
+    choice. A no-op grid (nothing to click) if the manager has no sheet
+    loaded (fallback mode)."""
+
+    CELL_SIZE = 48
+    GAP = 4
+    HIGHLIGHT_COLOR = (255, 220, 120)
+
+    def __init__(self, x, y, border_manager, on_select=None):
+        self.x = x
+        self.y = y
+        self.border_manager = border_manager
+        self.on_select = on_select
+
+    @property
+    def width(self):
+        cols = max(1, self.border_manager.cols)
+        return cols * (self.CELL_SIZE + self.GAP) + self.GAP
+
+    @property
+    def height(self):
+        rows = max(1, self.border_manager.rows)
+        return rows * (self.CELL_SIZE + self.GAP) + self.GAP
+
+    def _cell_rect(self, row, col):
+        return pygame.Rect(
+            self.x + self.GAP + col * (self.CELL_SIZE + self.GAP),
+            self.y + self.GAP + row * (self.CELL_SIZE + self.GAP),
+            self.CELL_SIZE,
+            self.CELL_SIZE,
+        )
+
+    def handle_event(self, event):
+        """Returns True if this event was consumed (a swatch was clicked)."""
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return False
+
+        for row in range(self.border_manager.rows):
+            for col in range(self.border_manager.cols):
+                if self._cell_rect(row, col).collidepoint(event.pos):
+                    self.border_manager.set_tile(row, col)
+                    if self.on_select is not None:
+                        self.on_select(row, col)
+                    return True
+
+        return False
+
+    def render(self, screen):
+        panel_rect = pygame.Rect(self.x, self.y, self.width, self.height)
+        self.border_manager.draw(screen, panel_rect)
+
+        sheet = self.border_manager._sheet
+        if sheet is None:
+            return
+
+        size = self.border_manager.BORDER_SIZE
+        for row in range(self.border_manager.rows):
+            for col in range(self.border_manager.cols):
+                rect = self._cell_rect(row, col)
+                tile = sheet.subsurface((col * size, row * size, size, size))
+                scaled = pygame.transform.scale(tile, (self.CELL_SIZE, self.CELL_SIZE))
+                screen.blit(scaled, rect.topleft)
+
+                if (row, col) == self.border_manager.current_cell:
+                    pygame.draw.rect(screen, self.HIGHLIGHT_COLOR, rect, 3)
 
 
 # ---------------------------------------------------------------------
