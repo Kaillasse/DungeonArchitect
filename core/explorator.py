@@ -12,6 +12,7 @@ from core.world.entities import Player
 from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS
 from core.world.inventory import Inventory, Item
 from core.inventory_ui import InventoryPanel
+from core.editor.autotile import EMPTY
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
 
@@ -250,6 +251,59 @@ class Explorator:
             print(message)
             self._last_debug_message = message
 
+    def _is_void(self, rect):
+        """True if no room claims the cell under the player's feet on the
+        active floor -- distinct from being blocked by an actual wall/closed
+        door/animal/enemy, which _is_walkable already covers. Single point
+        (feet anchor), same convention as _update_current_room/
+        check_button_trigger, not the 4-corner check is_rect_walkable uses --
+        falling is about where the player's feet are, not a strict hitbox
+        overlap test."""
+        grid_x = int(rect.centerx // Dungeon.TILE_SIZE)
+        grid_y = int((rect.bottom - 1) // Dungeon.TILE_SIZE)
+
+        if self.assembly is not None:
+            return self.assembly.locate_room(
+                grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
+            ) is None
+
+        if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
+            return True
+        return self.dungeon.logical_grid[grid_y][grid_x] == EMPTY
+
+    def _attempt_fall(self):
+        """Called once the player's feet actually end up over void (see
+        _is_void): looks for the nearest floor below (within the same
+        assembly) that owns this exact global cell and lands there --
+        current_placed_room changes, player.position doesn't need to (it's
+        already global, so "same tile, different floor" falls out for
+        free). No assembly (single-room mode) or nothing below at all: falls
+        out of the map entirely."""
+        if self.assembly is None:
+            self._fall_out_of_map()
+            return
+
+        hitbox = self.player.get_hitbox()
+        grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
+        grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
+        current_floor = self.current_placed_room.floor
+
+        for floor in sorted((f for f in self.assembly.floors() if f < current_floor), reverse=True):
+            room = self.assembly.locate_room(grid_x, grid_y, floor)
+            if room is not None:
+                self.current_placed_room = room
+                self._last_door_obj = None  # new room/floor -- re-arm the door edge-trigger
+                return
+
+        self._fall_out_of_map()
+
+    def _fall_out_of_map(self):
+        """No floor anywhere below catches the fall -- game over. The real
+        "monde de base" (étage system) doesn't exist yet, so this returns to
+        the main Menu for now, same as ECHAP."""
+        print("[game] Chute hors de la carte -- retour au menu.")
+        self.game_manager.state = GameState.MENU
+
     def _update_current_room(self):
         """Edge-triggered room switch: stepping onto a gate/wall entry-exit
         that connects to another room (door_target_room, stamped at
@@ -333,18 +387,25 @@ class Explorator:
                 * dt
             )
 
+            # Void cells are traversable now (instead of a hard block) -- a
+            # single consolidated fall-check runs below, after both axes and
+            # the door transition, rather than blocking movement at the
+            # boundary of whatever room happens to own the active floor.
             future_hitbox = self.player.get_hitbox()
             future_hitbox.x += movement.x
-            if self._is_walkable(future_hitbox, debug_label="x"):
+            if self._is_walkable(future_hitbox, debug_label="x") or self._is_void(future_hitbox):
                 self.player.position.x += movement.x
 
             future_hitbox = self.player.get_hitbox()
             future_hitbox.y += movement.y
-            if self._is_walkable(future_hitbox, debug_label="y"):
+            if self._is_walkable(future_hitbox, debug_label="y") or self._is_void(future_hitbox):
                 self.player.position.y += movement.y
 
             if self.assembly is not None:
                 self._update_current_room()
+
+            if self._is_void(self.player.get_hitbox()):
+                self._attempt_fall()
 
             # -----------------------------
             # Choix direction animation
@@ -600,5 +661,11 @@ class Explorator:
                                 self.player.play_action(action_id)
 
             self.update(dt)
+
+            # Only _fall_out_of_map() can change game_manager.state during
+            # update() -- same clean exit TAB/ECHAP already do (no stale
+            # frame rendered into a state we're about to leave).
+            if self.game_manager.state != GameState.EXPLORATION:
+                break
 
             self.render()

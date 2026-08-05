@@ -15,7 +15,7 @@ from core.data.ressources import list_donjons
 
 class ToolPaletteUI:
 
-    def __init__(self, width: int = 220, height: int = 120):
+    def __init__(self, width: int = 220, height: int = 132):
 
         self.width = width
         self.height = height
@@ -30,7 +30,15 @@ class ToolPaletteUI:
 
     # -------------------------------------------------------------
 
-    def render(self, screen):
+    def _tool_rect(self):
+        return pygame.Rect(self.x + 12, self.y + 40, self.width - 24, 30)
+
+    def _autotile_rect(self):
+        return pygame.Rect(self.x + 12, self.y + 74, self.width - 24, 28)
+
+    # -------------------------------------------------------------
+
+    def render(self, screen, autotile_enabled=True):
 
         panel_rect = pygame.Rect(
             self.x,
@@ -46,18 +54,24 @@ class ToolPaletteUI:
             (self.x + 16, self.y + 12),
         )
 
-        tool_rect = pygame.Rect(
-            self.x + 12,
-            self.y + 44,
-            self.width - 24,
-            36,
-        )
-
+        tool_rect = self._tool_rect()
         self.border.draw(screen, tool_rect)
 
         screen.blit(
             self.font.render("Sol", True, (255, 255, 255)),
-            (tool_rect.x + 12, tool_rect.y + 8),
+            (tool_rect.x + 12, tool_rect.y + 5),
+        )
+
+        autotile_rect = self._autotile_rect()
+        self.border.draw(screen, autotile_rect)
+
+        screen.blit(
+            self.font.render(
+                f"Autotile : {'ON' if autotile_enabled else 'OFF'}",
+                True,
+                (255, 255, 255) if autotile_enabled else (200, 140, 60),
+            ),
+            (autotile_rect.x + 10, autotile_rect.y + 4),
         )
 
         screen.blit(
@@ -66,10 +80,13 @@ class ToolPaletteUI:
                 True,
                 (180, 180, 180),
             ),
-            (self.x + 12, self.y + 90),
+            (self.x + 12, self.y + 108),
         )
 
     # -------------------------------------------------------------
+
+    def hit_autotile_toggle(self, position: tuple[int, int]) -> bool:
+        return self._autotile_rect().collidepoint(position)
 
     def handle_click(self, position: tuple[int, int]) -> bool:
 

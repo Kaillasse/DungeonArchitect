@@ -24,6 +24,13 @@ class Dungeon:
         self.logical_grid = [[EMPTY for _ in range(width)] for _ in range(height)]
         self.sprite_grid = [[-1 for _ in range(width)] for _ in range(height)]
 
+        # Only ever toggled in Creator (see core.editor.ui.ToolPaletteUI) --
+        # Explorator never paints, so this is moot on its own dungeons. When
+        # False, painting/erasing touch only the clicked cell, no automatic
+        # wall halo -- a prerequisite for a destructible world, where a wall
+        # broken at runtime must never get "healed" by a later rebuild.
+        self.autotile_enabled = True
+
         self.object_manager = ObjectManager(self)
         self.animal_manager = AnimalManager(self)
         self.enemy_manager = EnemyManager(self)
@@ -36,14 +43,29 @@ class Dungeon:
     # ------------------------------------------------------------------
 
     def rebuild(self) -> None:
-        build_walls(self.logical_grid)
+        """Called after painting/erasing (Creator only). build_walls only
+        runs if autotile_enabled -- resolve_sprite_grid always does, since
+        that's just translating whatever logical_grid currently holds into
+        tile art, independent of how it got that way."""
+        if self.autotile_enabled:
+            build_walls(self.logical_grid)
+        self.sprite_grid = resolve_sprite_grid(self.logical_grid)
+
+    def resync_sprite_grid(self) -> None:
+        """Recomputes sprite_grid from the current logical_grid without ever
+        touching it (no build_walls) -- used after loading, so a save's
+        already-correct `cells` (walls included) is trusted as-is instead of
+        being re-derived from its floor cells every time a room opens."""
         self.sprite_grid = resolve_sprite_grid(self.logical_grid)
 
     def paint_cell(self, grid_x: int, grid_y: int, erase: bool = False) -> None:
         if not (0 <= grid_x < self.width and 0 <= grid_y < self.height):
             return
         if erase:
-            erase_at(self.logical_grid, grid_x, grid_y)
+            if self.autotile_enabled:
+                erase_at(self.logical_grid, grid_x, grid_y)
+            else:
+                self.logical_grid[grid_y][grid_x] = EMPTY
         else:
             self.logical_grid[grid_y][grid_x] = FLOOR
         self.rebuild()

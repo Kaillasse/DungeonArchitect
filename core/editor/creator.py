@@ -250,6 +250,9 @@ class Creator:
 
                     if event.button == 1:
 
+                        if self.palette.hit_autotile_toggle(event.pos):
+                            self.dungeon.autotile_enabled = not self.dungeon.autotile_enabled
+                            continue
 
                         if self.palette.handle_click(event.pos):
                             continue
@@ -463,7 +466,7 @@ class Creator:
 
                     self.screen.blit(sprite, rect)
 
-            self.palette.render(self.screen)
+            self.palette.render(self.screen, autotile_enabled=self.dungeon.autotile_enabled)
             self.object_palette.render(self.screen)
             self.room_panel.render(self.screen)
             self.generator_panel.render(self.screen)

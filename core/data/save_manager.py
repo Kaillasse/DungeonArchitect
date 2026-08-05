@@ -47,4 +47,10 @@ class SaveManager:
         dungeon.logical_grid = [
             list(row) for row in payload.get("cells", dungeon.logical_grid)
         ]
-        dungeon.rebuild()
+        # Not rebuild() -- a load trusts the saved `cells` as-is (walls
+        # included) rather than re-deriving them from floor cells, so a
+        # runtime-destroyed wall (or a room hand-edited with autotile off)
+        # never gets silently "repaired" just by reopening the room. Only
+        # sprite_grid (pure logical-cell -> tile-art translation) needs
+        # recomputing, since that's never persisted.
+        dungeon.resync_sprite_grid()
