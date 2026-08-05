@@ -166,26 +166,29 @@ ENEMY_ANIMATIONS = ("idle", "movement", "attack", "damaged", "death")
 # mapping, so its window is derived from skeleton1's *relative* position
 # (~75%-87% through the swing) rather than guessed outright. "loot" (currency
 # type -> count) is read once, on death, by Explorator._spawn_loot -- an
-# enemy with no "loot" key (or an empty one) simply drops nothing.
+# enemy with no "loot" key (or an empty one) simply drops nothing. "item_loot"
+# (item id -> count, see ITEM_DEFINITIONS) is the same idea for real
+# inventory items (currently just dynamite) rather than currency.
 ENEMY_STATS = {
     "skeleton1": {
-        "health": 1, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
+        "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
         "active_attack_frames": (6, 7),
         "loot": {"gold": 2, "blue": 1},
+        "item_loot": {"dynamite": 1},
     },
     "skeleton2": {
-        "health": 1, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
+        "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
         "active_attack_frames": (11, 12),
         "loot": {"gold": 2, "blue": 1},
     },
 }
 
-# Currency pickup sheets (assets/ root, not under a themed folder): two rows
+# Currency pickup sheets (assets/item/, alongside dynamite.png): two rows
 # of 16x16 frames -- row 0 is the idle "spinning coin" loop, row 1 plays once
 # when the player actually picks it up (core.world.entities.Pickup). Shared
 # by InventoryPanel's counter icon (which only ever uses "spin") and Pickup,
 # so both stay visually identical to a single source of truth.
-CURRENCY_FILES = {"gold": "Coin Sheet.png", "blue": "BlueCoin Sheet.png"}
+CURRENCY_FILES = {"gold": "item/Coin Sheet.png", "blue": "item/BlueCoin Sheet.png"}
 CURRENCY_FRAME_SIZE = 16
 
 
@@ -199,6 +202,60 @@ def load_currency_frames(currency_type):
         return [sheet.subsurface((i * size, row_index * size, size, size)).copy() for i in range(columns)]
 
     return {"spin": _row(0), "collect": _row(1)}
+
+
+# Real inventory items (as opposed to currency, see CURRENCY_FILES above) --
+# each entry is enough for both a ground ItemPickup's static icon and an
+# InventoryPanel slot's icon (same "icon_rect" crop, see Item.get_icon), plus
+# which main_slots key it belongs in and whether pressing "interact" while
+# it's equipped there should throw it (see Explorator._throw_interact_item)
+# instead of just playing the plain interact animation.
+ITEM_DEFINITIONS = {
+    "dynamite": {
+        "name": "Dynamite",
+        "icon_path": "item/dynamite.png",
+        "icon_rect": (0, 0, 16, 16),  # frame 0 -- "avant pickup" / inventory display
+        "slot": "interact",
+        "throwable": True,
+    },
+}
+
+DYNAMITE_FRAME_SIZE = 16
+DYNAMITE_FRAME_COUNT = 4
+
+
+def load_dynamite_frames():
+    """The 4 throw-animation frames (16x16 each), sliced from the single-row
+    64x16 dynamite.png sheet -- used by core.world.entities.ThrownDynamite,
+    not by the static ground/inventory icon (that's just frame 0, read
+    directly via ITEM_DEFINITIONS["dynamite"]["icon_rect"])."""
+    sheet = pygame.image.load(PROJECT_ROOT / "assets" / ITEM_DEFINITIONS["dynamite"]["icon_path"]).convert_alpha()
+    size = DYNAMITE_FRAME_SIZE
+    return [sheet.subsurface((i * size, 0, size, size)).copy() for i in range(DYNAMITE_FRAME_COUNT)]
+
+
+# Explosion VFX (assets/effect/smallexplosion/) -- one 48x48 PNG per frame,
+# not a sliced sheet like everything else in this module, since that's how
+# it was authored. Played once by core.world.entities.Explosion wherever a
+# ThrownDynamite detonates.
+EXPLOSION_FOLDER = "effect/smallexplosion"
+EXPLOSION_FRAME_COUNT = 9
+
+
+def load_explosion_frames():
+    return [
+        pygame.image.load(PROJECT_ROOT / "assets" / EXPLOSION_FOLDER / f"frame{i:04d}.png").convert_alpha()
+        for i in range(EXPLOSION_FRAME_COUNT)
+    ]
+
+
+def make_item(item_id):
+    """Builds a core.world.inventory.Item from ITEM_DEFINITIONS -- kept here
+    (not in inventory.py) since ITEM_DEFINITIONS lives alongside every other
+    asset registry in this module (OBJECT_TYPES, CURRENCY_FILES)."""
+    from core.world.inventory import Item
+    definition = ITEM_DEFINITIONS[item_id]
+    return Item(item_id, definition["name"], definition["icon_path"], definition.get("icon_rect"))
 
 
 def load_object_frames(object_type, variant=None):

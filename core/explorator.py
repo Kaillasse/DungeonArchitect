@@ -9,7 +9,7 @@ from core.world.dungeon import Dungeon, corner_cells
 from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player
-from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS
+from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item
 from core.world.inventory import Inventory, Item
 from core.inventory_ui import InventoryPanel
 from core.editor.autotile import EMPTY
@@ -194,16 +194,27 @@ class Explorator:
     @staticmethod
     def _spawn_loot(enemy, enemy_dungeon):
         """Drops ENEMY_STATS[enemy.enemy_type]["loot"] as individual coin
-        Pickups (2 gold + 1 blue -> 3 separate coins, not one "x2" stack),
-        scattered a few pixels around the death spot. enemy.position is
-        already local to enemy_dungeon (never offset-translated -- see
-        Animal/Enemy's own coordinate convention), so no conversion is
-        needed before handing it to that same dungeon's PickupManager."""
-        loot = ENEMY_STATS[enemy.enemy_type].get("loot", {})
-        for currency_type, count in loot.items():
+        Pickups (2 gold + 1 blue -> 3 separate coins, not one "x2" stack) and
+        ["item_loot"] as individual ItemPickups (e.g. dynamite), scattered a
+        few pixels around the death spot. enemy.position is already local to
+        enemy_dungeon (never offset-translated -- see Animal/Enemy's own
+        coordinate convention), so no conversion is needed before handing it
+        to that same dungeon's PickupManager."""
+        stats = ENEMY_STATS[enemy.enemy_type]
+
+        for currency_type, count in stats.get("loot", {}).items():
             for _ in range(count):
                 enemy_dungeon.pickup_manager.spawn(
                     currency_type,
+                    enemy.position.x + random.uniform(-10, 10),
+                    enemy.position.y + random.uniform(-10, 10),
+                )
+
+        for item_id, count in stats.get("item_loot", {}).items():
+            for _ in range(count):
+                enemy_dungeon.pickup_manager.spawn_item(
+                    make_item(item_id),
+                    ITEM_DEFINITIONS[item_id]["slot"],
                     enemy.position.x + random.uniform(-10, 10),
                     enemy.position.y + random.uniform(-10, 10),
                 )
@@ -219,6 +230,47 @@ class Explorator:
                 room.dungeon.pickup_manager.collect(local_hitbox, self.inventory)
         else:
             self.dungeon.pickup_manager.collect(player_hitbox, self.inventory)
+
+    def _trigger_action(self, action_id):
+        """Fires action_id's one-shot behavior -- normally just
+        Player.play_action, but "interact" is intercepted first when the
+        interact slot holds a throwable item (see _throw_interact_item), so
+        equipping dynamite there repurposes the interact input into a throw
+        instead of the plain interact animation."""
+        if action_id == "interact" and self._throw_interact_item():
+            return
+        self.player.play_action(action_id)
+
+    def _throw_interact_item(self):
+        """Returns True if the interact slot held a throwable item (see
+        ITEM_DEFINITIONS' "throwable" flag -- currently just dynamite) and it
+        was thrown: consumes the item, spawns a live ThrownDynamite in the
+        player's current room (converted to that room's local coordinates,
+        same convention as every other per-room live entity) at the player's
+        position, in the direction they're currently facing, and plays the
+        interact animation for visual feedback. Returns False (no-op) if the
+        slot is empty or holds a non-throwable item, leaving _trigger_action
+        to fall back to the plain interact animation."""
+        item = self.inventory.main_slots["interact"]
+        if item is None or not ITEM_DEFINITIONS.get(item.item_id, {}).get("throwable"):
+            return False
+
+        self.inventory.main_slots["interact"] = None
+
+        dx, dy = Player.DIRECTION_VECTORS.get(self.player.direction, (0, 1))
+        direction = pygame.Vector2(dx, dy)
+
+        if self.assembly is not None:
+            room = self.current_placed_room
+            tile_size = Dungeon.TILE_SIZE
+            local_x = self.player.position.x - room.offset_x * tile_size
+            local_y = self.player.position.y - room.offset_y * tile_size
+            room.dungeon.projectile_manager.throw_dynamite(local_x, local_y, direction)
+        else:
+            self.dungeon.projectile_manager.throw_dynamite(self.player.position.x, self.player.position.y, direction)
+
+        self.player.play_action("interact")
+        return True
 
     def _is_walkable(self, rect, debug_label=None):
         """debug_label, only used when self.debug_mode is True, tags a
@@ -727,7 +779,7 @@ class Explorator:
 
                     for action_id in self.ONE_SHOT_ACTIONS:
                         if self.settings.matches_event(action_id, event):
-                            self.player.play_action(action_id)
+                            self._trigger_action(action_id)
 
                 elif event.type == pygame.KEYDOWN:
 
@@ -747,7 +799,7 @@ class Explorator:
                     else:
                         for action_id in self.ONE_SHOT_ACTIONS:
                             if self.settings.matches_event(action_id, event):
-                                self.player.play_action(action_id)
+                                self._trigger_action(action_id)
 
             self.update(dt)
 

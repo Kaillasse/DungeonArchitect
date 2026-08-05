@@ -8,6 +8,7 @@ import pygame
 from core.data.ressources import WORLD_SCALE, TILE_SIZE
 from core.world.object_manager import (
     ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, ENEMY_STATS, load_enemy_frames, load_currency_frames,
+    load_dynamite_frames, load_explosion_frames,
 )
 
 class SpriteAnimation:
@@ -764,23 +765,72 @@ class Pickup:
         screen.blit(scaled, (int(sx), int(sy)))
 
 
+class ItemPickup:
+    """A dropped real inventory Item waiting on the ground (e.g. dynamite
+    dropped by a dead enemy, see ENEMY_STATS' "item_loot") -- unlike Pickup
+    (currency), there's no spin/collect animation, just a single static
+    frame (Item.get_icon(), already cropped to frame 0 via its icon_rect --
+    "avant pickup" per spec). Removes itself and drops `item` into
+    inventory.main_slots[slot] the instant the player's hitbox touches it,
+    but only if that slot is actually empty -- an already-equipped slot
+    leaves the pickup exactly where it is, untouched, for the player to
+    come back to once the slot frees up."""
+
+    HITBOX_SIZE = 16
+
+    def __init__(self, item, slot, world_x, world_y):
+        self.item = item
+        self.slot = slot
+        self.position = pygame.Vector2(world_x, world_y)
+        self.collected = False
+        self._render_cache = {}
+
+    def get_hitbox(self):
+        return pygame.Rect(
+            int(self.position.x - self.HITBOX_SIZE / 2),
+            int(self.position.y - self.HITBOX_SIZE / 2),
+            self.HITBOX_SIZE,
+            self.HITBOX_SIZE,
+        )
+
+    def draw(self, screen, camera):
+        icon = self.item.get_icon()
+
+        render_scale = camera.zoom * WORLD_SCALE
+        zoom_key = max(1, int(round(render_scale * 100)))
+        if zoom_key not in self._render_cache:
+            self._render_cache[zoom_key] = pygame.transform.scale_by(icon, render_scale)
+        scaled = self._render_cache[zoom_key]
+
+        sprite_left_world = self.position.x - icon.get_width() * WORLD_SCALE / 2
+        sprite_top_world = self.position.y - icon.get_height() * WORLD_SCALE / 2
+        sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
+
+        screen.blit(scaled, (int(sx), int(sy)))
+
+
 class PickupManager:
-    """Owns the live Pickup entities dropped in a room. Unlike
+    """Owns the live Pickup/ItemPickup entities dropped in a room. Unlike
     Animal/EnemyManager there's no spawn() from placed objects -- pickups
-    only ever come from Explorator._spawn_loot calling spawn() directly at
-    an enemy's death position, and are never persisted."""
+    only ever come from Explorator._spawn_loot calling spawn()/spawn_item()
+    directly at an enemy's death position, and are never persisted."""
 
     def __init__(self, dungeon):
         self.dungeon = dungeon
         self.pickups = []
+        self.item_pickups = []
 
     def spawn(self, currency_type, world_x, world_y):
         self.pickups.append(Pickup(currency_type, world_x, world_y))
+
+    def spawn_item(self, item, slot, world_x, world_y):
+        self.item_pickups.append(ItemPickup(item, slot, world_x, world_y))
 
     def update(self, dt):
         for pickup in self.pickups:
             pickup.update(dt)
         self.pickups = [pickup for pickup in self.pickups if not pickup.finished]
+        self.item_pickups = [pickup for pickup in self.item_pickups if not pickup.collected]
 
     def collect(self, player_hitbox, inventory):
         """Credits inventory.currency[pickup.currency_type] += 1 the instant
@@ -788,12 +838,170 @@ class PickupManager:
         animation -- removal itself happens in update() once that finishes,
         so the coin visually plays its pickup animation instead of just
         vanishing. Already-collecting pickups are left alone (no double
-        credit if the player's hitbox keeps overlapping it)."""
+        credit if the player's hitbox keeps overlapping it). ItemPickups
+        have no such animation -- see ItemPickup's own docstring for why a
+        full inventory slot leaves one on the ground untouched instead."""
         for pickup in self.pickups:
             if pickup.state == "spin" and player_hitbox.colliderect(pickup.get_hitbox()):
                 inventory.currency[pickup.currency_type] += 1
                 pickup.begin_collect()
 
+        for item_pickup in self.item_pickups:
+            if (
+                not item_pickup.collected
+                and inventory.main_slots.get(item_pickup.slot) is None
+                and player_hitbox.colliderect(item_pickup.get_hitbox())
+            ):
+                inventory.main_slots[item_pickup.slot] = item_pickup.item
+                item_pickup.collected = True
+
     def draw(self, screen, camera):
         for pickup in self.pickups:
             pickup.draw(screen, camera)
+        for item_pickup in self.item_pickups:
+            item_pickup.draw(screen, camera)
+
+
+class ThrownDynamite:
+    """A player-thrown dynamite stick (see Explorator._throw_interact_item):
+    flies in a straight line at THROW_SPEED in the direction the player was
+    facing at throw time, playing through its 4 frames once -- reaching the
+    last frame is literally what triggers detonation (see `exploded`,
+    checked by ProjectileManager.update), rather than a separate timer, so
+    the explosion always lines up with "the end of the animation" exactly as
+    specified. No mid-flight collision with walls/entities -- it's a lobbed
+    throw arcing over obstacles to wherever the animation runs out, not a
+    line-of-sight projectile."""
+
+    FRAME_SIZE = 16
+    THROW_SPEED = 220  # pixels/second
+    FRAME_DURATION = 0.15  # seconds per frame -- 4 frames = 0.6s flight
+    BLAST_RADIUS_TILES = 2
+
+    def __init__(self, world_x, world_y, direction):
+        self.position = pygame.Vector2(world_x, world_y)
+        self.direction = direction
+        self.frames = load_dynamite_frames()
+
+        self.frame = 0
+        self.animation_timer = 0.0
+        self.exploded = False
+
+        self._render_cache = {}
+
+    def update(self, dt):
+        if self.exploded:
+            return
+
+        self.position += self.direction * self.THROW_SPEED * dt
+
+        self.animation_timer += dt
+        if self.animation_timer < self.FRAME_DURATION:
+            return
+        self.animation_timer = 0
+
+        if self.frame < len(self.frames) - 1:
+            self.frame += 1
+        else:
+            self.exploded = True
+
+    def draw(self, screen, camera):
+        sprite = self.frames[self.frame]
+
+        render_scale = camera.zoom * WORLD_SCALE
+        zoom_key = max(1, int(round(render_scale * 100)))
+        cache_key = (self.frame, zoom_key)
+        if cache_key not in self._render_cache:
+            self._render_cache[cache_key] = pygame.transform.scale_by(sprite, render_scale)
+        scaled = self._render_cache[cache_key]
+
+        sprite_left_world = self.position.x - self.FRAME_SIZE * WORLD_SCALE / 2
+        sprite_top_world = self.position.y - self.FRAME_SIZE * WORLD_SCALE / 2
+        sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
+
+        screen.blit(scaled, (int(sx), int(sy)))
+
+
+class Explosion:
+    """Purely visual VFX: plays assets/effect/smallexplosion's 9 frames once
+    at a fixed world position, then self.finished -- no hitbox, no gameplay
+    effect of its own (the actual terrain destruction is
+    Dungeon.destroy_area, triggered directly by ProjectileManager alongside
+    spawning one of these, not by the animation itself)."""
+
+    FRAME_SIZE = 48
+    ANIMATION_SPEED = 0.05
+
+    def __init__(self, world_x, world_y):
+        self.position = pygame.Vector2(world_x, world_y)
+        self.frames = load_explosion_frames()
+        self.frame = 0
+        self.animation_timer = 0.0
+        self.finished = False
+        self._render_cache = {}
+
+    def update(self, dt):
+        if self.finished:
+            return
+        self.animation_timer += dt
+        if self.animation_timer < self.ANIMATION_SPEED:
+            return
+        self.animation_timer = 0
+        if self.frame < len(self.frames) - 1:
+            self.frame += 1
+        else:
+            self.finished = True
+
+    def draw(self, screen, camera):
+        sprite = self.frames[self.frame]
+
+        render_scale = camera.zoom * WORLD_SCALE
+        zoom_key = max(1, int(round(render_scale * 100)))
+        cache_key = (self.frame, zoom_key)
+        if cache_key not in self._render_cache:
+            self._render_cache[cache_key] = pygame.transform.scale_by(sprite, render_scale)
+        scaled = self._render_cache[cache_key]
+
+        sprite_left_world = self.position.x - self.FRAME_SIZE * WORLD_SCALE / 2
+        sprite_top_world = self.position.y - self.FRAME_SIZE * WORLD_SCALE / 2
+        sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
+
+        screen.blit(scaled, (int(sx), int(sy)))
+
+
+class ProjectileManager:
+    """Owns live thrown-item projectiles and their resulting VFX for a room
+    (currently just thrown dynamite/its explosion) -- mirrors PickupManager's
+    shape: nothing is ever placed via the editor or persisted, entries only
+    ever come from Explorator spawning one directly when the player throws
+    an equipped item. Detonating a ThrownDynamite (see its own docstring for
+    exactly when that happens) is handled right here in update() --
+    self.dungeon is already the right Dungeon to carve a hole into, no need
+    to bounce this back up to Explorator."""
+
+    def __init__(self, dungeon):
+        self.dungeon = dungeon
+        self.dynamites = []
+        self.explosions = []
+
+    def throw_dynamite(self, world_x, world_y, direction):
+        self.dynamites.append(ThrownDynamite(world_x, world_y, direction))
+
+    def update(self, dt):
+        for dynamite in self.dynamites:
+            dynamite.update(dt)
+            if dynamite.exploded:
+                grid_x, grid_y = self.dungeon.world_to_grid(dynamite.position.x, dynamite.position.y)
+                self.dungeon.destroy_area(grid_x, grid_y, dynamite.BLAST_RADIUS_TILES)
+                self.explosions.append(Explosion(dynamite.position.x, dynamite.position.y))
+        self.dynamites = [dynamite for dynamite in self.dynamites if not dynamite.exploded]
+
+        for explosion in self.explosions:
+            explosion.update(dt)
+        self.explosions = [explosion for explosion in self.explosions if not explosion.finished]
+
+    def draw(self, screen, camera):
+        for dynamite in self.dynamites:
+            dynamite.draw(screen, camera)
+        for explosion in self.explosions:
+            explosion.draw(screen, camera)
