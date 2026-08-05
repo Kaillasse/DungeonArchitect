@@ -1,5 +1,5 @@
 from core.world.object_manager import ObjectManager
-from core.world.entities import AnimalManager
+from core.world.entities import AnimalManager, EnemyManager
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
 from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
@@ -26,6 +26,7 @@ class Dungeon:
 
         self.object_manager = ObjectManager(self)
         self.animal_manager = AnimalManager(self)
+        self.enemy_manager = EnemyManager(self)
         self.renderer = WorldRenderer()
         self.save = SaveManager()
 
@@ -47,9 +48,10 @@ class Dungeon:
         self.rebuild()
         self.object_manager.prune_invalid()
 
-    def update(self, dt: float, player_hitbox=None) -> None:
+    def update(self, dt: float, player=None, player_hitbox=None) -> None:
         self.object_manager.update(dt)
         self.animal_manager.update(dt, player_hitbox=player_hitbox)
+        self.enemy_manager.update(dt, player=player, player_hitbox=player_hitbox)
 
     def spawn_animals(self) -> None:
         """(Re)build the live wandering Animal entities for this room's placed
@@ -57,6 +59,11 @@ class Dungeon:
         AnimalManager.spawn(); Creator never calls this, so its static preview
         only ever shows a placed animal's frame-0 icon, not a live one."""
         self.animal_manager.spawn()
+
+    def spawn_enemies(self) -> None:
+        """Same rule as spawn_animals -- EnemyManager.spawn(), only ever
+        called by Explorator after loading a room."""
+        self.enemy_manager.spawn()
 
     # ------------------------------------------------------------------
     # Sauvegarde
@@ -123,7 +130,7 @@ class Dungeon:
     # ------------------------------------------------------------------
 
     def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
-               skip_foreground_objects=False, skip_animals=False, show_grid=True):
+               skip_foreground_objects=False, skip_animals=False, skip_enemies=False, show_grid=True):
         self.renderer.render(
             screen, self, camera,
             spawn_preview=spawn_preview,
@@ -134,6 +141,8 @@ class Dungeon:
         )
         if not skip_animals:
             self.animal_manager.draw(screen, camera)
+        if not skip_enemies:
+            self.enemy_manager.draw(screen, camera)
 
     def render_foreground(self, screen, camera, hide_object_types=None):
         """Objects flagged draw_after_player (e.g. torch), meant to be drawn after the player sprite."""

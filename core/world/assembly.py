@@ -245,23 +245,27 @@ class DungeonAssembly:
             target["frame"] = 0
             target["anim_timer"] = 0.0
 
-    def update(self, dt, player_hitbox=None, player_floor=None):
+    def update(self, dt, player=None, player_hitbox=None, player_floor=None):
         """player_hitbox only ever gets passed down to rooms on player_floor
-        -- an animal on another floor has no business colliding with a
-        player who isn't physically there (mirrors locate_room's per-floor
-        scoping). player_hitbox arrives in global coordinates (that's what
-        Explorator/the player use everywhere), but each room's own Dungeon
-        only ever thinks in that room's local coordinates -- same as
-        is_global_cell_walkable converting before delegating to a room's
-        ObjectManager -- so it's shifted back by that room's offset here
-        before being handed to AnimalManager.
+        -- an animal/enemy on another floor has no business colliding (or,
+        for enemies, aggroing) with a player who isn't physically there
+        (mirrors locate_room's per-floor scoping). player_hitbox arrives in
+        global coordinates (that's what Explorator/the player use
+        everywhere), but each room's own Dungeon only ever thinks in that
+        room's local coordinates -- same as is_global_cell_walkable
+        converting before delegating to a room's ObjectManager -- so it's
+        shifted back by that room's offset here before being handed down.
+        `player` (the actual object, for Enemy.take_damage) is forwarded
+        as-is -- no coordinate transform needed since only its identity
+        matters here, never its .position (see EnemyManager/Enemy, which
+        only ever read distances from the already-shifted player_hitbox).
         """
         tile_size = Dungeon.TILE_SIZE
         for room in self.rooms:
             hitbox = None
             if player_hitbox is not None and room.floor == player_floor:
                 hitbox = player_hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size)
-            room.dungeon.update(dt, player_hitbox=hitbox)
+            room.dungeon.update(dt, player=player, player_hitbox=hitbox)
 
     # ------------------------------------------------------------------
     # Rendering -- the active floor is drawn normally (full tiles/objects/
@@ -287,7 +291,8 @@ class DungeonAssembly:
     VISION_FALLOFF_TILES = 1.5  # width of the soft edge just inside VISION_RADIUS_TILES
 
     def render(self, screen, camera, active_floor, player_world_pos=None, hide_object_types=None,
-               skip_active_floor_foreground=False, skip_active_floor_animals=False, show_grid=True):
+               skip_active_floor_foreground=False, skip_active_floor_animals=False,
+               skip_active_floor_enemies=False, show_grid=True):
         """Draw every floor relative to active_floor: floors below first
         (flat-tinted shadow, no hole), the active floor with full detail,
         floors above last (shadow with a soft hole around player_world_pos --
@@ -298,11 +303,12 @@ class DungeonAssembly:
         sprite (Explorator) leave out active_floor's foreground objects (an
         L/R torch) here and draw them afterwards via
         render_active_floor_foreground(), so the player ends up behind them.
-        skip_active_floor_animals works the same way for active_floor's live
-        Animals, letting Explorator draw them together with the player via
-        render_active_floor_entities() instead, sorted by feet position so
-        whichever is lower on screen draws in front. Creator, which draws no
-        player sprite, leaves both off and gets everything in one pass.
+        skip_active_floor_animals/skip_active_floor_enemies work the same way
+        for active_floor's live Animals/Enemies, letting Explorator draw them
+        together with the player via render_active_floor_entities() instead,
+        sorted by feet position so whichever is lower on screen draws in
+        front. Creator, which draws no player sprite, leaves all three off
+        and gets everything in one pass.
         """
         for floor in self.floors():
             if floor < active_floor:
@@ -313,6 +319,7 @@ class DungeonAssembly:
             hide_object_types=hide_object_types,
             skip_foreground=skip_active_floor_foreground,
             skip_animals=skip_active_floor_animals,
+            skip_enemies=skip_active_floor_enemies,
             show_grid=show_grid,
         )
 
@@ -328,16 +335,17 @@ class DungeonAssembly:
             room.dungeon.render_foreground(screen, offset_camera, hide_object_types=hide_object_types)
 
     def render_active_floor_entities(self, screen, camera, active_floor, player):
-        """Y-sorted draw of every live Animal on active_floor plus the player:
-        whichever entity's feet (.position.y, in the same world-pixel sense
-        Animal/Player.get_hitbox() anchor their hitbox to) sit lower on
-        screen draws in front, matching how a top-down scene actually reads.
-        Call after render(..., skip_active_floor_animals=True) and before
-        render_active_floor_foreground() -- same slot the player used to
-        occupy alone via a plain player.draw().
+        """Y-sorted draw of every live Animal/Enemy on active_floor plus the
+        player: whichever entity's feet (.position.y, in the same
+        world-pixel sense Animal/Enemy/Player.get_hitbox() anchor their
+        hitbox to) sit lower on screen draws in front, matching how a
+        top-down scene actually reads. Call after render(...,
+        skip_active_floor_animals=True, skip_active_floor_enemies=True) and
+        before render_active_floor_foreground() -- same slot the player used
+        to occupy alone via a plain player.draw().
 
-        An animal's .position is local to its own room's Dungeon (no offset
-        baked in, unlike the player's, which is already global -- see
+        An animal's/enemy's .position is local to its own room's Dungeon (no
+        offset baked in, unlike the player's, which is already global -- see
         DungeonAssembly.update's docstring), so it's converted to a global y
         here purely for comparison; drawing itself still goes through that
         room's own offset camera, same as every other per-room draw call.
@@ -350,6 +358,9 @@ class DungeonAssembly:
             for animal in room.dungeon.animal_manager.animals:
                 global_y = animal.position.y + room.offset_y * tile_size
                 entries.append((global_y, animal, offset_camera))
+            for enemy in room.dungeon.enemy_manager.enemies:
+                global_y = enemy.position.y + room.offset_y * tile_size
+                entries.append((global_y, enemy, offset_camera))
 
         entries.append((player.position.y, player, camera))
 
@@ -357,7 +368,8 @@ class DungeonAssembly:
         for _, entity, entity_camera in entries:
             entity.draw(screen, entity_camera)
 
-    def _render_floor(self, screen, camera, floor, hide_object_types=None, skip_foreground=False, skip_animals=False, show_grid=True):
+    def _render_floor(self, screen, camera, floor, hide_object_types=None, skip_foreground=False,
+                       skip_animals=False, skip_enemies=False, show_grid=True):
         tile_size = Dungeon.TILE_SIZE
         for room in self.rooms_on_floor(floor):
             offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
@@ -366,6 +378,7 @@ class DungeonAssembly:
                 hide_object_types=hide_object_types,
                 skip_foreground_objects=skip_foreground,
                 skip_animals=skip_animals,
+                skip_enemies=skip_enemies,
                 show_grid=show_grid,
             )
 

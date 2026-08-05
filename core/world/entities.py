@@ -5,8 +5,8 @@ import random
 from pathlib import Path
 import pygame
 
-from core.data.ressources import WORLD_SCALE
-from core.world.object_manager import ANIMAL_TYPES, load_animal_frames
+from core.data.ressources import WORLD_SCALE, TILE_SIZE
+from core.world.object_manager import ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, ENEMY_STATS, load_enemy_frames
 
 class SpriteAnimation:
     def __init__(self, image, frame_w, frame_h, animations):
@@ -65,6 +65,28 @@ class Player:
     # see play_action()/update().
     ONE_SHOT_ANIMATIONS = ("attack", "interact", "jump")
 
+    MAX_HEALTH = 10
+
+    # 0-based frames (3, 4, 5) == the to-do's 1-based "frames 4, 5, 6" of the
+    # 6-frame attack.png -- the window during which a swing actually deals
+    # damage (see is_attack_active/_hit_delivered_this_swing).
+    ACTIVE_ATTACK_FRAMES = (3, 4, 5)
+
+    # Facing vector per Player.direction (8 values Explorator can set,
+    # not just the 5 sprite rows DIRECTIONS covers -- get_sprite_direction
+    # mirrors left/right for rendering, but the attack hitbox needs the real
+    # facing, not the mirrored sprite row).
+    DIRECTION_VECTORS = {
+        "front": (0, 1),
+        "front_right": (0.7071, 0.7071),
+        "front_left": (-0.7071, 0.7071),
+        "back": (0, -1),
+        "back_right": (0.7071, -0.7071),
+        "back_left": (-0.7071, -0.7071),
+        "right": (1, 0),
+        "left": (-1, 0),
+    }
+
     def __init__(self):
 
         self.position = pygame.Vector2(200, 200)
@@ -80,6 +102,9 @@ class Player:
         self.hitbox_width = 16
         self.hitbox_height = 10
         self.sprite_scale = 1
+
+        self.health = self.MAX_HEALTH
+        self._hit_delivered_this_swing = False
 
 
     def load_assets(self):
@@ -152,6 +177,31 @@ class Player:
             self.hitbox_height,
         )
 
+    def get_attack_hitbox(self):
+        """The melee reach checked against enemies while is_attack_active():
+        the player's own hitbox shifted one tile in the direction they're
+        facing -- a simple reach zone, not a directional arc."""
+        dx, dy = self.DIRECTION_VECTORS.get(self.direction, (0, 1))
+        reach = TILE_SIZE * WORLD_SCALE
+        hitbox = self.get_hitbox()
+        hitbox.x += int(dx * reach)
+        hitbox.y += int(dy * reach)
+        return hitbox
+
+    def is_attack_active(self):
+        """True on the frames of the current attack swing that actually deal
+        damage (see ACTIVE_ATTACK_FRAMES), and only once per swing --
+        _hit_delivered_this_swing (reset in play_action) stops a multi-frame
+        active window from registering more than one hit."""
+        return (
+            self.action == "attack"
+            and self.frame in self.ACTIVE_ATTACK_FRAMES
+            and not self._hit_delivered_this_swing
+        )
+
+    def take_damage(self, amount):
+        self.health = max(0, self.health - amount)
+
     def play_action(self, name):
         """Trigger a one-shot action animation (attack/interact/jump) --
         ignored while another action is already mid-playback, and while a
@@ -164,6 +214,7 @@ class Player:
         self.animation = name
         self.frame = 0
         self.animation_timer = 0
+        self._hit_delivered_this_swing = False
 
     def _frames_for(self, animation, direction):
         """Frame list for (animation, direction), falling back to "front" and
@@ -212,21 +263,6 @@ class Player:
         sprite_screen_x, sprite_screen_y = camera.world_to_screen(sprite_left_world, sprite_top_world)
 
         screen.blit(sprite, (int(sprite_screen_x), int(sprite_screen_y)))
-
-
-class NPC:
-    def __init__(self, name, health, sprite_path, bust_path):
-        self.name = name
-        self.health = health
-        self.sprite_path = sprite_path
-        self.bust_path = bust_path
-
-class Enemies:
-    def __init__(self, name, health, sprite_path, bust_path):
-        self.name = name
-        self.health = health
-        self.sprite_path = sprite_path
-        self.bust_path = bust_path
 
 
 class Animal:
@@ -395,3 +431,252 @@ class AnimalManager:
     def draw(self, screen, camera):
         for animal in self.animals:
             animal.draw(screen, camera)
+
+
+class Enemy:
+    """A combat-capable wandering NPC (skeleton1/skeleton2): behaves exactly
+    like an Animal when the player is out of range (idle/move alternation,
+    same per-axis collision-tested movement), but switches to chasing once
+    the player enters its aggro_range and to attacking once in attack_range
+    -- both distances (in tiles, from core.world.object_manager.ENEMY_STATS)
+    checked fresh every frame, so stepping back out of range mid-swing just
+    drops back to chasing/wandering rather than committing to a swing.
+
+    self.state doubles as the key into self.frames (the ENEMY_ANIMATIONS
+    set: "idle"/"movement"/"attack"/"damaged"/"death"), same idea as
+    Animal's "idle"/"move" states matching load_animal_frames's keys.
+    """
+
+    FRAME_SIZE = 32
+    ANIMATION_SPEED = 0.2
+    IDLE_DURATION = (1.0, 2.5)
+    MOVE_DURATION = (1.0, 2.0)
+    LOOPING_STATES = ("idle", "movement", "attack")
+
+    HITBOX_WIDTH = 16
+    HITBOX_HEIGHT = 10
+
+    def __init__(self, enemy_type, grid_x, grid_y, dungeon):
+        self.enemy_type = enemy_type
+        self.frames = load_enemy_frames(enemy_type)
+        self.stats = ENEMY_STATS[enemy_type]
+        self.tile_size = dungeon.tile_size
+
+        self.position = pygame.Vector2(*dungeon.grid_to_world(grid_x, grid_y))
+
+        self.health = self.stats["health"]
+        self.alive = True
+
+        self.state = "idle"
+        self.direction = pygame.Vector2()
+        self.flip = False
+
+        self.frame = 0
+        self.animation_timer = 0
+        self.state_timer = random.uniform(*self.IDLE_DURATION)
+        self._hit_delivered_this_swing = False
+
+        self._render_cache = {}
+
+    def _hitbox_at(self, x, y):
+        """Same rounding-consistency rationale as Animal._hitbox_at."""
+        return pygame.Rect(
+            int(round(x - self.HITBOX_WIDTH / 2)),
+            int(round(y - self.HITBOX_HEIGHT)),
+            self.HITBOX_WIDTH,
+            self.HITBOX_HEIGHT,
+        )
+
+    def get_hitbox(self):
+        return self._hitbox_at(self.position.x, self.position.y)
+
+    def take_damage(self, amount):
+        if not self.alive:
+            return
+        self.health -= amount
+        self.frame = 0
+        self.animation_timer = 0
+        if self.health <= 0:
+            self.alive = False
+            self.state = "death"
+        else:
+            self.state = "damaged"
+
+    def _enter_state(self, state):
+        if self.state == state:
+            return
+        self.state = state
+        self.frame = 0
+        self.animation_timer = 0
+        if state == "attack":
+            self._hit_delivered_this_swing = False
+
+    def _enter_wander_state(self, state):
+        self.state = state
+        self.frame = 0
+        self.animation_timer = 0
+        if state == "movement":
+            angle = random.uniform(0, 2 * math.pi)
+            self.direction = pygame.Vector2(math.cos(angle), math.sin(angle))
+            self.flip = self.direction.x > 0
+            self.state_timer = random.uniform(*self.MOVE_DURATION)
+        else:
+            self.direction = pygame.Vector2()
+            self.state_timer = random.uniform(*self.IDLE_DURATION)
+
+    def _move_toward(self, dt, is_walkable, direction, speed):
+        if direction.length_squared() == 0:
+            return
+        direction = direction.normalize()
+        self.flip = direction.x > 0
+        movement = direction * speed * dt
+
+        candidate_x = self.position.x + movement.x
+        if is_walkable(self._hitbox_at(candidate_x, self.position.y)):
+            self.position.x = candidate_x
+
+        candidate_y = self.position.y + movement.y
+        if is_walkable(self._hitbox_at(self.position.x, candidate_y)):
+            self.position.y = candidate_y
+
+    def _update_wander(self, dt, is_walkable):
+        """Ambient background behavior, identical in spirit to Animal.update:
+        alternates idle/movement on a random timer, random direction each
+        time movement starts."""
+        if self.state not in ("idle", "movement"):
+            self._enter_wander_state("idle")
+
+        self.state_timer -= dt
+        if self.state_timer <= 0:
+            self._enter_wander_state("movement" if self.state == "idle" else "idle")
+
+        if self.state == "movement":
+            self._move_toward(dt, is_walkable, self.direction, self.stats["move_speed"])
+
+    def _update_chase(self, dt, is_walkable, player_hitbox):
+        self._enter_state("movement")
+        target = pygame.Vector2(player_hitbox.centerx, player_hitbox.centery)
+        self._move_toward(dt, is_walkable, target - self.position, self.stats["move_speed"])
+
+    def _advance_animation(self, dt):
+        frames = self.frames[self.state]
+        self.animation_timer += dt
+        if self.animation_timer < self.ANIMATION_SPEED:
+            return
+        self.animation_timer = 0
+
+        if self.state in self.LOOPING_STATES:
+            new_frame = (self.frame + 1) % len(frames)
+            if self.state == "attack" and new_frame == 0:
+                # A fresh swing starts its own new attack window.
+                self._hit_delivered_this_swing = False
+            self.frame = new_frame
+        elif self.frame < len(frames) - 1:
+            self.frame += 1
+        elif self.state == "damaged":
+            # Played once; return to a neutral state and let the next
+            # update() re-evaluate distance to pick idle/movement/attack.
+            self.state = "idle"
+            self.frame = 0
+        # else state == "death": holds on the last frame forever.
+
+    def update(self, dt, is_walkable, player, player_hitbox):
+        if not self.alive:
+            self._advance_animation(dt)
+            return
+
+        if self.state == "damaged":
+            self._advance_animation(dt)
+            return
+
+        distance_px = None
+        if player_hitbox is not None:
+            dx = player_hitbox.centerx - self.position.x
+            dy = player_hitbox.centery - self.position.y
+            distance_px = math.hypot(dx, dy)
+
+        if distance_px is not None and distance_px <= self.stats["attack_range"] * self.tile_size:
+            self._enter_state("attack")
+            self.flip = player_hitbox.centerx > self.position.x
+        elif distance_px is not None and distance_px <= self.stats["aggro_range"] * self.tile_size:
+            self._update_chase(dt, is_walkable, player_hitbox)
+        else:
+            self._update_wander(dt, is_walkable)
+
+        self._advance_animation(dt)
+
+        if (
+            self.state == "attack"
+            and self.frame in self.stats["active_attack_frames"]
+            and not self._hit_delivered_this_swing
+        ):
+            player.take_damage(1)
+            self._hit_delivered_this_swing = True
+
+    def draw(self, screen, camera):
+        frames = self.frames[self.state]
+        sprite = frames[min(self.frame, len(frames) - 1)]
+
+        render_scale = camera.zoom * WORLD_SCALE
+        zoom_key = max(1, int(round(render_scale * 100)))
+        cache_key = (self.state, self.flip, self.frame, zoom_key)
+        if cache_key not in self._render_cache:
+            scaled = pygame.transform.scale_by(sprite, render_scale)
+            if self.flip:
+                scaled = pygame.transform.flip(scaled, True, False)
+            self._render_cache[cache_key] = scaled
+        sprite = self._render_cache[cache_key]
+
+        sprite_left_world = self.position.x - self.FRAME_SIZE * WORLD_SCALE / 2
+        sprite_top_world = self.position.y - self.FRAME_SIZE * WORLD_SCALE
+        sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
+
+        screen.blit(sprite, (int(sx), int(sy)))
+
+
+class EnemyManager:
+    """Owns the live Enemy entities in a room, spawned from its placed enemy
+    objects (ENEMY_TYPES) -- mirrors AnimalManager's shape exactly, see its
+    docstring for why this stays a separate list rather than folding into
+    ObjectManager.objects."""
+
+    def __init__(self, dungeon):
+        self.dungeon = dungeon
+        self.enemies = []
+
+    def spawn(self):
+        """Only called by Explorator after loading a room, same rule as
+        AnimalManager.spawn -- never during editing or by Creator."""
+        self.enemies = [
+            Enemy(obj["type"], obj["x"], obj["y"], self.dungeon)
+            for obj in self.dungeon.object_manager.objects
+            if obj["type"] in ENEMY_TYPES
+        ]
+
+    def _is_free(self, rect, moving_enemy, player_hitbox):
+        """Walls/closed gates, then every other LIVE enemy (a corpse doesn't
+        block movement), then the player if on this room's floor right now."""
+        if not self.dungeon.is_rect_walkable(rect):
+            return False
+
+        for other in self.enemies:
+            if other is not moving_enemy and other.alive and rect.colliderect(other.get_hitbox()):
+                return False
+
+        if player_hitbox is not None and rect.colliderect(player_hitbox):
+            return False
+
+        return True
+
+    def update(self, dt, player=None, player_hitbox=None):
+        for enemy in self.enemies:
+            enemy.update(
+                dt,
+                lambda rect, _enemy=enemy: self._is_free(rect, _enemy, player_hitbox),
+                player,
+                player_hitbox,
+            )
+
+    def draw(self, screen, camera):
+        for enemy in self.enemies:
+            enemy.draw(screen, camera)

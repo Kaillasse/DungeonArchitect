@@ -7,15 +7,15 @@ from core.world.dungeon import Dungeon
 from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player
-from core.world.object_manager import ANIMAL_TYPES
+from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
 
 # Placed objects that are only ever markers during exploration -- a spawn
-# point and each animal's placement cell -- and get replaced by a live entity
-# (the Player, an AnimalManager-owned Animal) instead of being drawn as a
-# static object sprite.
-HIDDEN_OBJECT_TYPES = {"spawn", *ANIMAL_TYPES}
+# point and each animal's/enemy's placement cell -- and get replaced by a
+# live entity (the Player, an AnimalManager-owned Animal, an
+# EnemyManager-owned Enemy) instead of being drawn as a static object sprite.
+HIDDEN_OBJECT_TYPES = {"spawn", *ANIMAL_TYPES, *ENEMY_TYPES}
 
 class Explorator:
 
@@ -81,6 +81,7 @@ class Explorator:
         self._last_door_obj = None
         self.dungeon.load_from_json(name)
         self.dungeon.spawn_animals()
+        self.dungeon.spawn_enemies()
         self._position_player_at_spawn()
 
     def open_donjon(self, name):
@@ -90,6 +91,7 @@ class Explorator:
 
         for room in self.assembly.rooms:
             room.dungeon.spawn_animals()
+            room.dungeon.spawn_enemies()
 
         start_room = next(
             (room for room in self.assembly.rooms if room.has_spawn()),
@@ -137,11 +139,31 @@ class Explorator:
             return pairs
         return [(animal, animal.get_hitbox()) for animal in self.dungeon.animal_manager.animals]
 
+    def _visible_enemies_global(self):
+        """Same idea as _visible_animals_global, but for live (alive) Enemy
+        entities -- a corpse doesn't block the player, mirroring
+        EnemyManager._is_free's own "other.alive" check for enemy-vs-enemy."""
+        if self.assembly is not None:
+            tile_size = Dungeon.TILE_SIZE
+            pairs = []
+            for room in self.assembly.rooms_on_floor(self.current_placed_room.floor):
+                offset = (room.offset_x * tile_size, room.offset_y * tile_size)
+                for enemy in room.dungeon.enemy_manager.enemies:
+                    if enemy.alive:
+                        pairs.append((enemy, enemy.get_hitbox().move(offset)))
+            return pairs
+        return [
+            (enemy, enemy.get_hitbox())
+            for enemy in self.dungeon.enemy_manager.enemies
+            if enemy.alive
+        ]
+
     def _is_walkable(self, rect, debug_label=None):
         """debug_label, only used when self.debug_mode is True, tags a
         printed message identifying which candidate move (e.g. "x"/"y") this
-        check was for, so a blocked move's cause (wall vs. animal) shows up in
-        the console instead of only being inferred from what's on screen."""
+        check was for, so a blocked move's cause (wall vs. animal/enemy) shows
+        up in the console instead of only being inferred from what's on
+        screen."""
         if self.assembly is not None:
             if not self.assembly.is_rect_walkable(
                 rect, self.current_placed_room.floor, prefer_room=self.current_placed_room
@@ -156,6 +178,11 @@ class Explorator:
         for animal, animal_rect in self._visible_animals_global():
             if rect.colliderect(animal_rect):
                 self._debug_log(debug_label, f"animal({animal.animal_type} at {animal_rect.center})")
+                return False
+
+        for enemy, enemy_rect in self._visible_enemies_global():
+            if rect.colliderect(enemy_rect):
+                self._debug_log(debug_label, f"enemy({enemy.enemy_type} at {enemy_rect.center})")
                 return False
 
         self._last_debug_message = None  # unblocked -- next block (even the same reason) should log again
@@ -201,6 +228,7 @@ class Explorator:
 
                 print(f"Spawn trouvé dans : {room.stem}")
                 self.dungeon.spawn_animals()
+                self.dungeon.spawn_enemies()
                 return True
 
         print("Aucune salle ne contient de spawn.")
@@ -300,20 +328,36 @@ class Explorator:
         self.player.update(dt)
 
         # -----------------------------
+        # Combat -- joueur attaque un ennemi
+        # -----------------------------
+
+        if self.player.is_attack_active():
+            attack_hitbox = self.player.get_attack_hitbox()
+            hit_landed = False
+            for enemy, enemy_rect in self._visible_enemies_global():
+                if attack_hitbox.colliderect(enemy_rect):
+                    enemy.take_damage(1)
+                    hit_landed = True
+            if hit_landed:
+                self.player._hit_delivered_this_swing = True
+
+        # -----------------------------
         # Boutons / portes
         # -----------------------------
 
         hitbox = self.player.get_hitbox()
 
         if self.assembly is not None:
-            self.assembly.update(dt, player_hitbox=hitbox, player_floor=self.current_placed_room.floor)
+            self.assembly.update(
+                dt, player=self.player, player_hitbox=hitbox, player_floor=self.current_placed_room.floor
+            )
             player_grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
             player_grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
             self.assembly.check_button_trigger(
                 player_grid_x, player_grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
             )
         else:
-            self.dungeon.update(dt, player_hitbox=hitbox)
+            self.dungeon.update(dt, player=self.player, player_hitbox=hitbox)
             player_grid_x, player_grid_y = self.dungeon.world_to_grid(
                 hitbox.centerx,
                 hitbox.bottom - 1,
@@ -347,6 +391,7 @@ class Explorator:
                 hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_active_floor_foreground=True,
                 skip_active_floor_animals=True,
+                skip_active_floor_enemies=True,
                 show_grid=self.debug_mode,
             )
 
@@ -372,10 +417,15 @@ class Explorator:
                 hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_foreground_objects=True,
                 skip_animals=True,
+                skip_enemies=True,
                 show_grid=self.debug_mode,
             )
 
-            entities = list(self.dungeon.animal_manager.animals) + [self.player]
+            entities = (
+                list(self.dungeon.animal_manager.animals)
+                + list(self.dungeon.enemy_manager.enemies)
+                + [self.player]
+            )
             entities.sort(key=lambda entity: entity.position.y)
             for entity in entities:
                 entity.draw(self.screen, self.camera)
@@ -392,13 +442,18 @@ class Explorator:
         pygame.display.flip()
 
     def _draw_debug_hitboxes(self):
-        """F3 overlay: the player's hitbox in red, every collidable animal's in
-        yellow -- both already in the exact world coordinates _is_walkable
-        compares, so any gap between "what looks like it's touching" and
+        """F3 overlay: the player's hitbox in red (plus its attack reach in
+        orange while actually active), animals in yellow, enemies in purple
+        -- all already in the exact world coordinates _is_walkable/combat
+        compare, so any gap between "what looks like it's touching" and
         "what's actually colliding" is directly visible instead of guessed."""
         self._draw_debug_rect(self.player.get_hitbox(), (255, 60, 60))
+        if self.player.is_attack_active():
+            self._draw_debug_rect(self.player.get_attack_hitbox(), (255, 150, 30))
         for _animal, animal_rect in self._visible_animals_global():
             self._draw_debug_rect(animal_rect, (255, 220, 60))
+        for _enemy, enemy_rect in self._visible_enemies_global():
+            self._draw_debug_rect(enemy_rect, (200, 60, 255))
 
     def _draw_debug_rect(self, world_rect, color):
         top_left = self.camera.world_to_screen(world_rect.left, world_rect.top)

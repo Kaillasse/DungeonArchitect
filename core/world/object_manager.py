@@ -104,6 +104,27 @@ OBJECT_TYPES = {
         "frame_size": 32,
         "animal": True,
     },
+    "skeleton1": {
+        # "asset" here is just skeleton1's idle sheet -- the static editor
+        # palette/placed-object icon only ever needs the idle row, same as
+        # animals (load_object_frames). Live combat behavior reads the full
+        # idle/movement/attack/damaged/death set via load_enemy_frames
+        # instead, using ENEMY_ANIMATION_FILES below.
+        "asset": "characters/Ennemies/skeleton1/idle.png",
+        "placement": "floor",
+        "size": (1, 1),
+        "frames": 6,
+        "frame_size": 32,
+        "enemy": True,
+    },
+    "skeleton2": {
+        "asset": "characters/Ennemies/skeleton2/idle.png",
+        "placement": "floor",
+        "size": (1, 1),
+        "frames": 6,
+        "frame_size": 32,
+        "enemy": True,
+    },
 }
 OBJECT_LIST = [
     "spawn",
@@ -116,6 +137,8 @@ OBJECT_LIST = [
     "cow",
     "pig",
     "sheep",
+    "skeleton1",
+    "skeleton2",
 ]
 
 # Object types backed by a live, wandering entity (core.world.entities.Animal)
@@ -123,6 +146,35 @@ OBJECT_LIST = [
 # entities.AnimalManager. Derived from the "animal" flag above instead of a
 # separately-maintained list, so OBJECT_TYPES stays the single registry.
 ANIMAL_TYPES = tuple(name for name, config in OBJECT_TYPES.items() if config.get("animal"))
+
+# Same idea as ANIMAL_TYPES, for core.world.entities.Enemy/EnemyManager.
+ENEMY_TYPES = tuple(name for name, config in OBJECT_TYPES.items() if config.get("enemy"))
+
+# Each enemy type has its own assets/characters/Ennemies/<folder>/ directory
+# with one fixed-name sheet per animation (idle/movement/attack/damaged/death.png).
+ENEMY_FOLDERS = {
+    "skeleton1": "skeleton1",
+    "skeleton2": "skeleton2",
+}
+ENEMY_ANIMATIONS = ("idle", "movement", "attack", "damaged", "death")
+
+# health/move_speed/aggro_range/attack_range are tuning defaults, not values
+# given by any design doc -- easy to retune here without touching Enemy's
+# logic. active_attack_frames (0-based) is the window during which a swing
+# actually deals damage: skeleton1's is as specified (frames 7-8 of 9,
+# 1-based); skeleton2 has a different attack frame count (15) with no given
+# mapping, so its window is derived from skeleton1's *relative* position
+# (~75%-87% through the swing) rather than guessed outright.
+ENEMY_STATS = {
+    "skeleton1": {
+        "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
+        "active_attack_frames": (6, 7),
+    },
+    "skeleton2": {
+        "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
+        "active_attack_frames": (11, 12),
+    },
+}
 
 
 def load_object_frames(object_type, variant=None):
@@ -161,6 +213,31 @@ def load_animal_frames(object_type):
         ]
 
     return {"idle": _row(0), "move": _row(1)}
+
+
+ENEMY_FRAME_SIZE = 32
+
+
+def load_enemy_frames(enemy_type):
+    """Full idle/movement/attack/damaged/death animation set for an enemy --
+    unlike animals, each is its own single-row sheet, so the frame count per
+    sheet is derived from its own pixel width (sheet.get_width() //
+    ENEMY_FRAME_SIZE, same approach as Player.cut_sheet) rather than
+    assumed -- skeleton1 and skeleton2 don't share frame counts for any of
+    their animations despite sharing a folder layout."""
+    folder = ENEMY_FOLDERS[enemy_type]
+    frames = {}
+    for animation in ENEMY_ANIMATIONS:
+        path = PROJECT_ROOT / "assets" / "characters" / "Ennemies" / folder / f"{animation}.png"
+        sheet = pygame.image.load(path).convert_alpha()
+        columns = sheet.get_width() // ENEMY_FRAME_SIZE
+        frames[animation] = [
+            sheet.subsurface(
+                pygame.Rect(i * ENEMY_FRAME_SIZE, 0, ENEMY_FRAME_SIZE, ENEMY_FRAME_SIZE)
+            ).copy()
+            for i in range(columns)
+        ]
+    return frames
 
 
 class ObjectManager:
