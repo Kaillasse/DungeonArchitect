@@ -12,7 +12,7 @@ import random
 
 import pygame
 
-from core.world.dungeon import Dungeon
+from core.world.dungeon import Dungeon, corner_cells
 from core.world.object_manager import OBJECT_TYPES
 from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DONJONS_DIRECTORY
@@ -226,17 +226,7 @@ class DungeonAssembly:
         return room.dungeon.object_manager.is_cell_walkable(global_x - room.offset_x, global_y - room.offset_y)
 
     def is_rect_walkable(self, rect, floor, prefer_room=None):
-        tile_size = Dungeon.TILE_SIZE
-        corners = (
-            (rect.left, rect.top),
-            (rect.right - 1, rect.top),
-            (rect.left, rect.bottom - 1),
-            (rect.right - 1, rect.bottom - 1),
-        )
-
-        for x, y in corners:
-            grid_x = x // tile_size
-            grid_y = y // tile_size
+        for grid_x, grid_y in corner_cells(rect, Dungeon.TILE_SIZE):
             if not self.is_global_cell_walkable(grid_x, grid_y, floor, prefer_room=prefer_room):
                 return False
 

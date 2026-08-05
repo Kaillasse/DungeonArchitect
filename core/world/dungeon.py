@@ -8,7 +8,25 @@ from core.editor.autotile import EMPTY, FLOOR, WALL, build_walls_around, unbuild
 
 DEFAULT_GRID_SAVE_PATH = "room_001"
 
-__all__ = ["DEFAULT_GRID_SAVE_PATH", "Dungeon"]
+__all__ = ["DEFAULT_GRID_SAVE_PATH", "Dungeon", "corner_cells"]
+
+
+def corner_cells(rect, tile_size):
+    """The 4 grid cells covering `rect`'s corners -- rect.right - 1/
+    rect.bottom - 1 rather than the raw edges, so a rect exactly aligned to
+    a tile boundary doesn't spill into the neighboring cell. Shared by every
+    "is this whole rect walkable" check (Dungeon.is_rect_walkable,
+    DungeonAssembly.is_rect_walkable, Explorator._is_walkable) so there's
+    only one place to get the corner math right -- this exact geometry has
+    already needed two rounds of bugfixing this session (a void/wall corner
+    mismatch that could deadlock movement right at a room boundary)."""
+    for x, y in (
+        (rect.left, rect.top),
+        (rect.right - 1, rect.top),
+        (rect.left, rect.bottom - 1),
+        (rect.right - 1, rect.bottom - 1),
+    ):
+        yield x // tile_size, y // tile_size
 
 
 class Dungeon:
@@ -139,17 +157,7 @@ class Dungeon:
         return None
 
     def is_rect_walkable(self, rect):
-        corners = (
-            (rect.left, rect.top),
-            (rect.right - 1, rect.top),
-            (rect.left, rect.bottom - 1),
-            (rect.right - 1, rect.bottom - 1),
-        )
-
-        for x, y in corners:
-            grid_x = x // self.tile_size
-            grid_y = y // self.tile_size
-
+        for grid_x, grid_y in corner_cells(rect, self.tile_size):
             if not self.object_manager.is_cell_walkable(grid_x, grid_y):
                 return False
 

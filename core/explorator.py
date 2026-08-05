@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 
 import pygame
-from core.world.dungeon import Dungeon
+from core.world.dungeon import Dungeon, corner_cells
 from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player
@@ -240,15 +240,7 @@ class Explorator:
         -- deadlocking the player exactly at that edge, indistinguishable
         from a real wall. Checking void at the same per-corner granularity as
         the wall check removes that gap entirely."""
-        tile_size = Dungeon.TILE_SIZE
-        corners = (
-            (rect.left, rect.top),
-            (rect.right - 1, rect.top),
-            (rect.left, rect.bottom - 1),
-            (rect.right - 1, rect.bottom - 1),
-        )
-        for x, y in corners:
-            grid_x, grid_y = x // tile_size, y // tile_size
+        for grid_x, grid_y in corner_cells(rect, Dungeon.TILE_SIZE):
             if self._is_void_at(grid_x, grid_y) or self._is_cell_walkable(grid_x, grid_y):
                 continue
             self._debug_log(debug_label, "wall")
