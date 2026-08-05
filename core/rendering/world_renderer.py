@@ -20,7 +20,7 @@ class WorldRenderer:
     # Explorator._is_void still treats it as void (the player falls there
     # same as any other void cell, this just avoids a flat black gap at the
     # visible edge of a room).
-    BORDER_TILE_INDEX = 24
+    BORDER_TILE_INDEX = 25
 
     def __init__(self):
         self.tileset = load_tileset()
