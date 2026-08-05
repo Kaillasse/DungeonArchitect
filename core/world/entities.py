@@ -218,6 +218,22 @@ class Player:
         self.animation_timer = 0
         self._hit_delivered_this_swing = False
 
+    def play_fall(self):
+        """One-shot fall animation played on a successful landing after
+        dropping through void (see Explorator._attempt_fall) -- reuses
+        jump.png (the last 3 frames read as a distinct "falling" pose) and
+        the same ONE_SHOT_ANIMATIONS machinery as play_action, just starting
+        partway through the sheet instead of at frame 0."""
+        if "jump" not in self.sprites:
+            return
+        self.action = "jump"
+        self.animation = "jump"
+        direction, _ = self.get_sprite_direction()
+        frames = self._frames_for("jump", direction)
+        self.frame = max(0, len(frames) - 3)
+        self.animation_timer = 0
+        self._hit_delivered_this_swing = False
+
     def _frames_for(self, animation, direction):
         """Frame list for (animation, direction), falling back to "front" and
         then to whatever direction the sheet does have -- not every animation

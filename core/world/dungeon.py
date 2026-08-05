@@ -3,7 +3,7 @@ from core.world.entities import AnimalManager, EnemyManager, PickupManager
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
 from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
-from core.editor.autotile import EMPTY, FLOOR, build_walls, erase_at, resolve_sprite_grid
+from core.editor.autotile import EMPTY, FLOOR, WALL, build_walls_around, unbuild_walls_around, erase_at, resolve_sprite_grid
 
 
 DEFAULT_GRID_SAVE_PATH = "room_001"
@@ -42,33 +42,39 @@ class Dungeon:
     # Grille logique
     # ------------------------------------------------------------------
 
-    def rebuild(self) -> None:
-        """Called after painting/erasing (Creator only). build_walls only
-        runs if autotile_enabled -- resolve_sprite_grid always does, since
-        that's just translating whatever logical_grid currently holds into
-        tile art, independent of how it got that way."""
-        if self.autotile_enabled:
-            build_walls(self.logical_grid)
-        self.sprite_grid = resolve_sprite_grid(self.logical_grid)
-
     def resync_sprite_grid(self) -> None:
         """Recomputes sprite_grid from the current logical_grid without ever
-        touching it (no build_walls) -- used after loading, so a save's
+        touching it (no wall regeneration) -- used after loading, so a save's
         already-correct `cells` (walls included) is trusted as-is instead of
         being re-derived from its floor cells every time a room opens."""
         self.sprite_grid = resolve_sprite_grid(self.logical_grid)
 
     def paint_cell(self, grid_x: int, grid_y: int, erase: bool = False) -> None:
+        """Autotile (when enabled) is purely incremental -- only the clicked
+        cell's own immediate neighborhood is ever touched (build_walls_around/
+        unbuild_walls_around), never a full-grid rescan. That full rescan
+        (the old build_walls()) is exactly what made re-enabling autotile
+        after painting a lot of floor with it off wall everything at once on
+        the very next click, instead of just that one cell."""
         if not (0 <= grid_x < self.width and 0 <= grid_y < self.height):
             return
+
         if erase:
             if self.autotile_enabled:
+                was_wall = self.logical_grid[grid_y][grid_x] == WALL
                 erase_at(self.logical_grid, grid_x, grid_y)
+                unbuild_walls_around(self.logical_grid, grid_x, grid_y)
+                if was_wall:
+                    for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+                        unbuild_walls_around(self.logical_grid, grid_x + dx, grid_y + dy)
             else:
                 self.logical_grid[grid_y][grid_x] = EMPTY
         else:
             self.logical_grid[grid_y][grid_x] = FLOOR
-        self.rebuild()
+            if self.autotile_enabled:
+                build_walls_around(self.logical_grid, grid_x, grid_y)
+
+        self.sprite_grid = resolve_sprite_grid(self.logical_grid)
         self.object_manager.prune_invalid()
 
     def update(self, dt: float, player=None, player_hitbox=None) -> None:

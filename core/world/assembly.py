@@ -77,6 +77,7 @@ class DungeonAssembly:
         self.rooms = []
         self._shadow_cache = {}
         self._gradient_hole_cache = {}
+        self._below_cache = {}
 
     def add_room(self, placed_room):
         self.rooms.append(placed_room)
@@ -287,6 +288,12 @@ class DungeonAssembly:
     SHADOW_MAX_DISTANCE = 2  # floors beyond this aren't drawn at all
     SHADOW_COLOR_ABOVE = (0, 0, 0)
     SHADOW_COLOR_BELOW = (150, 150, 150)
+    # ~50% white/blue BLEND_RGBA_MULT tint for floors below active_floor (see
+    # _get_below_render) -- multiplying (not a plain alpha-over blend) leaves
+    # fully-transparent void pixels at alpha 0 while still tinting the real
+    # tile/object art, so the player can actually see which tile they'd land
+    # on, not just a flat silhouette.
+    BELOW_TINT_COLOR = (167, 197, 255, 255)
     VISION_RADIUS_TILES = 4.5
     VISION_FALLOFF_TILES = 1.5  # width of the soft edge just inside VISION_RADIUS_TILES
 
@@ -312,7 +319,7 @@ class DungeonAssembly:
         """
         for floor in self.floors():
             if floor < active_floor:
-                self._render_floor_shadow(screen, camera, floor, active_floor)
+                self._render_floor_below(screen, camera, floor, active_floor, hide_object_types=hide_object_types)
 
         self._render_floor(
             screen, camera, active_floor,
@@ -424,6 +431,57 @@ class DungeonAssembly:
 
             screen.blit(shadow, screen_pos)
 
+    def _render_floor_below(self, screen, camera, floor, active_floor, hide_object_types=None):
+        """Real tiles/objects of `floor` (see _get_below_render), blue-tinted
+        and faded by distance from active_floor -- replaces the old flat grey
+        silhouette so the player can see concretely which tile they'd land on
+        falling through void, not just that "something" is down there."""
+        distance = active_floor - floor
+        if distance <= 0 or distance > self.SHADOW_MAX_DISTANCE:
+            return
+
+        opacity = max(0.0, 1.0 - self.SHADOW_OPACITY_STEP * distance)
+
+        tile_size = Dungeon.TILE_SIZE
+        for room in self.rooms_on_floor(floor):
+            rendered = self._get_below_render(room, camera.zoom, hide_object_types)
+            rendered.set_alpha(int(255 * opacity))
+            screen_pos = camera.world_to_screen(room.offset_x * tile_size, room.offset_y * tile_size)
+            screen.blit(rendered, screen_pos)
+
+    def _get_below_render(self, room, zoom, hide_object_types):
+        """A cached, blue-tinted render of `room`'s actual tiles/objects (not
+        just its logical footprint, unlike _get_shadow) -- animals/enemies are
+        excluded since this cache isn't refreshed every frame, so a live
+        position baked into it would go stale immediately. Rendered onto its
+        own zero-offset surface via _ZoomOnlyCamera, independent of the real
+        camera's current pan position, then tinted once with
+        BLEND_RGBA_MULT. Cached per (room, zoom) -- distance-based fade is
+        applied afterwards via set_alpha, not baked in, so one cached surface
+        covers every distance."""
+        key = (room, zoom)
+        cached = self._below_cache.get(key)
+        if cached is not None:
+            return cached
+
+        tile_size = Dungeon.TILE_SIZE
+        size = (
+            max(1, round(room.dungeon.width * tile_size * zoom)),
+            max(1, round(room.dungeon.height * tile_size * zoom)),
+        )
+        surface = pygame.Surface(size, pygame.SRCALPHA)
+        room.dungeon.render(
+            surface, _ZoomOnlyCamera(zoom),
+            hide_object_types=hide_object_types,
+            skip_animals=True,
+            skip_enemies=True,
+            show_grid=False,
+        )
+        surface.fill(self.BELOW_TINT_COLOR, special_flags=pygame.BLEND_RGBA_MULT)
+
+        self._below_cache[key] = surface
+        return surface
+
     def _get_shadow(self, room, color, zoom):
         """A cached, pre-tinted silhouette of `room`'s logical footprint --
         every non-EMPTY cell filled with `color` (an (r, g, b, alpha) tuple),
@@ -496,6 +554,19 @@ class _OffsetCamera:
 
     def world_to_screen(self, world_x, world_y):
         return self._base.world_to_screen(world_x + self._offset_x, world_y + self._offset_y)
+
+
+class _ZoomOnlyCamera:
+    """A stationary camera at a fixed zoom, no panning -- used by
+    _get_below_render to render a room's own tiles/objects into an
+    independent cache surface, decoupled from wherever the live scrolling
+    camera currently points (only its zoom matters for that cache)."""
+
+    def __init__(self, zoom):
+        self.zoom = zoom
+
+    def world_to_screen(self, world_x, world_y):
+        return world_x * self.zoom, world_y * self.zoom
 
 
 def _load_room(room_name):

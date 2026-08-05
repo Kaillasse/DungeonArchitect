@@ -89,6 +89,75 @@ def build_walls(logical_grid: List[List[int]]) -> None:
                         logical_grid[ny][nx] = WALL
 
 # --------------------------------------------------------------------
+# Murs incrémentaux -- contrairement à build_walls (strip + rescan de toute
+# la grille), ces deux fonctions ne touchent jamais qu'au voisinage immédiat
+# de la case peinte/effacée. C'est ce que Dungeon.paint_cell utilise
+# désormais : peindre une case avec l'autotile actif ne doit murer QUE ses
+# propres voisins vides, jamais re-dériver les murs de tout le reste de la
+# salle (ce que build_walls ferait, visible dès qu'on avait peint du sol
+# sans mur pendant que l'autotile était désactivé puis qu'on le réactive).
+# --------------------------------------------------------------------
+
+def build_walls_around(logical_grid: List[List[int]], x: int, y: int) -> None:
+    """Mure les voisins EMPTY (8 directions) de la case (x, y) qui vient
+    d'être peinte en FLOOR. Ne touche à aucune autre case de la grille."""
+
+    h = len(logical_grid)
+    if h == 0:
+        return
+    w = len(logical_grid[0])
+
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+
+            if dx == 0 and dy == 0:
+                continue
+
+            nx = x + dx
+            ny = y + dy
+
+            if 0 <= nx < w and 0 <= ny < h and logical_grid[ny][nx] == EMPTY:
+                logical_grid[ny][nx] = WALL
+
+
+def unbuild_walls_around(logical_grid: List[List[int]], x: int, y: int) -> None:
+    """Inverse local de build_walls_around, appelé après avoir effacé la case
+    (x, y) : chacun de ses voisins WALL qui ne borde plus aucune case FLOOR
+    (en vérifiant les 8 voisins de CE voisin) redevient EMPTY."""
+
+    h = len(logical_grid)
+    if h == 0:
+        return
+    w = len(logical_grid[0])
+
+    def get(px, py):
+        if 0 <= px < w and 0 <= py < h:
+            return logical_grid[py][px]
+        return EMPTY
+
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+
+            if dx == 0 and dy == 0:
+                continue
+
+            nx = x + dx
+            ny = y + dy
+
+            if not (0 <= nx < w and 0 <= ny < h) or logical_grid[ny][nx] != WALL:
+                continue
+
+            still_needed = any(
+                get(nx + ddx, ny + ddy) == FLOOR
+                for ddx in (-1, 0, 1)
+                for ddy in (-1, 0, 1)
+                if not (ddx == 0 and ddy == 0)
+            )
+
+            if not still_needed:
+                logical_grid[ny][nx] = EMPTY
+
+# --------------------------------------------------------------------
 # Effacement
 # --------------------------------------------------------------------
 

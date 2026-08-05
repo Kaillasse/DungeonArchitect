@@ -261,7 +261,9 @@ class Explorator:
         overlap test."""
         grid_x = int(rect.centerx // Dungeon.TILE_SIZE)
         grid_y = int((rect.bottom - 1) // Dungeon.TILE_SIZE)
+        return self._is_void_at(grid_x, grid_y)
 
+    def _is_void_at(self, grid_x, grid_y):
         if self.assembly is not None:
             return self.assembly.locate_room(
                 grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
@@ -293,6 +295,7 @@ class Explorator:
             if room is not None:
                 self.current_placed_room = room
                 self._last_door_obj = None  # new room/floor -- re-arm the door edge-trigger
+                self.player.play_fall()
                 return
 
         self._fall_out_of_map()
@@ -577,12 +580,18 @@ class Explorator:
 
         pygame.display.flip()
 
+    DEBUG_VOID_RADIUS_TILES = 3
+
     def _draw_debug_hitboxes(self):
         """F3 overlay: the player's hitbox in red (plus its attack reach in
         orange while actually active), animals in yellow, enemies in purple
         -- all already in the exact world coordinates _is_walkable/combat
         compare, so any gap between "what looks like it's touching" and
-        "what's actually colliding" is directly visible instead of guessed."""
+        "what's actually colliding" is directly visible instead of guessed.
+        Also outlines every cell _is_void_at considers void (cyan) within a
+        few tiles of the player -- to diagnose exactly which cells near a
+        gate/wall entry-exit read as void vs not, rather than guessing."""
+        self._draw_debug_void_grid()
         self._draw_debug_rect(self.player.get_hitbox(), (255, 60, 60))
         if self.player.is_attack_active():
             self._draw_debug_rect(self.player.get_attack_hitbox(), (255, 150, 30))
@@ -590,6 +599,19 @@ class Explorator:
             self._draw_debug_rect(animal_rect, (255, 220, 60))
         for _enemy, enemy_rect, _dungeon in self._visible_enemies_global():
             self._draw_debug_rect(enemy_rect, (200, 60, 255))
+
+    def _draw_debug_void_grid(self):
+        hitbox = self.player.get_hitbox()
+        center_grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
+        center_grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
+        tile_size = Dungeon.TILE_SIZE
+        radius = self.DEBUG_VOID_RADIUS_TILES
+
+        for grid_y in range(center_grid_y - radius, center_grid_y + radius + 1):
+            for grid_x in range(center_grid_x - radius, center_grid_x + radius + 1):
+                if self._is_void_at(grid_x, grid_y):
+                    world_rect = pygame.Rect(grid_x * tile_size, grid_y * tile_size, tile_size, tile_size)
+                    self._draw_debug_rect(world_rect, (60, 220, 220))
 
     def _draw_debug_rect(self, world_rect, color):
         top_left = self.camera.world_to_screen(world_rect.left, world_rect.top)

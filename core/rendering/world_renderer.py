@@ -1,7 +1,7 @@
 import pygame
 
 from core.data.ressources import TILE_SIZE, load_tileset, get_tile_surface
-from core.editor.autotile import DEFAULT_FLOOR_SPRITE
+from core.editor.autotile import EMPTY, DEFAULT_FLOOR_SPRITE
 from core.world.object_manager import OBJECT_TYPES, load_object_frames
 
 
@@ -12,6 +12,15 @@ class WorldRenderer:
     SPAWN_PREVIEW_COLOR = (0, 255, 0)
     LINK_INDICATOR_COLOR = (60, 220, 90)
     LINK_INDICATOR_RADIUS = 5
+
+    # basictileset.png (6 cols x 5 rows, the only sheet load_tileset ever
+    # resolves to -- no tileset.png exists) -- a decorative ledge/edge tile
+    # drawn one cell south of every non-empty cell whose south neighbor is
+    # EMPTY, purely cosmetic: that cell stays EMPTY in logical_grid, so
+    # Explorator._is_void still treats it as void (the player falls there
+    # same as any other void cell, this just avoids a flat black gap at the
+    # visible edge of a room).
+    BORDER_TILE_INDEX = 24
 
     def __init__(self):
         self.tileset = load_tileset()
@@ -53,6 +62,16 @@ class WorldRenderer:
                 world_y = y * tile_size
                 screen_x, screen_y = camera.world_to_screen(world_x, world_y)
                 screen.blit(scaled, (screen_x, screen_y))
+
+        for y, row in enumerate(dungeon.logical_grid):
+            for x, cell in enumerate(row):
+                if cell == EMPTY:
+                    continue
+                south_y = y + 1
+                if south_y >= dungeon.height or dungeon.logical_grid[south_y][x] == EMPTY:
+                    scaled = self._get_scaled_tile(self.BORDER_TILE_INDEX, zoom, tile_px, columns)
+                    screen_x, screen_y = camera.world_to_screen(x * tile_size, south_y * tile_size)
+                    screen.blit(scaled, (screen_x, screen_y))
 
         self._draw_objects(
             screen, dungeon, camera,
