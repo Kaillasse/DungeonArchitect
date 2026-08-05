@@ -284,43 +284,25 @@ class Player:
         screen.blit(sprite, (int(sprite_screen_x), int(sprite_screen_y)))
 
 
-class Animal:
-    """A wandering NPC (chicken/cow/pig/sheep): alternates idle/move on a random
-    timer, picking a random direction each time it starts moving, and collides
-    like the player (per-axis, via the is_walkable callback its AnimalManager
-    passes in -- walls/closed gates plus every other animal and the player,
-    see AnimalManager._is_free)."""
-
-    FRAME_SIZE = 32
-    MOVE_SPEED = 40  # pixels/second -- slower than the player
-    ANIMATION_SPEED = 0.25
-    IDLE_DURATION = (1.0, 2.5)
-    MOVE_DURATION = (1.0, 2.0)
-
-    HITBOX_WIDTH = 14
-    HITBOX_HEIGHT = 8
-
-    def __init__(self, animal_type, grid_x, grid_y, dungeon):
-        self.animal_type = animal_type
-        self.frames = load_animal_frames(animal_type)
-
-        self.position = pygame.Vector2(*dungeon.grid_to_world(grid_x, grid_y))
-
-        self.state = "idle"
-        self.direction = pygame.Vector2()
-        self.flip = False
-
-        self.frame = 0
-        self.animation_timer = 0
-        self.state_timer = random.uniform(*self.IDLE_DURATION)
-
-        self._render_cache = {}
+class _WanderingEntity:
+    """Shared plumbing for Animal and Enemy: both are live NPCs that wander a
+    room on a random idle/move timer with per-axis collision-tested
+    movement, and both draw a cached, zoom-scaled sprite anchored to their
+    feet position. Subclasses own their own state machine and __init__ (only
+    Enemy has chase/attack/damaged/death on top of idle/move) and must set:
+    HITBOX_WIDTH/HEIGHT, FRAME_SIZE, IDLE_DURATION/MOVE_DURATION,
+    ANIMATION_SPEED, LOOPING_STATES, MOVE_STATE_NAME (the wandering "moving"
+    state's key into self.frames -- "move" for Animal, "movement" for
+    Enemy), and FACES_RIGHT_BY_DEFAULT (whether the sprite sheet's unflipped
+    pose already faces right -- flips the sign of the direction.x check
+    below; the animal sheets face left by default, the skeleton sheets face
+    right)."""
 
     def _hitbox_at(self, x, y):
         """Hitbox for a given (feet-anchored) position, using the exact same
         rounding get_hitbox() will later re-derive from self.position once
-        that candidate is accepted -- see update()'s comment for why this
-        single shared formula matters."""
+        that candidate is accepted -- see _move_toward's comment for why
+        this single shared formula matters."""
         return pygame.Rect(
             int(round(x - self.HITBOX_WIDTH / 2)),
             int(round(y - self.HITBOX_HEIGHT)),
@@ -331,51 +313,73 @@ class Animal:
     def get_hitbox(self):
         return self._hitbox_at(self.position.x, self.position.y)
 
-    def _enter_state(self, state):
+    def _enter_wander_state(self, state):
         self.state = state
         self.frame = 0
         self.animation_timer = 0
 
-        if state == "move":
+        if state == self.MOVE_STATE_NAME:
             angle = random.uniform(0, 2 * math.pi)
             self.direction = pygame.Vector2(math.cos(angle), math.sin(angle))
-            # The source sheets face left by default, so a rightward
-            # (positive x) direction is the one that needs flipping.
-            self.flip = self.direction.x > 0
+            self.flip = (self.direction.x < 0) if self.FACES_RIGHT_BY_DEFAULT else (self.direction.x > 0)
             self.state_timer = random.uniform(*self.MOVE_DURATION)
         else:
             self.direction = pygame.Vector2()
             self.state_timer = random.uniform(*self.IDLE_DURATION)
 
-    def update(self, dt, is_walkable):
-        self.state_timer -= dt
-        if self.state_timer <= 0:
-            self._enter_state("move" if self.state == "idle" else "idle")
+    def _move_toward(self, dt, is_walkable, direction, speed):
+        """Per-axis collision-tested movement toward `direction` (any
+        length) at `speed` px/s. Candidate positions are built straight from
+        the prospective float position via _hitbox_at, rather than mutating
+        a live pygame.Rect in place (hitbox.x += movement.x): Rect coerces a
+        float assignment by rounding, while get_hitbox() truncates from the
+        live float position -- two different roundings of the same quantity
+        could disagree by a pixel, letting a validated move settle into a
+        position whose *actual* hitbox pokes into a wall. Testing the very
+        same formula we'll settle on eliminates that."""
+        if direction.length_squared() == 0:
+            return
+        direction = direction.normalize()
+        self.flip = (direction.x < 0) if self.FACES_RIGHT_BY_DEFAULT else (direction.x > 0)
+        movement = direction * speed * dt
 
-        if self.state == "move":
-            movement = self.direction * self.MOVE_SPEED * dt
+        candidate_x = self.position.x + movement.x
+        if is_walkable(self._hitbox_at(candidate_x, self.position.y)):
+            self.position.x = candidate_x
 
-            # Build each candidate hitbox straight from the prospective float
-            # position via _hitbox_at, rather than mutating the current
-            # pygame.Rect in place (hitbox.x += movement.x): Rect coerces a
-            # float assignment by rounding, while get_hitbox() truncates from
-            # the live float position -- two different roundings of the same
-            # quantity could disagree by a pixel, letting a validated move
-            # settle into a position whose *actual* hitbox pokes into a wall.
-            # Testing the very same formula we'll settle on eliminates that.
-            candidate_x = self.position.x + movement.x
-            if is_walkable(self._hitbox_at(candidate_x, self.position.y)):
-                self.position.x = candidate_x
+        candidate_y = self.position.y + movement.y
+        if is_walkable(self._hitbox_at(self.position.x, candidate_y)):
+            self.position.y = candidate_y
 
-            candidate_y = self.position.y + movement.y
-            if is_walkable(self._hitbox_at(self.position.x, candidate_y)):
-                self.position.y = candidate_y
-
+    def _advance_animation(self, dt):
+        """Looping states wrap forever (Animal's idle/move both do); a
+        non-looping state advances toward its last frame and then calls a
+        hook once it gets there instead of wrapping -- Animal has no
+        non-looping states so these hooks are never reached for it, Enemy
+        overrides them for its attack/damaged/death states."""
+        frames = self.frames[self.state]
         self.animation_timer += dt
-        if self.animation_timer >= self.ANIMATION_SPEED:
-            self.animation_timer = 0
-            frames = self.frames[self.state]
+        if self.animation_timer < self.ANIMATION_SPEED:
+            return
+        self.animation_timer = 0
+
+        if self.state in self.LOOPING_STATES:
             self.frame = (self.frame + 1) % len(frames)
+            self._on_loop_frame_advanced()
+        elif self.frame < len(frames) - 1:
+            self.frame += 1
+        else:
+            self._on_final_frame_reached()
+
+    def _on_loop_frame_advanced(self):
+        """Hook: called after a LOOPING_STATES frame wraps forward. No-op by
+        default (Animal doesn't need it); Enemy overrides it to re-arm its
+        attack window at the start of each swing."""
+
+    def _on_final_frame_reached(self):
+        """Hook: called once a non-looping animation has reached its last
+        frame instead of advancing further. No-op by default (holds on the
+        last frame forever); Enemy overrides it for "damaged" -> "idle"."""
 
     def draw(self, screen, camera):
         frames = self.frames[self.state]
@@ -396,6 +400,72 @@ class Animal:
         sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
 
         screen.blit(sprite, (int(sx), int(sy)))
+
+
+class Animal(_WanderingEntity):
+    """A wandering NPC (chicken/cow/pig/sheep): alternates idle/move on a random
+    timer, picking a random direction each time it starts moving, and collides
+    like the player (per-axis, via the is_walkable callback its AnimalManager
+    passes in -- walls/closed gates plus every other animal and the player,
+    see AnimalManager._is_free)."""
+
+    FRAME_SIZE = 32
+    MOVE_SPEED = 40  # pixels/second -- slower than the player
+    ANIMATION_SPEED = 0.25
+    IDLE_DURATION = (1.0, 2.5)
+    MOVE_DURATION = (1.0, 2.0)
+    LOOPING_STATES = ("idle", "move")
+    MOVE_STATE_NAME = "move"
+    FACES_RIGHT_BY_DEFAULT = False  # the animal sheets face left by default
+
+    HITBOX_WIDTH = 14
+    HITBOX_HEIGHT = 8
+
+    def __init__(self, animal_type, grid_x, grid_y, dungeon):
+        self.animal_type = animal_type
+        self.frames = load_animal_frames(animal_type)
+
+        self.position = pygame.Vector2(*dungeon.grid_to_world(grid_x, grid_y))
+
+        self.state = "idle"
+        self.direction = pygame.Vector2()
+        self.flip = False
+
+        self.frame = 0
+        self.animation_timer = 0
+        self.state_timer = random.uniform(*self.IDLE_DURATION)
+
+        self._render_cache = {}
+
+    def update(self, dt, is_walkable):
+        self.state_timer -= dt
+        if self.state_timer <= 0:
+            self._enter_wander_state("move" if self.state == "idle" else "idle")
+
+        if self.state == "move":
+            self._move_toward(dt, is_walkable, self.direction, self.MOVE_SPEED)
+
+        self._advance_animation(dt)
+
+
+def _entity_rect_is_free(dungeon, rect, entities, moving_entity, player_hitbox):
+    """Shared by AnimalManager/EnemyManager._is_free: walls/closed gates
+    first (cheapest, most likely to reject), then every other live entity in
+    `entities` (a dead Enemy -- getattr(other, "alive", True) -- doesn't
+    block; Animal has no "alive" attribute at all, so it defaults to always
+    blocking), then the player if they're actually standing on this room's
+    floor right now (player_hitbox is None otherwise -- see Dungeon.update)."""
+    if not dungeon.is_rect_walkable(rect):
+        return False
+
+    for other in entities:
+        if other is not moving_entity and getattr(other, "alive", True) and rect.colliderect(other.get_hitbox()):
+            return False
+
+    if player_hitbox is not None and rect.colliderect(player_hitbox):
+        return False
+
+    return True
 
 
 class AnimalManager:
@@ -424,21 +494,7 @@ class AnimalManager:
         ]
 
     def _is_free(self, rect, moving_animal, player_hitbox):
-        """Walls/closed gates first (cheapest, most likely to reject), then
-        every other live animal in this room, then the player if they're
-        actually standing on this room's floor right now (player_hitbox is
-        None otherwise -- see Dungeon.update)."""
-        if not self.dungeon.is_rect_walkable(rect):
-            return False
-
-        for other in self.animals:
-            if other is not moving_animal and rect.colliderect(other.get_hitbox()):
-                return False
-
-        if player_hitbox is not None and rect.colliderect(player_hitbox):
-            return False
-
-        return True
+        return _entity_rect_is_free(self.dungeon, rect, self.animals, moving_animal, player_hitbox)
 
     def update(self, dt, player_hitbox=None):
         for animal in self.animals:
@@ -452,7 +508,7 @@ class AnimalManager:
             animal.draw(screen, camera)
 
 
-class Enemy:
+class Enemy(_WanderingEntity):
     """A combat-capable wandering NPC (skeleton1/skeleton2): behaves exactly
     like an Animal when the player is out of range (idle/move alternation,
     same per-axis collision-tested movement), but switches to chasing once
@@ -471,6 +527,8 @@ class Enemy:
     IDLE_DURATION = (1.0, 2.5)
     MOVE_DURATION = (1.0, 2.0)
     LOOPING_STATES = ("idle", "movement", "attack")
+    MOVE_STATE_NAME = "movement"
+    FACES_RIGHT_BY_DEFAULT = True  # the skeleton sheets face right by default
 
     HITBOX_WIDTH = 16
     HITBOX_HEIGHT = 10
@@ -496,18 +554,6 @@ class Enemy:
         self._hit_delivered_this_swing = False
 
         self._render_cache = {}
-
-    def _hitbox_at(self, x, y):
-        """Same rounding-consistency rationale as Animal._hitbox_at."""
-        return pygame.Rect(
-            int(round(x - self.HITBOX_WIDTH / 2)),
-            int(round(y - self.HITBOX_HEIGHT)),
-            self.HITBOX_WIDTH,
-            self.HITBOX_HEIGHT,
-        )
-
-    def get_hitbox(self):
-        return self._hitbox_at(self.position.x, self.position.y)
 
     def get_attack_hitbox(self):
         """Melee reach checked against the player during the active-frame
@@ -544,37 +590,6 @@ class Enemy:
         if state == "attack":
             self._hit_delivered_this_swing = False
 
-    def _enter_wander_state(self, state):
-        self.state = state
-        self.frame = 0
-        self.animation_timer = 0
-        if state == "movement":
-            angle = random.uniform(0, 2 * math.pi)
-            self.direction = pygame.Vector2(math.cos(angle), math.sin(angle))
-            # Unlike the animal sheets (face left by default), the skeleton
-            # sheets face right by default -- so it's leftward movement that
-            # needs flipping here, the opposite of Animal's convention.
-            self.flip = self.direction.x < 0
-            self.state_timer = random.uniform(*self.MOVE_DURATION)
-        else:
-            self.direction = pygame.Vector2()
-            self.state_timer = random.uniform(*self.IDLE_DURATION)
-
-    def _move_toward(self, dt, is_walkable, direction, speed):
-        if direction.length_squared() == 0:
-            return
-        direction = direction.normalize()
-        self.flip = direction.x < 0
-        movement = direction * speed * dt
-
-        candidate_x = self.position.x + movement.x
-        if is_walkable(self._hitbox_at(candidate_x, self.position.y)):
-            self.position.x = candidate_x
-
-        candidate_y = self.position.y + movement.y
-        if is_walkable(self._hitbox_at(self.position.x, candidate_y)):
-            self.position.y = candidate_y
-
     def _update_wander(self, dt, is_walkable):
         """Ambient background behavior, identical in spirit to Animal.update:
         alternates idle/movement on a random timer, random direction each
@@ -594,22 +609,13 @@ class Enemy:
         target = pygame.Vector2(player_hitbox.centerx, player_hitbox.centery)
         self._move_toward(dt, is_walkable, target - self.position, self.stats["move_speed"])
 
-    def _advance_animation(self, dt):
-        frames = self.frames[self.state]
-        self.animation_timer += dt
-        if self.animation_timer < self.ANIMATION_SPEED:
-            return
-        self.animation_timer = 0
+    def _on_loop_frame_advanced(self):
+        # A fresh attack swing starts its own new active-frame window.
+        if self.state == "attack" and self.frame == 0:
+            self._hit_delivered_this_swing = False
 
-        if self.state in self.LOOPING_STATES:
-            new_frame = (self.frame + 1) % len(frames)
-            if self.state == "attack" and new_frame == 0:
-                # A fresh swing starts its own new attack window.
-                self._hit_delivered_this_swing = False
-            self.frame = new_frame
-        elif self.frame < len(frames) - 1:
-            self.frame += 1
-        elif self.state == "damaged":
+    def _on_final_frame_reached(self):
+        if self.state == "damaged":
             # Played once; return to a neutral state and let the next
             # update() re-evaluate distance to pick idle/movement/attack.
             self.state = "idle"
@@ -651,26 +657,6 @@ class Enemy:
             player.take_damage(1)
             self._hit_delivered_this_swing = True
 
-    def draw(self, screen, camera):
-        frames = self.frames[self.state]
-        sprite = frames[min(self.frame, len(frames) - 1)]
-
-        render_scale = camera.zoom * WORLD_SCALE
-        zoom_key = max(1, int(round(render_scale * 100)))
-        cache_key = (self.state, self.flip, self.frame, zoom_key)
-        if cache_key not in self._render_cache:
-            scaled = pygame.transform.scale_by(sprite, render_scale)
-            if self.flip:
-                scaled = pygame.transform.flip(scaled, True, False)
-            self._render_cache[cache_key] = scaled
-        sprite = self._render_cache[cache_key]
-
-        sprite_left_world = self.position.x - self.FRAME_SIZE * WORLD_SCALE / 2
-        sprite_top_world = self.position.y - self.FRAME_SIZE * WORLD_SCALE
-        sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
-
-        screen.blit(sprite, (int(sx), int(sy)))
-
 
 class EnemyManager:
     """Owns the live Enemy entities in a room, spawned from its placed enemy
@@ -692,19 +678,7 @@ class EnemyManager:
         ]
 
     def _is_free(self, rect, moving_enemy, player_hitbox):
-        """Walls/closed gates, then every other LIVE enemy (a corpse doesn't
-        block movement), then the player if on this room's floor right now."""
-        if not self.dungeon.is_rect_walkable(rect):
-            return False
-
-        for other in self.enemies:
-            if other is not moving_enemy and other.alive and rect.colliderect(other.get_hitbox()):
-                return False
-
-        if player_hitbox is not None and rect.colliderect(player_hitbox):
-            return False
-
-        return True
+        return _entity_rect_is_free(self.dungeon, rect, self.enemies, moving_enemy, player_hitbox)
 
     def update(self, dt, player=None, player_hitbox=None):
         for enemy in self.enemies:
