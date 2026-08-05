@@ -93,3 +93,9 @@ Random to-do list :
 -[FAIT] systeme de combat : si player.attack frame 4 et 5 /6 touche une autre entité cette entité prend 1 dmg fonctionne dans l'autre sens pour les ennemie sur le player sauf que pour les skeletons c'est les frames 7 et 8 sur les 9 frames de l'animation qui sont effective
 -[FAIT] système d'inventaire : 3 slot principaux (item attack, item interact et passif),2 compteur de monnaie et 15 slot d'inventaires (3 rangé de 5 slot), ce systeme sera porté par le state menu, avec un gros pannel (accessible par input e par defaut) ce pannel affichera le joueur avec l'animation sont animation idle, les 3 slot principaux a droite avec les portes monnaie et les slots d'inventaire en dessous.
   (Implémenté comme overlay pendant l'Exploration -- pas de nouveau GameState -- qui met le monde en pause. Coquille UI complète + modèle de données Item minimal, mais aucun système de loot/ramassage réel : les 2-3 objets visibles dans le panel sont des données de test à retirer quand un vrai système d'objets existera. Monnaie affichée à 0, pas de logique de gain encore.)
+
+  -destructabilité de l'environnement : certain monstre, objet ou effet divers pourront causer la destruction du donjon en mode explo
+-systeme d'etage : le premier etage sera le monde de base du joueur futur point de depart du programme le joueur pourra se deplacer librement dans ce monde et passer en mode creator par un simple dezoom, si le joueur place une porte sur son monde il accedera a des donjon assemblé proceduralement. chaque donjon aura donc un point de spawn, des E/S vers les rooms environnante et une sortie vers un etage plus profond avec un autre donjon generé ou un retour vers le monde de base
+-systeme de sauvegarde de profil de joueur
+-systeme de multijoueur
+-pnj

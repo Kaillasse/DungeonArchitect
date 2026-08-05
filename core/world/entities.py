@@ -520,7 +520,10 @@ class Enemy:
         if state == "movement":
             angle = random.uniform(0, 2 * math.pi)
             self.direction = pygame.Vector2(math.cos(angle), math.sin(angle))
-            self.flip = self.direction.x > 0
+            # Unlike the animal sheets (face left by default), the skeleton
+            # sheets face right by default -- so it's leftward movement that
+            # needs flipping here, the opposite of Animal's convention.
+            self.flip = self.direction.x < 0
             self.state_timer = random.uniform(*self.MOVE_DURATION)
         else:
             self.direction = pygame.Vector2()
@@ -530,7 +533,7 @@ class Enemy:
         if direction.length_squared() == 0:
             return
         direction = direction.normalize()
-        self.flip = direction.x > 0
+        self.flip = direction.x < 0
         movement = direction * speed * dt
 
         candidate_x = self.position.x + movement.x
@@ -599,7 +602,7 @@ class Enemy:
 
         if distance_px is not None and distance_px <= self.stats["attack_range"] * self.tile_size:
             self._enter_state("attack")
-            self.flip = player_hitbox.centerx > self.position.x
+            self.flip = player_hitbox.centerx < self.position.x
         elif distance_px is not None and distance_px <= self.stats["aggro_range"] * self.tile_size:
             self._update_chase(dt, is_walkable, player_hitbox)
         else:
@@ -685,23 +688,26 @@ class EnemyManager:
 
 
 class Pickup:
-    """A static, spinning currency pickup dropped by a dead enemy (see
-    Explorator._spawn_loot) -- never saved to room.json (created at runtime,
-    not authored), never blocks movement (not consulted by
-    is_rect_walkable/_is_free), just sits until the player's hitbox touches
-    it (PickupManager.collect)."""
+    """A currency pickup dropped by a dead enemy (see Explorator._spawn_loot)
+    -- never saved to room.json (created at runtime, not authored), never
+    blocks movement (not consulted by is_rect_walkable/_is_free). Two states:
+    "spin" loops forever until the player's hitbox touches it
+    (PickupManager.collect calls begin_collect()), then "collect" plays once
+    -- the sprite's own row 1 -- before PickupManager removes it (self.finished)."""
 
-    FRAME_SIZE = 32
+    FRAME_SIZE = 16
     HITBOX_SIZE = 16
     ANIMATION_SPEED = 0.15
 
     def __init__(self, currency_type, world_x, world_y):
         self.currency_type = currency_type
         self.position = pygame.Vector2(world_x, world_y)
-        self.frames = load_currency_frames(currency_type)
+        self.frames = load_currency_frames(currency_type)  # {"spin": [...], "collect": [...]}
 
+        self.state = "spin"
         self.frame = 0
         self.animation_timer = 0.0
+        self.finished = False
 
         self._render_cache = {}
 
@@ -713,18 +719,33 @@ class Pickup:
             self.HITBOX_SIZE,
         )
 
+    def begin_collect(self):
+        if self.state == "collect":
+            return
+        self.state = "collect"
+        self.frame = 0
+        self.animation_timer = 0.0
+
     def update(self, dt):
+        frames = self.frames[self.state]
         self.animation_timer += dt
-        if self.animation_timer >= self.ANIMATION_SPEED:
-            self.animation_timer = 0
-            self.frame = (self.frame + 1) % len(self.frames)
+        if self.animation_timer < self.ANIMATION_SPEED:
+            return
+        self.animation_timer = 0
+
+        if self.state == "spin":
+            self.frame = (self.frame + 1) % len(frames)
+        elif self.frame < len(frames) - 1:
+            self.frame += 1
+        else:
+            self.finished = True
 
     def draw(self, screen, camera):
-        sprite = self.frames[self.frame]
+        sprite = self.frames[self.state][self.frame]
 
         render_scale = camera.zoom * WORLD_SCALE
         zoom_key = max(1, int(round(render_scale * 100)))
-        cache_key = (self.frame, zoom_key)
+        cache_key = (self.state, self.frame, zoom_key)
         if cache_key not in self._render_cache:
             self._render_cache[cache_key] = pygame.transform.scale_by(sprite, render_scale)
         scaled = self._render_cache[cache_key]
@@ -752,17 +773,19 @@ class PickupManager:
     def update(self, dt):
         for pickup in self.pickups:
             pickup.update(dt)
+        self.pickups = [pickup for pickup in self.pickups if not pickup.finished]
 
     def collect(self, player_hitbox, inventory):
-        """Removes every Pickup the player's hitbox touches, crediting
-        inventory.currency[pickup.currency_type] += 1 each."""
-        remaining = []
+        """Credits inventory.currency[pickup.currency_type] += 1 the instant
+        the player touches a still-"spin" Pickup, then starts its "collect"
+        animation -- removal itself happens in update() once that finishes,
+        so the coin visually plays its pickup animation instead of just
+        vanishing. Already-collecting pickups are left alone (no double
+        credit if the player's hitbox keeps overlapping it)."""
         for pickup in self.pickups:
-            if player_hitbox.colliderect(pickup.get_hitbox()):
+            if pickup.state == "spin" and player_hitbox.colliderect(pickup.get_hitbox()):
                 inventory.currency[pickup.currency_type] += 1
-            else:
-                remaining.append(pickup)
-        self.pickups = remaining
+                pickup.begin_collect()
 
     def draw(self, screen, camera):
         for pickup in self.pickups:

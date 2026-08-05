@@ -110,7 +110,7 @@ class InventoryPanel:
         x = panel_rect.x + 320
 
         for key in ("gold", "blue"):
-            frames = self._currency_frames[key]
+            frames = self._currency_frames[key]["spin"]
             icon = frames[self._currency_frame_index % len(frames)]
             scaled_icon = pygame.transform.scale(icon, (28, 28))
             screen.blit(scaled_icon, (x, y))

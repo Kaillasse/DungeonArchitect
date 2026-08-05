@@ -180,18 +180,25 @@ ENEMY_STATS = {
     },
 }
 
-# Currency pickup sheets (assets/ root, not under a themed folder): one row
-# of 4 32x32 frames each (a coin spinning). Shared by InventoryPanel's
-# counter icon and core.world.entities.Pickup, so both stay visually
-# identical to a single source of truth.
+# Currency pickup sheets (assets/ root, not under a themed folder): two rows
+# of 16x16 frames -- row 0 is the idle "spinning coin" loop, row 1 plays once
+# when the player actually picks it up (core.world.entities.Pickup). Shared
+# by InventoryPanel's counter icon (which only ever uses "spin") and Pickup,
+# so both stay visually identical to a single source of truth.
 CURRENCY_FILES = {"gold": "Coin Sheet.png", "blue": "BlueCoin Sheet.png"}
+CURRENCY_FRAME_SIZE = 16
 
 
 def load_currency_frames(currency_type):
+    """Returns {"spin": [...], "collect": [...]}, each a list of 16x16 frames."""
     sheet = pygame.image.load(PROJECT_ROOT / "assets" / CURRENCY_FILES[currency_type]).convert_alpha()
-    size = sheet.get_height()
+    size = CURRENCY_FRAME_SIZE
     columns = sheet.get_width() // size
-    return [sheet.subsurface((i * size, 0, size, size)).copy() for i in range(columns)]
+
+    def _row(row_index):
+        return [sheet.subsurface((i * size, row_index * size, size, size)).copy() for i in range(columns)]
+
+    return {"spin": _row(0), "collect": _row(1)}
 
 
 def load_object_frames(object_type, variant=None):
