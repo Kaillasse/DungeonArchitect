@@ -20,6 +20,7 @@ HIDDEN_OBJECT_TYPES = {"spawn", *ANIMAL_TYPES}
 class Explorator:
 
     MOVE_SPEED = 180  # pixels/seconde
+    RUN_SPEED = 260  # pixels/seconde -- held with SHIFT
 
     def __init__(self, game_manager):
 
@@ -174,13 +175,17 @@ class Explorator:
         if keys[pygame.K_d]:
             direction.x += 1
 
+        running = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
+
         if direction.length_squared() > 0:
 
             direction = direction.normalize()
 
+            speed = self.RUN_SPEED if running else self.MOVE_SPEED
+
             movement = (
                 direction
-                * self.MOVE_SPEED
+                * speed
                 * dt
             )
 
@@ -231,11 +236,13 @@ class Explorator:
                 else:
                     self.player.direction = "left"
 
-            self.player.animation = "walk"
+            if self.player.action is None:
+                self.player.animation = "run" if running else "walk"
 
         else:
 
-            self.player.animation = "idle"
+            if self.player.action is None:
+                self.player.animation = "idle"
 
         self.player.update(dt)
 
@@ -286,11 +293,14 @@ class Explorator:
                 player_world_pos=(self.player.position.x, self.player.position.y),
                 hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_active_floor_foreground=True,
+                skip_active_floor_animals=True,
             )
 
-            self.player.draw(
+            self.assembly.render_active_floor_entities(
                 self.screen,
                 self.camera,
+                self.current_placed_room.floor,
+                self.player,
             )
 
             self.assembly.render_active_floor_foreground(
@@ -307,12 +317,13 @@ class Explorator:
                 self.camera,
                 hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_foreground_objects=True,
+                skip_animals=True,
             )
 
-            self.player.draw(
-                self.screen,
-                self.camera,
-            )
+            entities = list(self.dungeon.animal_manager.animals) + [self.player]
+            entities.sort(key=lambda entity: entity.position.y)
+            for entity in entities:
+                entity.draw(self.screen, self.camera)
 
             self.dungeon.render_foreground(
                 self.screen,
@@ -347,6 +358,14 @@ class Explorator:
                     mouse_x, mouse_y = pygame.mouse.get_pos()
                     self.camera.zoom_at(mouse_x, mouse_y, event.y, self.screen.get_width(), self.screen.get_height())
 
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+
+                    if event.button == 1:
+                        self.player.play_action("attack")
+
+                    elif event.button == 3:
+                        self.player.play_action("interact")
+
                 elif event.type == pygame.KEYDOWN:
 
                     if event.key == pygame.K_TAB:
@@ -356,6 +375,9 @@ class Explorator:
                     elif event.key == pygame.K_ESCAPE:
                         self.game_manager.state = GameState.MENU
                         running = False
+
+                    elif event.key == pygame.K_SPACE:
+                        self.player.play_action("jump")
 
             self.update(dt)
 

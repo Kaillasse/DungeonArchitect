@@ -61,11 +61,16 @@ class Player:
     FRAME_WIDTH = 24
     FRAME_HEIGHT = 24
 
+    # Play once and hand control back to idle/walk/run instead of looping --
+    # see play_action()/update().
+    ONE_SHOT_ANIMATIONS = ("attack", "interact", "jump")
+
     def __init__(self):
 
         self.position = pygame.Vector2(200, 200)
         self.direction = "front"
         self.animation = "idle"
+        self.action = None  # currently-playing one-shot animation name, or None
         self.frame = 0
         self.animation_speed = 0.15
         self.animation_timer = 0
@@ -147,11 +152,31 @@ class Player:
             self.hitbox_height,
         )
 
+    def play_action(self, name):
+        """Trigger a one-shot action animation (attack/interact/jump) --
+        ignored while another action is already mid-playback, and while a
+        sheet exists for every direction on idle/walk/run, jump.png only
+        has 4 of the 5 DIRECTIONS rows (see _frames_for's fallback), which
+        this doesn't need to know about."""
+        if self.action is not None or name not in self.sprites:
+            return
+        self.action = name
+        self.animation = name
+        self.frame = 0
+        self.animation_timer = 0
+
+    def _frames_for(self, animation, direction):
+        """Frame list for (animation, direction), falling back to "front" and
+        then to whatever direction the sheet does have -- not every animation
+        sheet has a row for all 5 DIRECTIONS (jump.png is missing "back")."""
+        directions = self.sprites[animation]
+        return directions.get(direction) or directions.get("front") or next(iter(directions.values()))
+
     def update(self, dt):
 
         direction, _ = self.get_sprite_direction()
 
-        frames = self.sprites[self.animation][direction]
+        frames = self._frames_for(self.animation, direction)
 
         self.animation_timer += dt
 
@@ -163,10 +188,14 @@ class Player:
 
             if self.frame >= len(frames):
                 self.frame = 0
+                if self.action is not None and self.animation == self.action:
+                    # One-shot finished; caller picks idle/walk/run again next frame.
+                    self.action = None
 
     def draw(self, screen, camera):
         direction, flip = self.get_sprite_direction()
-        base_sprite = self.sprites[self.animation][direction][self.frame]
+        frames = self._frames_for(self.animation, direction)
+        base_sprite = frames[min(self.frame, len(frames) - 1)]
         if flip:
             base_sprite = pygame.transform.flip(base_sprite, True, False)
 

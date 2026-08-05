@@ -122,7 +122,8 @@ class Dungeon:
     # Rendu
     # ------------------------------------------------------------------
 
-    def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False, skip_foreground_objects=False):
+    def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
+               skip_foreground_objects=False, skip_animals=False):
         self.renderer.render(
             screen, self, camera,
             spawn_preview=spawn_preview,
@@ -130,7 +131,8 @@ class Dungeon:
             show_link_indicators=show_link_indicators,
             skip_foreground_objects=skip_foreground_objects,
         )
-        self.animal_manager.draw(screen, camera)
+        if not skip_animals:
+            self.animal_manager.draw(screen, camera)
 
     def render_foreground(self, screen, camera, hide_object_types=None):
         """Objects flagged draw_after_player (e.g. torch), meant to be drawn after the player sprite."""
