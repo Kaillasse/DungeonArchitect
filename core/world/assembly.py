@@ -19,6 +19,8 @@ from core.data.ressources import DONJONS_DIRECTORY
 
 ENTRY_EXIT_TYPES = ("gate", "wall")
 
+OPPOSITE_SIDE = {"north": "south", "south": "north", "east": "west", "west": "east"}
+
 
 def _valid_entry_exits(dungeon):
     """gate/wall objects that actually qualify as a room-to-room connection:
@@ -32,6 +34,40 @@ def _valid_entry_exits(dungeon):
         obj for obj in dungeon.object_manager.objects
         if obj["type"] in ENTRY_EXIT_TYPES and dungeon.object_manager.is_valid_doorway(obj["x"], obj["y"])
     ]
+
+
+def _border_edges(dungeon):
+    """Contiguous runs of FLOOR cells sitting exactly on one of the room's
+    own 4 grid edges -- e.g. every cell in row 0 that's FLOOR. A FLOOR cell
+    on a grid edge naturally has no WALL on the side facing off-grid
+    (build_walls_around never walls an out-of-bounds neighbor -- see
+    autotile.py), so these are already open, wall-free connection points
+    with no gate/wall object needed at all: two rooms glued here just
+    continue as one uninterrupted floor, no door in between (see
+    _attach_via_border). Returns a list of (side, start, length) tuples,
+    "start" being the local row (north/south) or column (east/west) index
+    where the run begins."""
+    w, h = dungeon.width, dungeon.height
+    grid = dungeon.logical_grid
+    edges = []
+
+    def _collect(side, is_floor_along_line):
+        run_start = None
+        for i, is_floor in enumerate(is_floor_along_line):
+            if is_floor and run_start is None:
+                run_start = i
+            elif not is_floor and run_start is not None:
+                edges.append((side, run_start, i - run_start))
+                run_start = None
+        if run_start is not None:
+            edges.append((side, run_start, len(is_floor_along_line) - run_start))
+
+    _collect("north", [grid[0][x] == FLOOR for x in range(w)])
+    _collect("south", [grid[h - 1][x] == FLOOR for x in range(w)])
+    _collect("west", [grid[y][0] == FLOOR for y in range(h)])
+    _collect("east", [grid[y][w - 1] == FLOOR for y in range(h)])
+
+    return edges
 
 
 class PlacedRoom:
@@ -65,6 +101,9 @@ class PlacedRoom:
 
     def entry_exits(self):
         return _valid_entry_exits(self.dungeon)
+
+    def border_edges(self):
+        return _border_edges(self.dungeon)
 
     def has_spawn(self):
         return any(obj["type"] == "spawn" for obj in self.dungeon.object_manager.objects)
@@ -596,28 +635,101 @@ def _collides(existing_cells, new_cells, ignore=None):
 
 
 def _find_start_room(room_names):
-    """First room (in the given order) with both a spawn and a valid entry-exit."""
+    """First room (in the given order) with both a spawn and a valid way out
+    -- a gate/wall entry-exit or a border-floor edge (see _border_edges),
+    either is enough to start growing the assembly from."""
     for room_name in room_names:
         dungeon = _load_room(room_name)
         has_spawn = any(obj["type"] == "spawn" for obj in dungeon.object_manager.objects)
-        if has_spawn and _valid_entry_exits(dungeon):
+        if has_spawn and (_valid_entry_exits(dungeon) or _border_edges(dungeon)):
             return room_name, dungeon
     return None, None
+
+
+def _border_offset(anchor_room, anchor_edge, candidate_dungeon, candidate_edge):
+    """Global (offset_x, offset_y) placing candidate_dungeon directly,
+    seamlessly adjacent to anchor_room along anchor_edge's side -- the two
+    border-floor runs (see _border_edges) end up continuing as one
+    uninterrupted strip of floor, no shared/overlapping cell at all (unlike
+    an entry-exit merge, which aligns onto the *same* global cell)."""
+    side, anchor_start, _length = anchor_edge
+    _cand_side, candidate_start, _cand_length = candidate_edge
+    anchor_w, anchor_h = anchor_room.dungeon.width, anchor_room.dungeon.height
+
+    if side == "east":
+        offset_x = anchor_room.offset_x + anchor_w
+        offset_y = anchor_room.offset_y + anchor_start - candidate_start
+    elif side == "west":
+        offset_x = anchor_room.offset_x - candidate_dungeon.width
+        offset_y = anchor_room.offset_y + anchor_start - candidate_start
+    elif side == "south":
+        offset_y = anchor_room.offset_y + anchor_h
+        offset_x = anchor_room.offset_x + anchor_start - candidate_start
+    else:  # "north"
+        offset_y = anchor_room.offset_y - candidate_dungeon.height
+        offset_x = anchor_room.offset_x + anchor_start - candidate_start
+
+    return offset_x, offset_y
+
+
+def _attach_via_border(rng, room_names, assembly, anchor_room, anchor_edge):
+    """Try to glue another room directly onto anchor_room's border-floor run
+    (anchor_edge) -- no gate/wall object at all, the floor just continues
+    seamlessly across the seam, reading as one continuous room rather than
+    two rooms joined by a door. Requires an exact length match on the
+    opposite side (kept simple on purpose: partial-overlap alignment would
+    need its own conflict-resolution story). Unlike an entry-exit merge,
+    this never steps to a different floor on collision -- a seam that
+    doesn't fit as a flat, same-floor continuation just isn't placed at all,
+    since a floor-shifted "seamless" room would no longer actually read as
+    one continuous room. Returns (new PlacedRoom, the edge it consumed) or
+    None if nothing fit."""
+    opposite = OPPOSITE_SIDE[anchor_edge[0]]
+
+    candidate_name = rng.choice(room_names)
+    candidate_dungeon = _load_room(candidate_name)
+    candidate_edges = [
+        edge for edge in _border_edges(candidate_dungeon)
+        if edge[0] == opposite and edge[2] == anchor_edge[2]
+    ]
+    if not candidate_edges:
+        return None
+
+    candidate_edge = rng.choice(candidate_edges)
+    offset_x, offset_y = _border_offset(anchor_room, anchor_edge, candidate_dungeon, candidate_edge)
+
+    candidate_room = PlacedRoom(
+        candidate_dungeon, candidate_name, anchor_room.floor, offset_x, offset_y, index=len(assembly.rooms)
+    )
+
+    if _collides(assembly.occupied_cells_on_floor(anchor_room.floor), candidate_room.occupied_cells()):
+        return None
+
+    assembly.add_room(candidate_room)
+    return candidate_room, candidate_edge
 
 
 def generate_assembly(room_names, room_count, rng=None):
     """Build a DungeonAssembly from up to room_count rooms drawn from room_names.
 
     Starts from the first room (in room_names order) that has both a spawn and
-    a gate/wall entry-exit, then repeatedly attaches another room (drawn at
-    random from room_names, repeats allowed) at one of the growing assembly's
-    still-unconnected entry-exits, aligned so the two entry-exit objects share
-    the same global cell. If that placement's tiles would overlap an
-    already-placed room on the same floor, the new room goes on floor +1
-    instead (or -1 if that's also occupied) -- always relative to the floor
-    of the room it's connecting from, not the assembly's max/min floor.
+    a way out (a gate/wall entry-exit or a border-floor edge), then repeatedly
+    attaches another room (drawn at random from room_names, repeats allowed)
+    at one of the growing assembly's still-unconnected connection points.
+    Two connection kinds are tried, tagged in the `pending` queue as
+    ("exit", obj) or ("border", edge):
 
-    Returns None if no room in room_names has both a spawn and an entry-exit.
+    - An entry-exit merge aligns two gate/wall objects onto the *same* global
+      cell (see the "exit" branch below). If that placement's tiles would
+      overlap an already-placed room on the same floor, the new room goes on
+      floor +1 instead (or -1 if that's also occupied) -- always relative to
+      the floor of the room it's connecting from, not the assembly's max/min
+      floor.
+    - A border merge (_attach_via_border) glues two rooms directly edge-to-
+      edge along a matching-length border-floor run, with no door object and
+      no floor-stepping fallback -- see its docstring for why.
+
+    Returns None if no room in room_names has both a spawn and a way out.
     """
     if rng is None:
         rng = random
@@ -630,10 +742,25 @@ def generate_assembly(room_names, room_count, rng=None):
     start_room = PlacedRoom(start_dungeon, start_name, floor=0, offset_x=0, offset_y=0, index=0)
     assembly.add_room(start_room)
 
-    pending = [(start_room, exit_obj) for exit_obj in start_room.entry_exits()]
+    pending = [(start_room, ("exit", exit_obj)) for exit_obj in start_room.entry_exits()]
+    pending += [(start_room, ("border", edge)) for edge in start_room.border_edges()]
 
     while len(assembly.rooms) < room_count and pending:
-        anchor_room, anchor_exit = pending.pop(0)
+        anchor_room, (kind, item) = pending.pop(0)
+
+        if kind == "border":
+            result = _attach_via_border(rng, room_names, assembly, anchor_room, item)
+            if result is None:
+                continue
+            candidate_room, consumed_edge = result
+            for exit_obj in candidate_room.entry_exits():
+                pending.append((candidate_room, ("exit", exit_obj)))
+            for edge in candidate_room.border_edges():
+                if edge != consumed_edge:
+                    pending.append((candidate_room, ("border", edge)))
+            continue
+
+        anchor_exit = item
 
         candidate_name = rng.choice(room_names)
         candidate_dungeon = _load_room(candidate_name)
@@ -742,7 +869,9 @@ def generate_assembly(room_names, room_count, rng=None):
 
         for exit_obj in candidate_exits:
             if exit_obj is not candidate_exit:
-                pending.append((candidate_room, exit_obj))
+                pending.append((candidate_room, ("exit", exit_obj)))
+        for edge in candidate_room.border_edges():
+            pending.append((candidate_room, ("border", edge)))
 
     return assembly
 

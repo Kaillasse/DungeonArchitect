@@ -508,6 +508,20 @@ class Enemy:
     def get_hitbox(self):
         return self._hitbox_at(self.position.x, self.position.y)
 
+    def get_attack_hitbox(self):
+        """Melee reach checked against the player during the active-frame
+        window (see update()) -- the enemy's own hitbox inflated by one tile
+        in every direction, rather than translated toward the player like
+        Player.get_attack_hitbox (a fixed reach-ahead swing, which fits a
+        sprite with a discrete 8-way facing). An enemy only ever flips
+        left/right, with no such discrete facing to translate along, and a
+        translated box would overshoot past an already-adjacent player
+        entirely (a full tile's shift moving clean past a target closer than
+        that) -- inflating in place instead always covers the player whether
+        they're standing right against the enemy or up to a tile away."""
+        reach = self.tile_size
+        return self.get_hitbox().inflate(reach * 2, reach * 2)
+
     def take_damage(self, amount):
         if not self.alive:
             return
@@ -630,6 +644,8 @@ class Enemy:
             self.state == "attack"
             and self.frame in self.stats["active_attack_frames"]
             and not self._hit_delivered_this_swing
+            and player_hitbox is not None
+            and self.get_attack_hitbox().colliderect(player_hitbox)
         ):
             player.take_damage(1)
             self._hit_delivered_this_swing = True

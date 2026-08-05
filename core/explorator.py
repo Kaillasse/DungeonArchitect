@@ -346,7 +346,19 @@ class Explorator:
         current_placed_room exactly once, on entry, whether that door happens
         to lead to a room on the same floor or a different one. Standing on
         the door doesn't re-trigger, and going back requires fully leaving
-        the door cell and stepping onto it again from the other side."""
+        the door cell and stepping onto it again from the other side.
+
+        A border-floor seam (two rooms glued edge-to-edge with continuous
+        floor and no gate/wall object at all -- see assembly._border_edges)
+        has no door object for resolve_room_transition to key off of, so it
+        never flips current_placed_room on its own. Falling back to
+        whichever room's own FLOOR actually claims the player's cell
+        (locate_room) keeps current_placed_room in sync there too. This
+        can't undo a just-applied door transition: it re-queries on
+        current_placed_room's (already updated) floor, and a door cell is
+        WALL, not FLOOR, in both rooms, so locate_room's FLOOR-first check
+        can't contradict it -- at worst it falls through to the same
+        WALL-halo match resolve_room_transition already produced."""
         hitbox = self.player.get_hitbox()
         grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
         grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
@@ -354,6 +366,12 @@ class Explorator:
         self.current_placed_room, self._last_door_obj = self.assembly.resolve_room_transition(
             self.current_placed_room, self._last_door_obj, grid_x, grid_y
         )
+
+        same_floor_room = self.assembly.locate_room(
+            grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
+        )
+        if same_floor_room is not None:
+            self.current_placed_room = same_floor_room
 
     def load_spawn_room(self):
 
