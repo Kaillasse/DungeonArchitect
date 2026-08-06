@@ -11,7 +11,11 @@ from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player, PlayerRef
 from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES
 from core.player_session import PlayerSession
-from core.engine.input import read_local_keyboard_input
+from core.engine.input import (
+    read_local_keyboard_input,
+    read_secondary_keyboard_input, secondary_keyboard_matches_event, SECONDARY_KEYBOARD_BINDINGS,
+    read_gamepad_input, gamepad_matches_event,
+)
 from core.editor.autotile import EMPTY
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
@@ -70,17 +74,25 @@ class Explorator:
         self.grid_zoom = 1
 
         # -----------------------------
-        # Joueurs -- exactement une PlayerSession aujourd'hui (voir
-        # core/player_session.py), toujours pilotee par le clavier local
-        # (_local_player_id). Toute la simulation/rendu boucle sur
-        # self.players.values() plutot que de viser une instance figee, pour
-        # qu'ajouter une session future soit additif, pas une reecriture.
+        # Joueurs -- toujours pilotee par le clavier local (_local_player_id).
+        # Toute la simulation/rendu boucle sur self.players.values() plutot
+        # que de viser une instance figee (voir core/player_session.py).
+        #
+        # Joueur 2 (Phase 2, preuve de concept co-op local) : cree tout de
+        # suite si une manette est branchee, sinon cree paresseusement au
+        # premier appui sur une touche du second schema clavier (voir
+        # run()) -- pour que le mode solo au clavier reste inchange tant que
+        # personne n'utilise vraiment ce second schema.
         # -----------------------------
 
         self._local_player_id = 0
         self.players = {self._local_player_id: PlayerSession(self._local_player_id)}
-        self._pending_local_actions = []
-        self._pending_local_inventory_toggle = False
+
+        pygame.joystick.init()
+        if pygame.joystick.get_count() > 0:
+            joystick = pygame.joystick.Joystick(0)
+            joystick.init()
+            self.players[1] = PlayerSession(1, "gamepad", joystick)
 
         if not self.load_spawn_room():
             print("Aucune salle avec un spawn n'a été trouvée.")
@@ -149,9 +161,17 @@ class Explorator:
         for session in self.players.values():
             session.player.health = session.player.MAX_HEALTH
             session.player.position.update(
-                start_room.offset_x * tile_size + spawn_local[0],
+                start_room.offset_x * tile_size + spawn_local[0] + self._spawn_offset_x(session, tile_size),
                 start_room.offset_y * tile_size + spawn_local[1],
             )
+
+    @staticmethod
+    def _spawn_offset_x(session, tile_size):
+        """One tile to the right per extra session (player 0 is untouched --
+        exactly today's single-player spawn point) so two bodies don't spawn
+        stacked exactly on top of each other now that _is_walkable checks
+        player-vs-player collision too."""
+        return session.player_id * tile_size
 
     def _position_player_at_spawn(self, session):
         spawn = self.dungeon.get_spawn_world_position()
@@ -163,7 +183,9 @@ class Explorator:
                 self.dungeon.tile_size,
             )
 
-        session.player.position.update(*spawn)
+        session.player.position.update(
+            spawn[0] + self._spawn_offset_x(session, self.dungeon.tile_size), spawn[1]
+        )
 
     def _visible_animals_global(self):
         """(animal, hitbox) pairs for every animal that could plausibly collide
@@ -355,12 +377,12 @@ class Explorator:
         self.victory = True
         return True
 
-    def _is_walkable(self, rect, debug_label=None):
+    def _is_walkable(self, rect, moving_session, debug_label=None):
         """debug_label, only used when self.debug_mode is True, tags a
         printed message identifying which candidate move (e.g. "x"/"y") this
-        check was for, so a blocked move's cause (wall vs. animal/enemy) shows
-        up in the console instead of only being inferred from what's on
-        screen.
+        check was for, so a blocked move's cause (wall vs. animal/enemy/
+        another player) shows up in the console instead of only being
+        inferred from what's on screen.
 
         Checks each of the 4 corners individually (not a single aggregate
         is_rect_walkable call) so a corner that has crossed into void (see
@@ -376,8 +398,8 @@ class Explorator:
         from a real wall. Checking void at the same per-corner granularity as
         the wall check removes that gap entirely.
 
-        Only checks animals/enemies, not other players -- player-vs-player
-        collision doesn't exist yet (see PlayerSession/Phase 1 notes)."""
+        `moving_session` is excluded from the player-vs-player check below --
+        a player's own hitbox obviously always overlaps itself."""
         for grid_x, grid_y in corner_cells(rect, Dungeon.TILE_SIZE):
             if self._is_void_at(grid_x, grid_y) or self._is_cell_walkable(grid_x, grid_y):
                 continue
@@ -392,6 +414,13 @@ class Explorator:
         for enemy, enemy_rect, _dungeon in self._visible_enemies_global():
             if rect.colliderect(enemy_rect):
                 self._debug_log(debug_label, f"enemy({enemy.enemy_type} at {enemy_rect.center})")
+                return False
+
+        for other_session in self.players.values():
+            if other_session is moving_session:
+                continue
+            if rect.colliderect(other_session.player.get_hitbox()):
+                self._debug_log(debug_label, f"player({other_session.player_id})")
                 return False
 
         self._last_debug_message = None  # unblocked -- next block (even the same reason) should log again
@@ -560,17 +589,21 @@ class Explorator:
     # ------------------------------------------------------
 
     def _read_input(self):
-        """Refreshes every currently-driven PlayerSession's InputState this
-        frame. Phase 1 always drives the single existing session from the
-        local keyboard -- Phase 2 needs a per-session input-source lookup
-        here before a second real, independently-driven session can be
-        added, instead of this hardcoded call."""
-        session = self.players[self._local_player_id]
-        session.input = read_local_keyboard_input(self.settings)
-        session.input.requested_actions = tuple(self._pending_local_actions)
-        session.input.inventory_toggle = self._pending_local_inventory_toggle
-        self._pending_local_actions = []
-        self._pending_local_inventory_toggle = False
+        """Refreshes every session's InputState this frame, dispatching by
+        input_source_kind (see core/engine/input.py) -- continuous
+        movement/run polled fresh every frame per device, one-shot actions
+        merged in from that session's own pending_actions (buffered by
+        run()'s event loop since the last update())."""
+        for session in self.players.values():
+            if session.input_source_kind == "keyboard":
+                state = read_local_keyboard_input(self.settings)
+            elif session.input_source_kind == "secondary_keyboard":
+                state = read_secondary_keyboard_input()
+            else:  # "gamepad"
+                state = read_gamepad_input(session.joystick)
+            state.requested_actions = tuple(session.pending_actions)
+            session.pending_actions = []
+            session.input = state
 
     @staticmethod
     def _update_frozen_player(session, dt):
@@ -611,12 +644,12 @@ class Explorator:
             # happens to own the active floor.
             future_hitbox = player.get_hitbox()
             future_hitbox.x += movement.x
-            if self._is_walkable(future_hitbox, debug_label="x"):
+            if self._is_walkable(future_hitbox, session, debug_label="x"):
                 player.position.x += movement.x
 
             future_hitbox = player.get_hitbox()
             future_hitbox.y += movement.y
-            if self._is_walkable(future_hitbox, debug_label="y"):
+            if self._is_walkable(future_hitbox, session, debug_label="y"):
                 player.position.y += movement.y
 
             if self.assembly is not None:
@@ -719,43 +752,73 @@ class Explorator:
             else:
                 self.dungeon.object_manager.check_button_trigger(grid_x, grid_y)
 
-    def _camera_target(self):
-        """World (x, y) the camera should center on this frame. Phase 1:
-        always the single existing PlayerSession's position -- swapping to a
-        different strategy later (average of several players, a designated
-        "camera owner") is a change to this one method, not update()/
-        render()."""
-        session = self.players[self._local_player_id]
-        return session.player.position.x, session.player.position.y
+    CAMERA_FIT_PADDING_TILES = 4  # margin kept around every player's bounding box when zoom-to-fit is active
+
+    def _camera_frame(self):
+        """(center_x, center_y, zoom) the camera should use this frame.
+
+        With a single active player: today's simple follow, self.camera.zoom
+        untouched -- manual mouse-wheel zoom is fully respected, exactly as
+        before Phase 2. With 2+ players (Phase 2's local co-op): centers on
+        the midpoint of every player's position and computes a zoom level
+        from their bounding box (+ padding) so nobody goes off-screen,
+        clamped to the camera's own configured min_zoom/max_zoom. This
+        *overrides* manual zoom for as long as 2+ players are active --
+        blending auto-fit with the existing zoom_at() input was the riskier
+        option and was deliberately not attempted (see Phase 2 notes);
+        mouse-wheel zoom simply has no effect while this is in control."""
+        positions = [session.player.position for session in self.players.values()]
+
+        if len(positions) <= 1:
+            pos = positions[0]
+            return pos.x, pos.y, self.camera.zoom
+
+        min_x = min(pos.x for pos in positions)
+        max_x = max(pos.x for pos in positions)
+        min_y = min(pos.y for pos in positions)
+        max_y = max(pos.y for pos in positions)
+        center_x = (min_x + max_x) / 2
+        center_y = (min_y + max_y) / 2
+
+        padding = self.CAMERA_FIT_PADDING_TILES * Dungeon.TILE_SIZE
+        span_x = max(max_x - min_x + padding * 2, 1)
+        span_y = max(max_y - min_y + padding * 2, 1)
+
+        zoom_x = self.screen.get_width() / span_x
+        zoom_y = self.screen.get_height() / span_y
+        zoom = max(self.camera.min_zoom, min(self.camera.max_zoom, min(zoom_x, zoom_y)))
+
+        return center_x, center_y, zoom
 
     def _update_camera(self):
-        target_x, target_y = self._camera_target()
+        target_x, target_y, zoom = self._camera_frame()
+        self.camera.zoom = zoom
         self.camera.center_on(target_x, target_y, self.screen.get_width(), self.screen.get_height())
 
     def update(self, dt):
 
         self._read_input()
 
-        if any(session.inventory_open for session in self.players.values()):
-            # Monde entièrement en pause -- seule l'anim idle de chaque
-            # joueur (pour la preview du panel) et les panels eux-mêmes
-            # continuent de tourner.
-            for session in self.players.values():
-                self._update_frozen_player(session, dt)
-                if session.inventory_open:
-                    session.inventory_panel.update(dt)
-            return
-
         if self.victory:
             # Player input is frozen (no movement/combat), but the room
             # itself keeps updating so the chest's own opening animation
-            # actually finishes playing instead of freezing mid-swing.
+            # actually finishes playing instead of freezing mid-swing. Whole
+            # session, not per-player -- victory is a session-wide win
+            # condition, unlike a single player's own inventory below.
             for session in self.players.values():
                 self._update_frozen_player(session, dt)
             self._update_world(dt, self._player_refs())
             return
 
+        # Per-player freeze: a session with its own inventory open only
+        # pauses itself (idle animation + its own panel ticking) -- everyone
+        # else (other sessions, animals/enemies/the world) keeps going, so
+        # one player checking their bag doesn't stop the other from playing.
         for session in self.players.values():
+            if session.inventory_open:
+                self._update_frozen_player(session, dt)
+                session.inventory_panel.update(dt)
+                continue
             self._apply_requested_actions(session)
             self._simulate_movement(session, dt)
 
@@ -801,7 +864,7 @@ class Explorator:
                 self.screen,
                 self.camera,
                 active_floor=self.current_placed_room.floor,
-                player_world_pos=self._camera_target(),
+                player_world_pos=self._camera_frame()[:2],
                 hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_active_floor_foreground=True,
                 skip_active_floor_animals=True,
@@ -853,9 +916,18 @@ class Explorator:
         if self.debug_mode:
             self._draw_debug_hitboxes()
 
-        for session in self.players.values():
-            if session.inventory_open:
-                session.inventory_panel.render(self.screen, session.player)
+        open_sessions = [session for session in self.players.values() if session.inventory_open]
+        if len(open_sessions) == 1:
+            session = open_sessions[0]
+            session.inventory_panel.render(self.screen, session.player)
+        elif len(open_sessions) > 1:
+            # More than one panel open at once (per-player freeze lets this
+            # happen) -- side by side instead of exactly overlapping.
+            region_width = self.screen.get_width() / len(open_sessions)
+            for index, session in enumerate(open_sessions):
+                session.inventory_panel.render(
+                    self.screen, session.player, region=(index * region_width, region_width)
+                )
 
         if self.victory:
             self._draw_victory_banner()
@@ -935,6 +1007,45 @@ class Explorator:
 
     # ------------------------------------------------------
 
+    def _session_matches_action(self, session, action_id, event):
+        """Dispatches to whichever device `session` is driven from -- see
+        core/engine/input.py for the actual per-device matching logic."""
+        if session.input_source_kind == "keyboard":
+            return self.settings.matches_event(action_id, event)
+        if session.input_source_kind == "secondary_keyboard":
+            return secondary_keyboard_matches_event(action_id, event)
+        return gamepad_matches_event(session.joystick, action_id, event)  # "gamepad"
+
+    def _maybe_join_secondary_keyboard_player(self, event):
+        """Drop-in join: the second keyboard scheme has no dedicated "press
+        start" -- player 2 simply comes into existence the first time any of
+        its own keys is pressed, as long as no gamepad-driven session
+        already owns player_id 1 (a real controller always wins the slot;
+        this exists purely as a same-machine fallback for testing without
+        one). Solo keyboard play is unaffected until this actually fires."""
+        if 1 in self.players or event.type != pygame.KEYDOWN:
+            return
+        if event.key in SECONDARY_KEYBOARD_BINDINGS.values():
+            self.players[1] = PlayerSession(1, "secondary_keyboard")
+
+    def _handle_session_event(self, session, event):
+        """Per-session one-shot action handling: this session's own
+        "inventory" binding toggles its own panel (and swallows the rest of
+        this event for this session -- see below); while that session's
+        panel is open, no further action of *its own* gets buffered (other
+        sessions still process this same event independently, since this is
+        called once per session, not globally)."""
+        if self._session_matches_action(session, "inventory", event):
+            session.inventory_open = not session.inventory_open
+            return
+
+        if session.inventory_open:
+            return
+
+        for action_id in self.ONE_SHOT_ACTIONS:
+            if self._session_matches_action(session, action_id, event):
+                session.pending_actions.append(action_id)
+
     def run(self):
 
         pygame.display.set_caption(
@@ -949,51 +1060,46 @@ class Explorator:
 
             for event in pygame.event.get():
 
-                local_session = self.players[self._local_player_id]
-
                 if event.type == pygame.QUIT:
-
                     self.game_manager.running = False
                     running = False
+                    continue
 
-                elif event.type == pygame.KEYDOWN and self.settings.matches_event("inventory", event):
-                    local_session.inventory_open = not local_session.inventory_open
-
-                elif local_session.inventory_open and event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    local_session.inventory_open = False
-
-                elif local_session.inventory_open:
-                    continue  # avale tout le reste (clics, TAB, F3...) tant que le panel est ouvert
-
-                elif event.type == pygame.MOUSEWHEEL:
+                if event.type == pygame.MOUSEWHEEL:
                     mouse_x, mouse_y = pygame.mouse.get_pos()
                     self.camera.zoom_at(mouse_x, mouse_y, event.y, self.screen.get_width(), self.screen.get_height())
+                    continue
 
-                elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_TAB:
+                    self.game_manager.state = GameState.CREATOR
+                    running = False
+                    continue
 
-                    for action_id in self.ONE_SHOT_ACTIONS:
-                        if self.settings.matches_event(action_id, event):
-                            self._pending_local_actions.append(action_id)
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_F3:
+                    self.debug_mode = not self.debug_mode
+                    self._last_debug_message = None
+                    print(f"[debug] debug mode {'ON' if self.debug_mode else 'OFF'} (grid + hitboxes)")
+                    continue
 
-                elif event.type == pygame.KEYDOWN:
-
-                    if event.key == pygame.K_TAB:
-                        self.game_manager.state = GameState.CREATOR
-                        running = False
-
-                    elif event.key == pygame.K_ESCAPE:
+                # ESC is a physical-keyboard-only gesture -- scoped to player
+                # 1's own session (closes just their inventory if open, else
+                # quits to menu), same as before player 2 existed. Player 2's
+                # device (gamepad/second keyboard scheme) has no equivalent
+                # key; its own "inventory" binding is its only close gesture
+                # (a second press of an already-open toggle).
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    local_session = self.players[self._local_player_id]
+                    if local_session.inventory_open:
+                        local_session.inventory_open = False
+                    else:
                         self.game_manager.state = GameState.MENU
                         running = False
+                    continue
 
-                    elif event.key == pygame.K_F3:
-                        self.debug_mode = not self.debug_mode
-                        self._last_debug_message = None
-                        print(f"[debug] debug mode {'ON' if self.debug_mode else 'OFF'} (grid + hitboxes)")
+                self._maybe_join_secondary_keyboard_player(event)
 
-                    else:
-                        for action_id in self.ONE_SHOT_ACTIONS:
-                            if self.settings.matches_event(action_id, event):
-                                self._pending_local_actions.append(action_id)
+                for session in self.players.values():
+                    self._handle_session_event(session, event)
 
             self.update(dt)
 

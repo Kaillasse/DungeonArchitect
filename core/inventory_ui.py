@@ -55,9 +55,18 @@ class InventoryPanel:
 
     # ------------------------------------------------------------------
 
-    def _panel_rect(self, screen):
+    def _panel_rect(self, screen, region=None):
+        """region=None centers on the whole screen (solo case, pixel-identical
+        to before Phase 2's local co-op); region=(left, width) centers within
+        that horizontal slice instead -- used when more than one session has
+        its panel open at once (see Explorator.render)."""
+        if region is None:
+            center_x = screen.get_width() / 2
+        else:
+            left, width = region
+            center_x = left + width / 2
         return pygame.Rect(
-            screen.get_width() / 2 - self.PANEL_WIDTH / 2,
+            center_x - self.PANEL_WIDTH / 2,
             screen.get_height() / 2 - self.PANEL_HEIGHT / 2,
             self.PANEL_WIDTH, self.PANEL_HEIGHT,
         )
@@ -68,12 +77,12 @@ class InventoryPanel:
             icon = pygame.transform.scale(item.get_icon(), (rect.width - 12, rect.height - 12))
             screen.blit(icon, (rect.centerx - icon.get_width() / 2, rect.centery - icon.get_height() / 2))
 
-    def render(self, screen, player):
+    def render(self, screen, player, region=None):
         overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, self.OVERLAY_ALPHA))
         screen.blit(overlay, (0, 0))
 
-        panel_rect = self._panel_rect(screen)
+        panel_rect = self._panel_rect(screen, region)
         self.border.draw(screen, panel_rect)
 
         self._render_player_preview(screen, panel_rect, player)
