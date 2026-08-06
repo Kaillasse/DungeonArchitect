@@ -40,6 +40,19 @@ class PlayerSession:
         # branch (core/network/server.py writes this from its connection
         # reader thread; the main tick thread only ever reads it).
         self.network_input = None
+        # Phase 4 (client-side prediction) bookkeeping. last_input_seq is
+        # server-side only: the seq of the most recent "input" message
+        # GameServer._drain_incoming applied to this session, echoed back per
+        # tick in protocol.build_snapshot so the owning client knows which of
+        # its own buffered inputs are now confirmed. pending_inputs/
+        # next_input_seq are client-side only, and only meaningful for that
+        # client's own local session: (seq, direction, running, dt) tuples
+        # not yet acknowledged by the server, replayed by
+        # Explorator._reconcile_local_player on top of each new authoritative
+        # snapshot -- see Explorator._predict_local_movement.
+        self.last_input_seq = 0
+        self.pending_inputs = []
+        self.next_input_seq = 0
         # One-shot action ids (Explorator.ONE_SHOT_ACTIONS) buffered by this
         # session's own event matches during run()'s event loop, applied at
         # the start of the next update() -- per-session since Phase 2 has

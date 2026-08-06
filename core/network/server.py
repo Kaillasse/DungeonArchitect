@@ -168,6 +168,7 @@ class GameServer:
             if payload["type"] == protocol.MSG_INPUT:
                 session.network_input = protocol.input_state_from_fields(payload)
                 session.pending_actions.extend(payload.get("requested_actions", []))
+                session.last_input_seq = payload.get("seq", session.last_input_seq)
             elif payload["type"] == protocol.MSG_PVP_TOGGLE:
                 self.explorator.pvp_enabled = not self.explorator.pvp_enabled
                 print(f"[server] PvP {'ON' if self.explorator.pvp_enabled else 'OFF'}")

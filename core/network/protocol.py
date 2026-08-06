@@ -5,8 +5,11 @@ beyond the newline, no schema versioning -- see CLAUDE.md's Phase 3 section
 for why (trusted small co-op deployment, transport-layer scope only).
 
 Client -> server: "join" (name), "input" (one player's InputState, plus any
-one-shot actions buffered since the last send), "pvp_toggle" (F4 -- must be
-server-authoritative since it gates real damage).
+one-shot actions buffered since the last send, plus a "seq" -- Phase 4's
+client-side prediction sequence number, echoed back per-player in "snapshot"
+as "last_input_seq" so the client knows which of its own predicted inputs are
+now confirmed), "pvp_toggle" (F4 -- must be server-authoritative since it
+gates real damage).
 
 Server -> client: "welcome" (assigned player_id + which room/donjon to load
 locally), "snapshot" (every tick -- see build_snapshot), "leave" (a session
@@ -99,6 +102,7 @@ def build_snapshot(explorator, tick: int, terrain_versions: dict) -> dict:
             "action": player.action,
             "frame": player.frame,
             "health": player.health,
+            "last_input_seq": session.last_input_seq,
         })
 
     animals, enemies, pickups, objects, dynamites, explosions, terrain = [], [], [], [], [], [], []

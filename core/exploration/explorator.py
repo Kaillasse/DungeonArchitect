@@ -45,6 +45,17 @@ class Explorator:
     # polled -- unlike movement/run, either input kind is valid for these.
     ONE_SHOT_ACTIONS = ("jump", "attack", "interact")
 
+    # Phase 4 (client-side prediction), client-only: fraction of the
+    # remaining distance to a remote entity's latest known server position
+    # closed per second by _smooth_network_entities -- every mirrored entity
+    # except the local player (animals, enemies, other players, pickups,
+    # projectiles) only gets a fresh position once per server tick (30Hz)
+    # while the client renders at 60fps, so snapping straight to it every
+    # snapshot reads as a visible stutter. A plain per-frame lerp toward the
+    # latest target is enough for LAN co-op -- no timestamped double-buffer
+    # interpolation.
+    NETWORK_INTERP_RATE = 15.0
+
     def __init__(self, game_manager):
 
         self.game_manager = game_manager
@@ -119,6 +130,14 @@ class Explorator:
         self.camera = Camera(zoom=1.0)
 
         self.clock = pygame.time.Clock()
+
+        # Networking (Phase 3+4), client-side only -- see
+        # apply_network_snapshot/_smooth_network_entities. Initialized here
+        # (not lazily) so a client's very first render, before any snapshot
+        # has arrived, has an empty-but-real dict to iterate rather than
+        # needing an AttributeError guard.
+        self._network_mirrors = {}  # room_ref -> {"animals": {...}, ...}
+        self._network_targets = {}  # id(entity) -> (entity, target_x, target_y)
 
     def open_room(self, name):
         """Load a specific room (chosen from the menu) and spawn every current
@@ -658,10 +677,34 @@ class Explorator:
             SoundManager().play(f"player_footstep_{session.footstep_alt + 1}")
             session.footstep_alt = 1 - session.footstep_alt
 
-    def _simulate_movement(self, session, dt):
+    def _resolve_movement_step(self, session, direction, running, dt, predicting=False, advance_animation=True):
+        """The collision-tested core of moving a player, shared by the real
+        per-frame simulation (_simulate_movement, predicting=False) and Phase
+        4's client-side prediction/replay (_predict_local_movement/
+        _reconcile_local_player, predicting=True). `predicting=True` skips
+        everything that must stay server-authoritative only -- room
+        transitions, falling into the void, footstep audio -- so a
+        speculative client-side replay never triggers a side effect the
+        server hasn't actually confirmed yet; only position/facing/animation
+        are ever computed speculatively. `_is_walkable`'s own wall/animal/
+        enemy/other-player checks work unchanged under prediction, since the
+        client's mirror world (static terrain loaded once at connect, plus
+        animals/enemies/other players kept in sync by apply_network_snapshot)
+        already carries everything that check needs -- no duplicated
+        collision logic between server tick and client prediction.
+
+        `advance_animation=False` skips the final `player.update(dt)` call --
+        used by _reconcile_local_player's replay, which can re-run the same
+        buffered input several times (once per snapshot until the server
+        acks it). Position replay is idempotent (each pass starts from a
+        fresh authoritative baseline), but Player.update(dt) mutates a
+        cumulative `animation_timer` that's never part of the snapshot and
+        never reset between replay passes -- calling it more than once per
+        real elapsed frame silently piles up extra animation time and was a
+        real, visible bug (idle animation jumping/skipping frames). Real
+        per-frame animation advancement only ever happens once, from
+        _predict_local_movement's own (non-replayed) call."""
         player = session.player
-        direction = session.input.move_direction
-        running = session.input.running
 
         if direction.length_squared() > 0:
 
@@ -677,45 +720,53 @@ class Explorator:
 
             # Void cells are traversable now (instead of a hard block) -- see
             # _is_walkable's per-corner void handling. A single consolidated
-            # fall-check runs below, after both axes and the door transition,
-            # rather than blocking movement at the boundary of whatever room
-            # happens to own the active floor.
+            # fall-check runs below (real simulation only), after both axes
+            # and the door transition, rather than blocking movement at the
+            # boundary of whatever room happens to own the active floor.
             future_hitbox = player.get_hitbox()
             future_hitbox.x += movement.x
-            if self._is_walkable(future_hitbox, session, debug_label="x"):
+            if self._is_walkable(future_hitbox, session, debug_label=None if predicting else "x"):
                 player.position.x += movement.x
 
             future_hitbox = player.get_hitbox()
             future_hitbox.y += movement.y
-            if self._is_walkable(future_hitbox, session, debug_label="y"):
+            if self._is_walkable(future_hitbox, session, debug_label=None if predicting else "y"):
                 player.position.y += movement.y
 
-            if self.assembly is not None:
-                self._update_current_room(session)
+            if not predicting:
+                if self.assembly is not None:
+                    self._update_current_room(session)
 
-            # Suppressed mid-jump so the player can actually clear a gap by
-            # jumping over it instead of falling the instant their feet pass
-            # over void while airborne -- the check resumes the very next
-            # frame the one-shot jump animation ends (Player.action reverts
-            # to None on its own), so landing on void still falls normally.
-            if player.action != "jump" and self._is_void(player.get_hitbox()):
-                self._attempt_fall(session)
+                # Suppressed mid-jump so the player can actually clear a gap
+                # by jumping over it instead of falling the instant their
+                # feet pass over void while airborne -- the check resumes
+                # the very next frame the one-shot jump animation ends
+                # (Player.action reverts to None on its own), so landing on
+                # void still falls normally.
+                if player.action != "jump" and self._is_void(player.get_hitbox()):
+                    self._attempt_fall(session)
 
             player.direction = self._direction_from_vector(direction)
 
             if player.action is None:
                 player.animation = "run" if running else "walk"
 
-            self._update_footsteps(session, running, dt)
+            if not predicting:
+                self._update_footsteps(session, running, dt)
 
         else:
 
             if player.action is None:
                 player.animation = "idle"
 
-            session.footstep_timer = 0.0
+            if not predicting:
+                session.footstep_timer = 0.0
 
-        player.update(dt)
+        if advance_animation:
+            player.update(dt)
+
+    def _simulate_movement(self, session, dt):
+        self._resolve_movement_step(session, session.input.move_direction, session.input.running, dt)
 
     def _resolve_player_attacks(self):
         """Every session's attack, checked against the same one
@@ -909,13 +960,22 @@ class Explorator:
         updates it every time, and drops any mirror whose id no longer
         appears (despawned/died server-side). `mirror_map` is
         {network_id: local_object}, persisted across ticks on
-        self._network_mirrors."""
+        self._network_mirrors.
+
+        A freshly-created object has its position snapped straight to the
+        entry's (x, y) before `updater` runs (Phase 4) -- `updater` itself
+        only ever registers a *smoothing target* now (see
+        _smooth_network_entities), so without this a brand-new mirror would
+        otherwise visibly lerp in from whatever placeholder spot its
+        `factory` constructed it at instead of appearing where it actually
+        is."""
         seen_ids = set()
         for entry in entries:
             seen_ids.add(entry["id"])
             obj = mirror_map.get(entry["id"])
             if obj is None:
                 obj = factory(entry)
+                obj.position.update(entry["x"], entry["y"])
                 mirror_map[entry["id"]] = obj
                 live_list.append(obj)
             updater(obj, entry)
@@ -924,18 +984,26 @@ class Explorator:
             if stale_obj in live_list:
                 live_list.remove(stale_obj)
 
-    @staticmethod
-    def _apply_animal_entry(animal, entry):
-        animal.position.update(entry["x"], entry["y"])
+    def _register_network_target(self, entity, x, y):
+        """Client-side only (Phase 4): records `entity`'s latest known
+        server-authoritative position without moving it there directly --
+        _smooth_network_entities lerps `.position` toward it every render
+        frame instead, so a remote entity's motion doesn't visibly stutter at
+        the server's 30Hz tick rate. Rebuilt from scratch on every snapshot
+        (see apply_network_snapshot), so nothing needs to unregister an
+        entity that disappears -- it simply stops being re-added."""
+        self._network_targets[id(entity)] = (entity, x, y)
+
+    def _apply_animal_entry(self, animal, entry):
+        self._register_network_target(animal, entry["x"], entry["y"])
         animal.state = entry["state"]
         animal.direction = pygame.Vector2(entry["dir_x"], entry["dir_y"])
         animal.flip = entry["flip"]
         animal.frame = entry["frame"]
         animal.health = entry["health"]
 
-    @staticmethod
-    def _apply_enemy_entry(enemy, entry):
-        enemy.position.update(entry["x"], entry["y"])
+    def _apply_enemy_entry(self, enemy, entry):
+        self._register_network_target(enemy, entry["x"], entry["y"])
         enemy.state = entry["state"]
         enemy.direction = pygame.Vector2(entry["dir_x"], entry["dir_y"])
         enemy.flip = entry["flip"]
@@ -943,28 +1011,113 @@ class Explorator:
         enemy.health = entry["health"]
         enemy.alive = entry["alive"]
 
-    @staticmethod
-    def _apply_pickup_entry(pickup, entry):
-        pickup.position.update(entry["x"], entry["y"])
+    def _apply_pickup_entry(self, pickup, entry):
+        self._register_network_target(pickup, entry["x"], entry["y"])
         pickup.state = entry["state"]
         pickup.frame = entry["frame"]
 
-    @staticmethod
-    def _apply_item_pickup_entry(item_pickup, entry):
-        item_pickup.position.update(entry["x"], entry["y"])
+    def _apply_item_pickup_entry(self, item_pickup, entry):
+        self._register_network_target(item_pickup, entry["x"], entry["y"])
 
-    @staticmethod
-    def _apply_projectile_entry(projectile, entry):
-        projectile.position.update(entry["x"], entry["y"])
+    def _apply_projectile_entry(self, projectile, entry):
+        self._register_network_target(projectile, entry["x"], entry["y"])
         projectile.frame = entry["frame"]
 
+    def _predict_local_movement(self, dt):
+        """Client-side only (Phase 4): applies this frame's local input to
+        the local session's player immediately, instead of waiting a full
+        round-trip for the server's snapshot to reflect it (the old "thin
+        client" behavior). Buffers (seq, direction, running, dt) in
+        session.pending_inputs so a later server correction can replay
+        whatever hasn't been acknowledged yet on top of the authoritative
+        position -- see _reconcile_local_player. Only movement is predicted
+        (see CLAUDE.md's Phase 4 notes) -- attack/interact/jump stay purely
+        server-authoritative, applied only once the snapshot reflects them.
+        Returns the assigned seq, sent alongside this frame's input message
+        by run_networked."""
+        session = self.players[self._local_player_id]
+        seq = session.next_input_seq
+        session.next_input_seq += 1
+
+        direction = pygame.Vector2(session.input.move_direction)
+        running = session.input.running
+        session.pending_inputs.append((seq, direction, running, dt))
+
+        self._resolve_movement_step(session, direction, running, dt, predicting=True)
+        return seq
+
+    def _reconcile_local_player(self, entry):
+        """Client-side only (Phase 4): entry is the local player's own dict
+        from payload["players"]. Recales position/health to the server's
+        authoritative state for this tick, drops every buffered predicted
+        input the server has now confirmed (seq <= entry's last_input_seq),
+        then replays whatever's left so the locally predicted position ends
+        up exactly where it would if the server had already processed those
+        too. In the common case (no divergence) the replay reproduces the
+        same position that was already on screen, so this is invisible; a
+        genuine mismatch (e.g. a collision the client didn't know about)
+        corrects immediately, with no separate smoothing of the correction
+        itself.
+
+        `action`/`animation`/`frame` are deliberately NOT part of that
+        recalage while the player is just walking/idling: those are
+        continuous, purely cosmetic client state already being driven every
+        real frame by _predict_local_movement's own player.update(dt) call
+        (see _resolve_movement_step's advance_animation), and forcing them
+        back to the server's -- always somewhat stale, 30Hz-tick-quantized --
+        values here fights that local clock and shows up as visible frame
+        jumps/skips (this was a real, reported bug, not a hypothetical).
+        They're only ever taken from the server while a one-shot action
+        (attack/interact/jump) is genuinely in play -- entry["action"] or the
+        local player's own .action is not None -- since those aren't
+        predicted at all (see CLAUDE.md's Phase 4 scope) and only the server
+        gets to say when one starts, progresses, or ends. The replay below
+        never advances animation either way (advance_animation=False) --
+        it can re-run the same buffered input several times before the
+        server acks it, and Player.update(dt)'s animation_timer is a
+        cumulative accumulator that isn't safe to call more than once per
+        real elapsed frame."""
+        session = self.players[self._local_player_id]
+        player = session.player
+        player.position.update(entry["x"], entry["y"])
+        player.health = entry["health"]
+
+        if entry["action"] is not None or player.action is not None:
+            player.action = entry["action"]
+            player.animation = entry["animation"]
+            player.frame = entry["frame"]
+
+        last_acked = entry.get("last_input_seq", 0)
+        session.pending_inputs = [item for item in session.pending_inputs if item[0] > last_acked]
+        for _seq, direction, running, replay_dt in session.pending_inputs:
+            self._resolve_movement_step(session, direction, running, replay_dt, predicting=True, advance_animation=False)
+
+    def _smooth_network_entities(self, dt):
+        """Client-side only (Phase 4), called once per render frame from
+        run_networked: eases every mirrored non-local entity's `.position`
+        toward its latest server-known target (see _register_network_target)
+        instead of the old instant snap, so 30Hz-tick network state doesn't
+        visibly stutter at the client's 60fps render rate. The local player
+        never has an entry in _network_targets (handled by
+        _reconcile_local_player instead), so nothing needs excluding here."""
+        factor = min(1.0, self.NETWORK_INTERP_RATE * dt)
+        for entity, target_x, target_y in self._network_targets.values():
+            entity.position.x += (target_x - entity.position.x) * factor
+            entity.position.y += (target_y - entity.position.y) * factor
+
     def apply_network_snapshot(self, payload):
-        """Client-side only (Phase 3): writes a server snapshot's fields
-        straight onto this Explorator's local mirror world."""
+        """Client-side only (Phase 3+4): writes a server snapshot's fields
+        onto this Explorator's local mirror world -- directly for everything
+        except continuous positions, which go through _network_targets/
+        _smooth_network_entities instead (remote entities) or
+        _reconcile_local_player (the local player, predicted -- see Phase 4
+        notes above)."""
         self.pvp_enabled = payload["pvp_enabled"]
         self.victory = payload["victory"]
         if payload.get("game_over") and self.game_manager.state == GameState.EXPLORATION:
             self.game_manager.state = GameState.MENU
+
+        self._network_targets = {}  # rebuilt fresh every snapshot -- see _register_network_target
 
         seen_players = set()
         for entry in payload["players"]:
@@ -972,19 +1125,22 @@ class Explorator:
             session = self.players.get(entry["id"])
             if session is None:
                 session = PlayerSession(entry["id"], "network")
+                session.player.position.update(entry["x"], entry["y"])  # avoid lerping in from Player()'s default spawn
                 self.players[entry["id"]] = session
+
+            if entry["id"] == self._local_player_id:
+                self._reconcile_local_player(entry)
+                continue
+
             player = session.player
-            player.position.update(entry["x"], entry["y"])
             player.direction = entry["direction"]
             player.animation = entry["animation"]
             player.action = entry["action"]
             player.frame = entry["frame"]
             player.health = entry["health"]
+            self._register_network_target(player, entry["x"], entry["y"])
         for stale_id in [pid for pid in self.players if pid not in seen_players and pid != self._local_player_id]:
             del self.players[stale_id]
-
-        if not hasattr(self, "_network_mirrors"):
-            self._network_mirrors = {}  # room_ref -> {"animals": {...}, ...}
 
         grouped = {}
         for category in ("animals", "enemies", "pickups", "dynamites", "explosions"):
@@ -1049,38 +1205,63 @@ class Explorator:
                 dungeon.logical_grid = entry["logical_grid"]
                 dungeon.sprite_grid = entry["sprite_grid"]
 
+    def _handle_shared_debug_event(self, event):
+        """QUIT/mouse-wheel-zoom/F3 toggle -- byte-for-byte identical in
+        run() and run_networked(), so both share this one implementation
+        instead of two copies. Returns "stop" if this event means the
+        caller's own `while running` loop should end (QUIT only), "handled"
+        if it was consumed but the loop continues, or None if `event` isn't
+        one of these and the caller should keep checking its own event
+        chain."""
+        if event.type == pygame.QUIT:
+            self.game_manager.running = False
+            return "stop"
+
+        if event.type == pygame.MOUSEWHEEL:
+            mouse_x, mouse_y = pygame.mouse.get_pos()
+            self.camera.zoom_at(mouse_x, mouse_y, event.y, self.screen.get_width(), self.screen.get_height())
+            return "handled"
+
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_F3:
+            self.debug_mode = not self.debug_mode
+            self._last_debug_message = None
+            print(f"[debug] debug mode {'ON' if self.debug_mode else 'OFF'} (grid + hitboxes)")
+            return "handled"
+
+        return None
+
     def run_networked(self, client):
-        """Client-side main loop for Phase 3's networked play -- the
-        network-driven counterpart to run(): same event handling for
-        QUIT/mouse-wheel-zoom/F3/ESC (TAB has nothing to switch to here, no
-        local editor on a network client), but F4 sends a pvp_toggle request
-        instead of flipping the flag locally (must stay server-authoritative
-        -- it gates real damage), and every frame sends this session's own
-        input to the server and applies whatever snapshot(s) arrived instead
-        of calling update() -- no local simulation of the shared world (the
-        confirmed "thin client, no prediction" decision)."""
+        """Client-side main loop for networked play -- the network-driven
+        counterpart to run(): same shared event handling
+        (_handle_shared_debug_event) for QUIT/mouse-wheel-zoom/F3 (TAB has
+        nothing to switch to here, no local editor on a network client), but
+        F4 sends a pvp_toggle request instead of flipping the flag locally
+        (must stay server-authoritative -- it gates real damage).
+
+        Phase 4: the local session's movement is predicted immediately
+        (_predict_local_movement) instead of waiting for a round-trip, and
+        reconciled against each arriving snapshot
+        (apply_network_snapshot -> _reconcile_local_player); every other
+        mirrored entity (remote players, animals, enemies, pickups,
+        projectiles) is eased toward its latest known position every frame
+        (_smooth_network_entities) rather than snapped, so the server's 30Hz
+        tick rate doesn't visibly stutter at the client's 60fps render rate.
+        attack/interact/jump are still never predicted -- only movement is,
+        see CLAUDE.md's Phase 4 notes."""
         pygame.display.set_caption("Dungeon Architect - Exploration (reseau)")
 
         local_session = self.players[self._local_player_id]
         running = True
 
         while running:
-            dt = self.clock.tick(60) / 1000  # noqa: F841 -- kept for parity with run(); unused, server owns simulation dt
+            dt = self.clock.tick(60) / 1000
 
             for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.game_manager.running = False
+                shared_result = self._handle_shared_debug_event(event)
+                if shared_result == "stop":
                     running = False
                     continue
-
-                if event.type == pygame.MOUSEWHEEL:
-                    mouse_x, mouse_y = pygame.mouse.get_pos()
-                    self.camera.zoom_at(mouse_x, mouse_y, event.y, self.screen.get_width(), self.screen.get_height())
-                    continue
-
-                if event.type == pygame.KEYDOWN and event.key == pygame.K_F3:
-                    self.debug_mode = not self.debug_mode
-                    self._last_debug_message = None
+                if shared_result == "handled":
                     continue
 
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_F4:
@@ -1098,7 +1279,8 @@ class Explorator:
                 self._handle_session_event(local_session, event)
 
             self._read_input()
-            client.send(protocol.MSG_INPUT, **protocol.input_state_to_fields(local_session.input))
+            seq = self._predict_local_movement(dt)
+            client.send(protocol.MSG_INPUT, seq=seq, **protocol.input_state_to_fields(local_session.input))
 
             for payload in client.drain():
                 if payload["type"] == protocol.MSG_SNAPSHOT:
@@ -1107,6 +1289,7 @@ class Explorator:
             if self.game_manager.state != GameState.EXPLORATION:
                 break
 
+            self._smooth_network_entities(dt)
             self._update_camera()
             self.render()
 
@@ -1371,25 +1554,16 @@ class Explorator:
 
             for event in pygame.event.get():
 
-                if event.type == pygame.QUIT:
-                    self.game_manager.running = False
+                shared_result = self._handle_shared_debug_event(event)
+                if shared_result == "stop":
                     running = False
                     continue
-
-                if event.type == pygame.MOUSEWHEEL:
-                    mouse_x, mouse_y = pygame.mouse.get_pos()
-                    self.camera.zoom_at(mouse_x, mouse_y, event.y, self.screen.get_width(), self.screen.get_height())
+                if shared_result == "handled":
                     continue
 
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_TAB:
                     self.game_manager.state = GameState.CREATOR
                     running = False
-                    continue
-
-                if event.type == pygame.KEYDOWN and event.key == pygame.K_F3:
-                    self.debug_mode = not self.debug_mode
-                    self._last_debug_message = None
-                    print(f"[debug] debug mode {'ON' if self.debug_mode else 'OFF'} (grid + hitboxes)")
                     continue
 
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_F4:
