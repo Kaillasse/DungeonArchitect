@@ -192,23 +192,32 @@ class Explorator:
             spawn[0] + self._spawn_offset_x(session, self.dungeon.tile_size), spawn[1]
         )
 
-    def _visible_animals_global(self):
-        """(animal, hitbox) pairs for every animal that could plausibly collide
-        with a player right now, hitbox already in global/world coordinates
-        -- current room's animals in single-room mode, every animal on the
-        active floor (shifted by each room's offset) in assembly mode, since
-        DungeonAssembly.update already hands every player's hitbox to all of
-        them regardless of which specific room each player is registered as
-        standing in."""
+    def _rooms_with_offset(self):
+        """(dungeon, offset_x, offset_y) -- pixel offset -- for every room
+        relevant to a global query right now: every room on the active
+        floor in assembly mode (DungeonAssembly.update already hands every
+        player's hitbox to all of them regardless of which specific room
+        each player is registered as standing in, so combat/pickups/etc.
+        need to look at all of them too), or just self.dungeon (offset
+        (0, 0)) in single-room mode. Shared by _visible_animals_global/
+        _visible_enemies_global/_collect_pickups, which otherwise each
+        re-derive this identically."""
         if self.assembly is not None:
             tile_size = Dungeon.TILE_SIZE
-            pairs = []
             for room in self.assembly.rooms_on_floor(self.current_placed_room.floor):
-                offset = (room.offset_x * tile_size, room.offset_y * tile_size)
-                for animal in room.dungeon.animal_manager.animals:
-                    pairs.append((animal, animal.get_hitbox().move(offset)))
-            return pairs
-        return [(animal, animal.get_hitbox()) for animal in self.dungeon.animal_manager.animals]
+                yield room.dungeon, room.offset_x * tile_size, room.offset_y * tile_size
+        else:
+            yield self.dungeon, 0, 0
+
+    def _visible_animals_global(self):
+        """(animal, hitbox) pairs for every animal that could plausibly
+        collide with a player right now, hitbox already in global/world
+        coordinates."""
+        pairs = []
+        for dungeon, offset_x, offset_y in self._rooms_with_offset():
+            for animal in dungeon.animal_manager.animals:
+                pairs.append((animal, animal.get_hitbox().move(offset_x, offset_y)))
+        return pairs
 
     def _visible_enemies_global(self):
         """Same idea as _visible_animals_global, but for live (alive) Enemy
@@ -219,20 +228,12 @@ class Explorator:
         enemy, needed by the combat code below to drop loot into the right
         room's PickupManager rather than always self.dungeon (wrong in
         assembly mode whenever the enemy isn't in current_placed_room)."""
-        if self.assembly is not None:
-            tile_size = Dungeon.TILE_SIZE
-            triples = []
-            for room in self.assembly.rooms_on_floor(self.current_placed_room.floor):
-                offset = (room.offset_x * tile_size, room.offset_y * tile_size)
-                for enemy in room.dungeon.enemy_manager.enemies:
-                    if enemy.alive:
-                        triples.append((enemy, enemy.get_hitbox().move(offset), room.dungeon))
-            return triples
-        return [
-            (enemy, enemy.get_hitbox(), self.dungeon)
-            for enemy in self.dungeon.enemy_manager.enemies
-            if enemy.alive
-        ]
+        triples = []
+        for dungeon, offset_x, offset_y in self._rooms_with_offset():
+            for enemy in dungeon.enemy_manager.enemies:
+                if enemy.alive:
+                    triples.append((enemy, enemy.get_hitbox().move(offset_x, offset_y), dungeon))
+        return triples
 
     @staticmethod
     def _spawn_loot(enemy, enemy_dungeon):
@@ -268,13 +269,9 @@ class Explorator:
         same per-floor scope as _visible_animals_global. `inventory` is the
         calling session's own Inventory (see _resolve_pickups), not a shared
         singleton."""
-        if self.assembly is not None:
-            tile_size = Dungeon.TILE_SIZE
-            for room in self.assembly.rooms_on_floor(self.current_placed_room.floor):
-                local_hitbox = player_hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size)
-                room.dungeon.pickup_manager.collect(local_hitbox, inventory)
-        else:
-            self.dungeon.pickup_manager.collect(player_hitbox, inventory)
+        for dungeon, offset_x, offset_y in self._rooms_with_offset():
+            local_hitbox = player_hitbox.move(-offset_x, -offset_y)
+            dungeon.pickup_manager.collect(local_hitbox, inventory)
 
     def _trigger_action(self, session, action_id):
         """Fires action_id's one-shot behavior for `session` -- normally just
@@ -608,20 +605,46 @@ class Explorator:
             session.pending_actions = []
             session.input = state
 
-    @staticmethod
-    def _update_frozen_player(session, dt):
-        """Ticks idle animation only -- shared by the inventory-open and
-        victory freeze branches of update()."""
-        if session.player.action is None:
-            session.player.animation = "idle"
-        session.player.update(dt)
-
     def _player_refs(self):
         return [PlayerRef(session.player, session.player.get_hitbox()) for session in self.players.values()]
 
     def _apply_requested_actions(self, session):
         for action_id in session.input.requested_actions:
             self._trigger_action(session, action_id)
+
+    @staticmethod
+    def _direction_from_vector(direction):
+        """8-way facing string (Player.direction's vocabulary) from a
+        normalized movement vector -- extracted from _simulate_movement's
+        per-frame animation-direction bookkeeping."""
+        if direction.y > 0.5:
+            if direction.x > 0.3:
+                return "front_right"
+            if direction.x < -0.3:
+                return "front_left"
+            return "front"
+
+        if direction.y < -0.5:
+            if direction.x > 0.3:
+                return "back_right"
+            if direction.x < -0.3:
+                return "back_left"
+            return "back"
+
+        return "right" if direction.x > 0 else "left"
+
+    def _update_footsteps(self, session, running, dt):
+        """Footstep-audio cadence while actively moving -- suppressed
+        mid-jump, same as the fall-check in _simulate_movement. Extracted
+        from _simulate_movement's per-frame movement branch."""
+        if session.player.action == "jump":
+            return
+        session.footstep_timer += dt
+        interval = self.FOOTSTEP_INTERVAL_RUN if running else self.FOOTSTEP_INTERVAL_WALK
+        if session.footstep_timer >= interval:
+            session.footstep_timer = 0.0
+            SoundManager().play(f"player_footstep_{session.footstep_alt + 1}")
+            session.footstep_alt = 1 - session.footstep_alt
 
     def _simulate_movement(self, session, dt):
         player = session.player
@@ -666,50 +689,12 @@ class Explorator:
             if player.action != "jump" and self._is_void(player.get_hitbox()):
                 self._attempt_fall(session)
 
-            # -----------------------------
-            # Choix direction animation
-            # -----------------------------
-
-            if direction.y > 0.5:
-
-                if direction.x > 0.3:
-                    player.direction = "front_right"
-
-                elif direction.x < -0.3:
-                    player.direction = "front_left"
-
-                else:
-                    player.direction = "front"
-
-            elif direction.y < -0.5:
-
-                if direction.x > 0.3:
-                    player.direction = "back_right"
-
-                elif direction.x < -0.3:
-                    player.direction = "back_left"
-
-                else:
-                    player.direction = "back"
-
-            else:
-
-                if direction.x > 0:
-                    player.direction = "right"
-
-                else:
-                    player.direction = "left"
+            player.direction = self._direction_from_vector(direction)
 
             if player.action is None:
                 player.animation = "run" if running else "walk"
 
-            if player.action != "jump":
-                session.footstep_timer += dt
-                interval = self.FOOTSTEP_INTERVAL_RUN if running else self.FOOTSTEP_INTERVAL_WALK
-                if session.footstep_timer >= interval:
-                    session.footstep_timer = 0.0
-                    SoundManager().play(f"player_footstep_{session.footstep_alt + 1}")
-                    session.footstep_alt = 1 - session.footstep_alt
+            self._update_footsteps(session, running, dt)
 
         else:
 
@@ -769,7 +754,14 @@ class Explorator:
         for session in self.players.values():
             self._collect_pickups(session.player.get_hitbox(), session.inventory)
 
-    def _resolve_buttons(self):
+    def _resolve_buttons_and_health(self):
+        """Per-session button-trigger check plus the death check -- merged
+        into one pass since neither depends on the other's order (unlike
+        _resolve_player_attacks, which must fully finish for every session
+        first, using one shared enemy/animal snapshot, before anything else
+        reads pickups/health that frame). Returns True if a session's death
+        ended the game (see _game_over) -- update() returns immediately when
+        it does, same as before."""
         for session in self.players.values():
             grid_x, grid_y = self._feet_grid_cell(session.player.get_hitbox())
             if self.assembly is not None:
@@ -778,6 +770,11 @@ class Explorator:
                 )
             else:
                 self.dungeon.object_manager.check_button_trigger(grid_x, grid_y)
+
+            if session.player.health <= 0:
+                self._game_over("Le joueur est mort")
+                return True
+        return False
 
     CAMERA_FIT_PADDING_TILES = 4  # margin kept around every player's bounding box when zoom-to-fit is active
 
@@ -833,7 +830,7 @@ class Explorator:
             # session, not per-player -- victory is a session-wide win
             # condition, unlike a single player's own inventory below.
             for session in self.players.values():
-                self._update_frozen_player(session, dt)
+                session.update_frozen(dt)
             self._update_world(dt, self._player_refs())
             return
 
@@ -843,7 +840,7 @@ class Explorator:
         # one player checking their bag doesn't stop the other from playing.
         for session in self.players.values():
             if session.inventory_open:
-                self._update_frozen_player(session, dt)
+                session.update_frozen(dt)
                 session.inventory_panel.update(dt)
                 continue
             self._apply_requested_actions(session)
@@ -866,12 +863,8 @@ class Explorator:
         # -----------------------------
 
         self._update_world(dt, self._player_refs())
-        self._resolve_buttons()
-
-        for session in self.players.values():
-            if session.player.health <= 0:
-                self._game_over("Le joueur est mort")
-                return
+        if self._resolve_buttons_and_health():
+            return
 
         # -----------------------------
         # Camera suit le joueur

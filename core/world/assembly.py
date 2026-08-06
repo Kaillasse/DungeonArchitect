@@ -119,6 +119,7 @@ class DungeonAssembly:
         self._shadow_cache = {}
         self._gradient_hole_cache = {}
         self._below_cache = {}
+        self._border_cache = {}  # floor -> (terrain_version tuple, {room: hide_border_cells}) -- see _border_cells_by_room
 
     def add_room(self, placed_room):
         self.rooms.append(placed_room)
@@ -408,17 +409,7 @@ class DungeonAssembly:
                        skip_animals=False, skip_enemies=False, show_grid=True):
         tile_size = Dungeon.TILE_SIZE
         rooms = self.rooms_on_floor(floor)
-
-        # Every FLOOR cell any room on this floor claims, in global
-        # coordinates -- used below to tell a genuine void edge (show the
-        # debug border ledge) apart from a _border_edges seam glued flush
-        # against another room's floor (suppress it there instead, or it'd
-        # paint a false ledge over that neighboring room's own floor).
-        floor_floor_cells = set()
-        for room in rooms:
-            for global_cell, cell_type in room.occupied_cells().items():
-                if cell_type == FLOOR:
-                    floor_floor_cells.add(global_cell)
+        hide_border_cells_by_room = self._border_cells_by_room(floor, rooms)
 
         for room in rooms:
             offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
@@ -429,8 +420,35 @@ class DungeonAssembly:
                 skip_animals=skip_animals,
                 skip_enemies=skip_enemies,
                 show_grid=show_grid,
-                hide_border_cells=self._south_seam_cells(room, floor_floor_cells),
+                hide_border_cells=hide_border_cells_by_room.get(room, ()),
             )
+
+    def _border_cells_by_room(self, floor, rooms):
+        """{room: hide_border_cells} for every room on `floor` (see
+        _south_seam_cells) -- cached per floor and only recomputed when some
+        room's Dungeon.terrain_version has actually changed (destroy_area is
+        the only thing that bumps it), since _render_floor runs every frame
+        at 60fps but the underlying seam data is static except after a rare,
+        event-driven terrain edit. `occupied_cells_on_floor` already does the
+        "merge every room's occupied_cells" work this used to re-derive by
+        hand.
+
+        This class's other render caches (_shadow_cache/_below_cache) never
+        invalidate at all -- terrain edits are rare enough that staleness
+        there hasn't mattered in practice. This one is versioned instead,
+        since a stale seam would visibly paint a false ledge over (or leave
+        a gap in front of) a room's own floor after a destroy_area."""
+        cache_key = tuple(room.dungeon.terrain_version for room in rooms)
+        cached = self._border_cache.get(floor)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+
+        floor_floor_cells = {
+            cell for cell, cell_type in self.occupied_cells_on_floor(floor).items() if cell_type == FLOOR
+        }
+        result = {room: self._south_seam_cells(room, floor_floor_cells) for room in rooms}
+        self._border_cache[floor] = (cache_key, result)
+        return result
 
     @staticmethod
     def _south_seam_cells(room, floor_floor_cells):

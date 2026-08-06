@@ -40,3 +40,10 @@ class PlayerSession:
         self.inventory_open = False
         self.footstep_timer = 0.0
         self.footstep_alt = 0
+
+    def update_frozen(self, dt):
+        """Ticks idle animation only -- shared by Explorator.update()'s
+        victory (whole-session) and per-player inventory-open freezes."""
+        if self.player.action is None:
+            self.player.animation = "idle"
+        self.player.update(dt)

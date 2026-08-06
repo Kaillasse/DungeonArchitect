@@ -42,6 +42,12 @@ class Dungeon:
         self.logical_grid = [[EMPTY for _ in range(width)] for _ in range(height)]
         self.sprite_grid = [[-1 for _ in range(width)] for _ in range(height)]
 
+        # Bumped by destroy_area (the only exploration-time terrain mutator)
+        # -- lets a cache keyed on it (see DungeonAssembly._border_cells_by_room)
+        # know when previously-computed terrain-derived data has gone stale,
+        # without needing to be told explicitly by every caller.
+        self.terrain_version = 0
+
         # Only ever toggled in Creator (see core.editor.ui.ToolPaletteUI) --
         # Explorator never paints, so this is moot on its own dungeons. When
         # False, painting/erasing touch only the clicked cell, no automatic
@@ -122,6 +128,7 @@ class Dungeon:
 
         self.sprite_grid = resolve_sprite_grid(self.logical_grid)
         self.object_manager.prune_invalid()
+        self.terrain_version += 1
 
     def spawn_animals(self) -> None:
         """(Re)build the live wandering Animal entities for this room's placed

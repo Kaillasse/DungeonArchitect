@@ -494,6 +494,15 @@ def _entity_rect_is_free(dungeon, rect, entities, moving_entity, player_refs):
     return True
 
 
+def _is_over_void(dungeon, entity):
+    """True if `entity`'s feet position now sits over an EMPTY cell in
+    `dungeon` -- destroyed terrain (see Dungeon.destroy_area) or simply
+    having wandered off the room's edge. Shared by AnimalManager/
+    EnemyManager/PickupManager's own per-frame void-culling (see each's
+    update())."""
+    return dungeon.is_void_at(*dungeon.world_to_grid(entity.position.x, entity.position.y))
+
+
 class _EntityManager:
     """Shared shape for AnimalManager/EnemyManager: both own a list of live,
     per-frame NPCs spawned from a dungeon's currently-placed objects of
@@ -533,13 +542,6 @@ class _EntityManager:
 
     def _is_free(self, rect, moving_entity, player_refs):
         return _entity_rect_is_free(self.dungeon, rect, self._entities, moving_entity, player_refs)
-
-    def _is_over_void(self, entity):
-        """True if `entity`'s feet position now sits over an EMPTY cell --
-        destroyed terrain (see Dungeon.destroy_area) or simply having
-        wandered off the room's edge. Shared by AnimalManager/EnemyManager's
-        own per-frame void-culling (see their update())."""
-        return self.dungeon.is_void_at(*self.dungeon.world_to_grid(entity.position.x, entity.position.y))
 
     def draw(self, screen, camera):
         for entity in self._entities:
@@ -581,7 +583,9 @@ class AnimalManager(_EntityManager):
         # wandered over void (destroyed terrain, or off the edge of the
         # room) -- there's no "falling" animation for a wandering NPC,
         # unlike the player (see Explorator._attempt_fall).
-        self.animals = [animal for animal in self.animals if animal.alive and not self._is_over_void(animal)]
+        self.animals = [
+            animal for animal in self.animals if animal.alive and not _is_over_void(self.dungeon, animal)
+        ]
 
 
 class Enemy(_WanderingEntity):
@@ -791,7 +795,7 @@ class EnemyManager(_EntityManager):
                 lambda rect, _enemy=enemy: self._is_free(rect, _enemy, player_refs),
                 player_refs,
             )
-        self.enemies = [enemy for enemy in self.enemies if not self._is_over_void(enemy)]
+        self.enemies = [enemy for enemy in self.enemies if not _is_over_void(self.dungeon, enemy)]
 
 
 def _advance_frame_once(entity, dt, duration, frame_count):
@@ -931,14 +935,13 @@ class PickupManager:
         # every other live entity's void-culling (AnimalManager/
         # EnemyManager) -- ground loot has no "recover it" mechanic.
         self.pickups = [
-            pickup for pickup in self.pickups if not pickup.finished and not self._is_over_void(pickup)
+            pickup for pickup in self.pickups
+            if not pickup.finished and not _is_over_void(self.dungeon, pickup)
         ]
         self.item_pickups = [
-            pickup for pickup in self.item_pickups if not pickup.collected and not self._is_over_void(pickup)
+            pickup for pickup in self.item_pickups
+            if not pickup.collected and not _is_over_void(self.dungeon, pickup)
         ]
-
-    def _is_over_void(self, pickup):
-        return self.dungeon.is_void_at(*self.dungeon.world_to_grid(pickup.position.x, pickup.position.y))
 
     def collect(self, player_hitbox, inventory):
         """Credits inventory.currency[pickup.currency_type] += 1 the instant
