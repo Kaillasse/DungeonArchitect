@@ -4,11 +4,11 @@ import os
 
 import pygame
 from core.editor.creator import Creator
-from core.explorator import Explorator
-from core.menu import Menu
+from core.exploration.explorator import Explorator
+from core.ui.menu import Menu
 from core.engine.gamestate import GameState
 from core.data.settings import Settings
-from core.ui import BorderManager
+from core.ui.widgets import BorderManager
 
 class GameManager:
     def __init__(self, screen, settings=None):

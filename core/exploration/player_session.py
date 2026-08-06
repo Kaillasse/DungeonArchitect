@@ -1,15 +1,15 @@
 """Bundles everything about exploration that's per-player, not per-world-
 session -- the live Player entity, their own Inventory/InventoryPanel, this
 frame's InputState, whether THEIR inventory panel is open, and their own
-footstep-audio cadence. Lives at the top level (not core/world/, since it
-imports InventoryPanel -- a UI concern -- and not core/engine/, since it's
-specific to the exploration flow), the same layering as core/explorator.py
-and core/inventory_ui.py themselves."""
+footstep-audio cadence. Lives in core/exploration/ alongside explorator.py
+and inventory_ui.py -- not core/world/ (it imports InventoryPanel, a UI
+concern) and not core/engine/ (it's specific to the exploration flow, not
+generic state-machine plumbing)."""
 
 from __future__ import annotations
 
 from core.engine.input import InputState
-from core.inventory_ui import InventoryPanel
+from core.exploration.inventory_ui import InventoryPanel
 from core.world.entities import Player
 from core.world.inventory import Inventory
 

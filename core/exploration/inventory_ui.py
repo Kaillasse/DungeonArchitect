@@ -1,14 +1,15 @@
 """InventoryPanel: the "E" overlay drawn on top of Explorator while the world
-is paused. Not in core/ui.py -- that file is reserved for widgets actually
-shared across game states (BorderManager/RoomBrowser/BorderPicker); this
-panel is Explorator-only, same separation as core/editor/ui.py for Creator's
-own panels."""
+is paused. Not in core/ui/widgets.py -- that file is reserved for widgets
+actually shared across game states (BorderManager/RoomBrowser/BorderPicker);
+this panel is Explorator-only, same separation as core/editor/ui.py for
+Creator's own panels -- it lives in core/exploration/ alongside explorator.py
+and player_session.py instead."""
 
 from __future__ import annotations
 
 import pygame
 
-from core.ui import BorderManager
+from core.ui.widgets import BorderManager
 from core.world.object_manager import CURRENCY_FILES, load_currency_frames
 
 

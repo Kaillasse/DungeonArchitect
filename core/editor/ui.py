@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pygame
 
-from core.ui import BorderManager, RoomBrowser
+from core.ui.widgets import BorderManager, RoomBrowser, Stepper
 from core.world.object_manager import OBJECT_LIST, load_object_frames, CURRENCY_FILES, ITEM_DEFINITIONS
 from core.data.ressources import list_donjons
 
@@ -362,11 +362,7 @@ class GeneratorPanelUI:
         self.pool_browser.set_rooms(self.room_manager.scan(), preselect_all=True)
 
         stepper_y = self.pool_browser.y + self.pool_browser.height + 10
-        self.minus_rect = pygame.Rect(x, stepper_y, self.STEP_BUTTON_SIZE, self.STEP_BUTTON_SIZE)
-        self.count_rect = pygame.Rect(
-            self.minus_rect.right + 4, stepper_y, self.COUNT_DISPLAY_WIDTH, self.STEP_BUTTON_SIZE
-        )
-        self.plus_rect = pygame.Rect(self.count_rect.right + 4, stepper_y, self.STEP_BUTTON_SIZE, self.STEP_BUTTON_SIZE)
+        self.stepper = Stepper(x, stepper_y, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, self.MIN_COUNT, self.MAX_COUNT)
 
         self.generate_rect = pygame.Rect(x, stepper_y + self.STEP_BUTTON_SIZE + 10, self.PANEL_WIDTH, 36)
 
@@ -383,8 +379,7 @@ class GeneratorPanelUI:
     def contains(self, pos):
         return (
             self.pool_browser.contains(pos)
-            or self.minus_rect.collidepoint(pos)
-            or self.plus_rect.collidepoint(pos)
+            or self.stepper.contains(pos)
             or self.generate_rect.collidepoint(pos)
         )
 
@@ -395,11 +390,9 @@ class GeneratorPanelUI:
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
 
-            if self.minus_rect.collidepoint(event.pos):
-                self.room_count = max(self.MIN_COUNT, self.room_count - 1)
-
-            elif self.plus_rect.collidepoint(event.pos):
-                self.room_count = min(self.MAX_COUNT, self.room_count + 1)
+            new_count = self.stepper.handle_click(event.pos, self.room_count)
+            if new_count is not None:
+                self.room_count = new_count
 
             elif self.generate_rect.collidepoint(event.pos):
                 room_names = self.pool_browser.selected_names
@@ -415,9 +408,7 @@ class GeneratorPanelUI:
 
         self.pool_browser.render(screen)
 
-        self.border.draw_centered_label(screen, self.minus_rect, self.font, "-")
-        self.border.draw_centered_label(screen, self.count_rect, self.font, str(self.room_count))
-        self.border.draw_centered_label(screen, self.plus_rect, self.font, "+")
+        self.stepper.render(screen, self.border, self.font, self.room_count)
 
         enabled = bool(self.pool_browser.selected_names)
         self.border.draw_enabled_label(screen, self.generate_rect, self.font, "Generer", enabled)
@@ -480,16 +471,13 @@ class ChestPanelUI:
         ]
         return rows
 
-    def _row_rects(self, index):
+    def _row_stepper(self, index):
         y = self.y + 34 + index * (self.ROW_HEIGHT + self.ROW_SPACING)
-        minus = pygame.Rect(self.x, y, self.STEP_BUTTON_SIZE, self.STEP_BUTTON_SIZE)
-        count_rect = pygame.Rect(minus.right + 4, y, self.COUNT_DISPLAY_WIDTH, self.STEP_BUTTON_SIZE)
-        plus = pygame.Rect(count_rect.right + 4, y, self.STEP_BUTTON_SIZE, self.STEP_BUTTON_SIZE)
-        return minus, count_rect, plus
+        return Stepper(self.x, y, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, self.MIN_COUNT, self.MAX_COUNT)
 
     def _close_rect(self):
-        _, _, plus = self._row_rects(len(self._rows()) - 1)
-        return pygame.Rect(self.x, plus.bottom + 12, self.PANEL_WIDTH, 32)
+        stepper = self._row_stepper(len(self._rows()) - 1)
+        return pygame.Rect(self.x, stepper.bottom + 12, self.PANEL_WIDTH, 32)
 
     def contains(self, pos):
         if not self.is_open:
@@ -502,12 +490,9 @@ class ChestPanelUI:
             return
 
         for index, (_, loot, key) in enumerate(self._rows()):
-            minus, _count_rect, plus = self._row_rects(index)
-            if minus.collidepoint(event.pos):
-                loot[key] = max(self.MIN_COUNT, loot.get(key, 0) - 1)
-                return
-            if plus.collidepoint(event.pos):
-                loot[key] = min(self.MAX_COUNT, loot.get(key, 0) + 1)
+            new_value = self._row_stepper(index).handle_click(event.pos, loot.get(key, 0))
+            if new_value is not None:
+                loot[key] = new_value
                 return
 
         if self._close_rect().collidepoint(event.pos):
@@ -521,13 +506,11 @@ class ChestPanelUI:
         screen.blit(title, (self.x, self.y))
 
         for index, (label, loot, key) in enumerate(self._rows()):
-            minus, count_rect, plus = self._row_rects(index)
+            stepper = self._row_stepper(index)
 
             label_text = self.font.render(label, True, (220, 220, 220))
-            screen.blit(label_text, (self.x, minus.y - label_text.get_height() - 2))
+            screen.blit(label_text, (self.x, stepper.minus_rect.y - label_text.get_height() - 2))
 
-            self.border.draw_centered_label(screen, minus, self.font, "-")
-            self.border.draw_centered_label(screen, count_rect, self.font, str(loot.get(key, 0)))
-            self.border.draw_centered_label(screen, plus, self.font, "+")
+            stepper.render(screen, self.border, self.font, loot.get(key, 0))
 
         self.border.draw_centered_label(screen, self._close_rect(), self.font, "Fermer")

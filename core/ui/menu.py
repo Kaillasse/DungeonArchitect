@@ -1,4 +1,8 @@
-"""Contient toute la logique du game state Menu (ecran titre)."""
+"""Contient toute la logique du game state Menu (ecran titre). Lives in
+core/ui/ alongside widgets.py rather than core/exploration/ or
+core/editor/ -- unlike Creator/Explorator it owns no world/simulation state
+of its own, it's a title screen built almost entirely out of this package's
+own BorderManager/RoomBrowser/BorderPicker widgets."""
 
 from __future__ import annotations
 
@@ -7,7 +11,7 @@ import pygame
 from core.engine.gamestate import GameState
 from core.data.ressources import list_rooms, list_donjons, next_new_room_name
 from core.data.settings import ACTIONS, ACTION_KINDS
-from core.ui import BorderManager, BorderPicker, RoomBrowser
+from core.ui.widgets import BorderManager, BorderPicker, RoomBrowser
 
 
 class Menu:

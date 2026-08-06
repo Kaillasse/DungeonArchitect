@@ -1,6 +1,6 @@
 """Centralized SFX playback via pygame.mixer.
 
-A singleton (same shape as core.ui.BorderManager) so every caller shares one
+A singleton (same shape as core.ui.widgets.BorderManager) so every caller shares one
 cache of loaded pygame.mixer.Sound objects instead of reloading the same
 .wav repeatedly. Falls back to a silent no-op if the mixer can't initialize
 (no audio device -- keeps headless smoke tests/CI working without a real

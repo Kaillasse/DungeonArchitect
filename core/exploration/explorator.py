@@ -10,7 +10,7 @@ from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player, PlayerRef
 from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES
-from core.player_session import PlayerSession
+from core.exploration.player_session import PlayerSession
 from core.engine.input import (
     read_local_keyboard_input,
     read_secondary_keyboard_input, secondary_keyboard_matches_event, SECONDARY_KEYBOARD_BINDINGS,

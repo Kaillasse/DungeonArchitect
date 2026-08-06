@@ -182,6 +182,50 @@ class BorderManager:
 
 
 # ---------------------------------------------------------------------
+# Stepper ("-  N  +" row)
+# ---------------------------------------------------------------------
+
+
+class Stepper:
+    """A "-  N  +" row: three rects (minus/count/plus) laid out left to
+    right from a single origin, with min/max-clamped value changes on
+    click -- editor/ui.py's GeneratorPanelUI (room count) and ChestPanelUI
+    (one per currency/item loot row) each used to hand-roll this exact rect
+    layout at slightly different sizes; this is the shared shape, they own
+    the value itself (a Stepper holds no state of its own besides its
+    rects and bounds)."""
+
+    def __init__(self, x, y, button_size, count_width, minimum, maximum):
+        self.minus_rect = pygame.Rect(x, y, button_size, button_size)
+        self.count_rect = pygame.Rect(self.minus_rect.right + 4, y, count_width, button_size)
+        self.plus_rect = pygame.Rect(self.count_rect.right + 4, y, button_size, button_size)
+        self.minimum = minimum
+        self.maximum = maximum
+
+    @property
+    def bottom(self):
+        return self.plus_rect.bottom
+
+    def contains(self, pos):
+        return self.minus_rect.collidepoint(pos) or self.plus_rect.collidepoint(pos)
+
+    def handle_click(self, pos, value):
+        """Returns the new, clamped value if `pos` hit -/+, else None (the
+        caller tells the two apart by checking for None -- 0 is a valid
+        clamped value, so this can't just return a falsy sentinel)."""
+        if self.minus_rect.collidepoint(pos):
+            return max(self.minimum, value - 1)
+        if self.plus_rect.collidepoint(pos):
+            return min(self.maximum, value + 1)
+        return None
+
+    def render(self, screen, border, font, value):
+        border.draw_centered_label(screen, self.minus_rect, font, "-")
+        border.draw_centered_label(screen, self.count_rect, font, str(value))
+        border.draw_centered_label(screen, self.plus_rect, font, "+")
+
+
+# ---------------------------------------------------------------------
 # Border picker (Settings > Bordure)
 # ---------------------------------------------------------------------
 
