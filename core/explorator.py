@@ -8,10 +8,10 @@ import pygame
 from core.world.dungeon import Dungeon, corner_cells
 from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
-from core.world.entities import Player
+from core.world.entities import Player, PlayerRef
 from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES
-from core.world.inventory import Inventory
-from core.inventory_ui import InventoryPanel
+from core.player_session import PlayerSession
+from core.engine.input import read_local_keyboard_input
 from core.editor.autotile import EMPTY
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
@@ -69,34 +69,29 @@ class Explorator:
         self.grid_offset_y = 0
         self.grid_zoom = 1
 
-        self._footstep_timer = 0.0
-        self._footstep_alt = 0
-
         # -----------------------------
-        # Joueur
+        # Joueurs -- exactement une PlayerSession aujourd'hui (voir
+        # core/player_session.py), toujours pilotee par le clavier local
+        # (_local_player_id). Toute la simulation/rendu boucle sur
+        # self.players.values() plutot que de viser une instance figee, pour
+        # qu'ajouter une session future soit additif, pas une reecriture.
         # -----------------------------
 
-        self.player = Player()
+        self._local_player_id = 0
+        self.players = {self._local_player_id: PlayerSession(self._local_player_id)}
+        self._pending_local_actions = []
+        self._pending_local_inventory_toggle = False
 
         if not self.load_spawn_room():
             print("Aucune salle avec un spawn n'a été trouvée.")
 
-        self._position_player_at_spawn()
-
-        # -----------------------------
-        # Inventaire (overlay -- pas de GameState dédié, juste met le monde
-        # en pause pendant que le panel est affiché, voir update()/run())
-        # -----------------------------
-
-        self.inventory = Inventory()
-        self.inventory_panel = InventoryPanel(self.inventory)
-        self.inventory_open = False
+        self._position_player_at_spawn(self.players[self._local_player_id])
 
         # The only win condition that exists right now (see
         # _interact_with_chest): freezes gameplay and shows a victory banner
-        # once True, same "world paused, just an overlay" shape as
-        # inventory_open. No dedicated GameState -- ESC still returns to the
-        # menu normally from here.
+        # once True, same "world paused, just an overlay" shape as a
+        # session's inventory_open. No dedicated GameState -- ESC still
+        # returns to the menu normally from here.
         self.victory = False
 
         # -----------------------------
@@ -108,29 +103,32 @@ class Explorator:
         self.clock = pygame.time.Clock()
 
     def open_room(self, name):
-        """Load a specific room (chosen from the menu) and spawn the player in it."""
+        """Load a specific room (chosen from the menu) and spawn every current
+        session's player in it."""
         self.assembly = None
         self.current_placed_room = None
         self._last_door_obj = None
         self.dungeon.load_from_json(name)
         self.dungeon.spawn_animals()
         self.dungeon.spawn_enemies()
-        self._position_player_at_spawn()
-        # The Player instance is reused across menu <-> exploration
-        # transitions (never recreated), so a death from the last run would
-        # otherwise leave health at 0 and trigger _game_over again on the
-        # very next frame -- reset it here, same idea as re-placing position
-        # at the spawn point above. Same reasoning for victory (see
-        # _interact_with_chest) -- otherwise re-entering exploration would
-        # start right back on the frozen victory screen from last time.
-        self.player.health = self.player.MAX_HEALTH
+        for session in self.players.values():
+            self._position_player_at_spawn(session)
+            # A session's Player is reused across menu <-> exploration
+            # transitions (never recreated), so a death from the last run
+            # would otherwise leave health at 0 and trigger _game_over again
+            # on the very next frame -- reset it here, same idea as
+            # re-placing position at the spawn point above.
+            session.player.health = session.player.MAX_HEALTH
+        # Same reasoning for victory (see _interact_with_chest) -- otherwise
+        # re-entering exploration would start right back on the frozen
+        # victory screen from last time.
         self.victory = False
 
     def open_donjon(self, name):
-        """Load a saved procedurally-assembled dungeon and spawn the player in its starting room."""
+        """Load a saved procedurally-assembled dungeon and spawn every
+        current session's player in its starting room."""
         self.assembly = load_assembly(name)
         self._last_door_obj = None
-        self.player.health = self.player.MAX_HEALTH
         self.victory = False
 
         for room in self.assembly.rooms:
@@ -148,12 +146,14 @@ class Explorator:
             spawn_local = (start_room.dungeon.tile_size, start_room.dungeon.tile_size)
 
         tile_size = start_room.dungeon.tile_size
-        self.player.position.update(
-            start_room.offset_x * tile_size + spawn_local[0],
-            start_room.offset_y * tile_size + spawn_local[1],
-        )
+        for session in self.players.values():
+            session.player.health = session.player.MAX_HEALTH
+            session.player.position.update(
+                start_room.offset_x * tile_size + spawn_local[0],
+                start_room.offset_y * tile_size + spawn_local[1],
+            )
 
-    def _position_player_at_spawn(self):
+    def _position_player_at_spawn(self, session):
         spawn = self.dungeon.get_spawn_world_position()
 
         if spawn is None:
@@ -163,16 +163,16 @@ class Explorator:
                 self.dungeon.tile_size,
             )
 
-        self.player.position.update(*spawn)
+        session.player.position.update(*spawn)
 
     def _visible_animals_global(self):
         """(animal, hitbox) pairs for every animal that could plausibly collide
-        with the player right now, hitbox already in global/world coordinates
+        with a player right now, hitbox already in global/world coordinates
         -- current room's animals in single-room mode, every animal on the
-        player's current floor (shifted by each room's offset) in assembly
-        mode, since DungeonAssembly.update already hands the player's hitbox
-        to all of them regardless of which specific room the player is
-        registered as standing in."""
+        active floor (shifted by each room's offset) in assembly mode, since
+        DungeonAssembly.update already hands every player's hitbox to all of
+        them regardless of which specific room each player is registered as
+        standing in."""
         if self.assembly is not None:
             tile_size = Dungeon.TILE_SIZE
             pairs = []
@@ -185,7 +185,7 @@ class Explorator:
 
     def _visible_enemies_global(self):
         """Same idea as _visible_animals_global, but for live (alive) Enemy
-        entities -- a corpse doesn't block the player, mirroring
+        entities -- a corpse doesn't block a player, mirroring
         EnemyManager._is_free's own "other.alive" check for enemy-vs-enemy.
         Yields (enemy, hitbox, dungeon) rather than just (enemy, hitbox) --
         the third element is whichever room's own Dungeon actually owns this
@@ -235,20 +235,22 @@ class Explorator:
                     enemy.position.y + random.uniform(-10, 10),
                 )
 
-    def _collect_pickups(self, player_hitbox):
-        """Credits self.inventory.currency for every ground Pickup the
-        player's hitbox touches this frame, across whichever room(s) that's
-        meaningful for -- same per-floor scope as _visible_animals_global."""
+    def _collect_pickups(self, player_hitbox, inventory):
+        """Credits inventory.currency for every ground Pickup player_hitbox
+        touches this frame, across whichever room(s) that's meaningful for --
+        same per-floor scope as _visible_animals_global. `inventory` is the
+        calling session's own Inventory (see _resolve_pickups), not a shared
+        singleton."""
         if self.assembly is not None:
             tile_size = Dungeon.TILE_SIZE
             for room in self.assembly.rooms_on_floor(self.current_placed_room.floor):
                 local_hitbox = player_hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size)
-                room.dungeon.pickup_manager.collect(local_hitbox, self.inventory)
+                room.dungeon.pickup_manager.collect(local_hitbox, inventory)
         else:
-            self.dungeon.pickup_manager.collect(player_hitbox, self.inventory)
+            self.dungeon.pickup_manager.collect(player_hitbox, inventory)
 
-    def _trigger_action(self, action_id):
-        """Fires action_id's one-shot behavior -- normally just
+    def _trigger_action(self, session, action_id):
+        """Fires action_id's one-shot behavior for `session` -- normally just
         Player.play_action, but "interact" is intercepted first for a chest
         the player is facing (see _interact_with_chest), then for a
         throwable item equipped in the interact slot (see
@@ -256,54 +258,54 @@ class Explorator:
         instead of just playing the plain interact animation. A facing chest
         wins over a held item -- interacting with the world takes priority
         over the player's own inventory."""
-        if action_id == "interact" and (self._interact_with_chest() or self._throw_interact_item()):
+        if action_id == "interact" and (self._interact_with_chest(session) or self._throw_interact_item(session)):
             return
-        self.player.play_action(action_id)
+        session.player.play_action(action_id)
 
     def _current_room_and_offset(self):
-        """(dungeon, offset_x, offset_y) for whichever room the player is
-        currently in -- offset is (0, 0) in single-room mode. Shared by
-        anything that needs to convert the player's (always-global)
-        position/hitbox into that room's own local coordinates, the same way
-        every other per-room live entity's position already works (see
+        """(dungeon, offset_x, offset_y) for whichever room is currently
+        active -- offset is (0, 0) in single-room mode. Shared by anything
+        that needs to convert a player's (always-global) position/hitbox
+        into that room's own local coordinates, the same way every other
+        per-room live entity's position already works (see
         _throw_interact_item/_interact_with_chest)."""
         if self.assembly is not None:
             room = self.current_placed_room
             return room.dungeon, room.offset_x, room.offset_y
         return self.dungeon, 0, 0
 
-    def _throw_interact_item(self):
-        """Returns True if the interact slot held a throwable item (see
+    def _throw_interact_item(self, session):
+        """Returns True if session's interact slot held a throwable item (see
         ITEM_DEFINITIONS' "throwable" flag -- currently just dynamite) and it
         was thrown: consumes the item, spawns a live ThrownDynamite in the
-        player's current room (converted to that room's local coordinates,
-        same convention as every other per-room live entity) at the player's
+        current room (converted to that room's local coordinates, same
+        convention as every other per-room live entity) at the player's
         position, in the direction they're currently facing, and plays the
         interact animation for visual feedback. Returns False (no-op) if the
         slot is empty or holds a non-throwable item, leaving _trigger_action
         to fall back to the plain interact animation."""
-        item = self.inventory.main_slots["interact"]
+        item = session.inventory.main_slots["interact"]
         if item is None or not ITEM_DEFINITIONS.get(item.item_id, {}).get("throwable"):
             return False
 
-        self.inventory.main_slots["interact"] = None
+        session.inventory.main_slots["interact"] = None
 
-        dx, dy = Player.DIRECTION_VECTORS.get(self.player.direction, (0, 1))
+        dx, dy = Player.DIRECTION_VECTORS.get(session.player.direction, (0, 1))
         direction = pygame.Vector2(dx, dy)
 
         dungeon, offset_x, offset_y = self._current_room_and_offset()
         tile_size = dungeon.tile_size
-        local_x = self.player.position.x - offset_x * tile_size
-        local_y = self.player.position.y - offset_y * tile_size
+        local_x = session.player.position.x - offset_x * tile_size
+        local_y = session.player.position.y - offset_y * tile_size
         dungeon.projectile_manager.throw_dynamite(local_x, local_y, direction)
         SoundManager().play("dynamite_interact")
 
-        self.player.play_action("interact")
+        session.player.play_action("interact")
         return True
 
-    def _interact_with_chest(self):
-        """Returns True if the player was facing an unopened chest (e.g.
-        lilchest) within melee reach and interacted with it: starts its
+    def _interact_with_chest(self, session):
+        """Returns True if session's player was facing an unopened chest
+        (e.g. lilchest) within melee reach and interacted with it: starts its
         opening animation (frame 4, the first frame of row 1 -- see
         OBJECT_TYPES["lilchest"] -- ObjectManager.update takes it from there
         and holds on the last frame once reached, same mechanism as any
@@ -312,7 +314,7 @@ class Explorator:
         screen -- the only win condition that exists right now. Reuses the
         player's own melee reach (get_attack_hitbox: their hitbox shifted one
         tile in their facing direction) rather than a separate "interact
-        range", since a chest blocks movement (blocks_movement) so the player
+        range", since a chest blocks movement (blocks_movement) so a player
         can only ever be standing right next to it, never on top of it.
         Returns False (no-op) if there's no such chest in reach or it's
         already open, leaving _trigger_action to fall back to throwing/the
@@ -320,7 +322,7 @@ class Explorator:
         dungeon, offset_x, offset_y = self._current_room_and_offset()
         tile_size = dungeon.tile_size
 
-        reach_hitbox = self.player.get_attack_hitbox()
+        reach_hitbox = session.player.get_attack_hitbox()
         grid_x = int((reach_hitbox.centerx - offset_x * tile_size) // tile_size)
         grid_y = int((reach_hitbox.centery - offset_y * tile_size) // tile_size)
 
@@ -349,7 +351,7 @@ class Explorator:
                     chest_y + random.uniform(-12, 12),
                 )
 
-        self.player.play_action("interact")
+        session.player.play_action("interact")
         self.victory = True
         return True
 
@@ -372,7 +374,10 @@ class Explorator:
         center hadn't crossed yet (making the old is_void check also False)
         -- deadlocking the player exactly at that edge, indistinguishable
         from a real wall. Checking void at the same per-corner granularity as
-        the wall check removes that gap entirely."""
+        the wall check removes that gap entirely.
+
+        Only checks animals/enemies, not other players -- player-vs-player
+        collision doesn't exist yet (see PlayerSession/Phase 1 notes)."""
         for grid_x, grid_y in corner_cells(rect, Dungeon.TILE_SIZE):
             if self._is_void_at(grid_x, grid_y) or self._is_cell_walkable(grid_x, grid_y):
                 continue
@@ -400,8 +405,8 @@ class Explorator:
         4-corner check."""
         return int(rect.centerx // Dungeon.TILE_SIZE), int((rect.bottom - 1) // Dungeon.TILE_SIZE)
 
-    def _update_world(self, dt, hitbox):
-        """Advances the room(s) the player can currently affect -- objects,
+    def _update_world(self, dt, player_refs):
+        """Advances the room(s) any player can currently affect -- objects,
         animals/enemies, pickups -- via whichever of assembly/single-dungeon
         mode is active. Shared by the frozen victory/inventory tick and the
         normal per-frame update, which additionally runs button-trigger
@@ -409,14 +414,14 @@ class Explorator:
         input is frozen)."""
         if self.assembly is not None:
             self.assembly.update(
-                dt, player=self.player, player_hitbox=hitbox, player_floor=self.current_placed_room.floor
+                dt, player_refs=player_refs, player_floor=self.current_placed_room.floor
             )
         else:
-            self.dungeon.update(dt, player=self.player, player_hitbox=hitbox)
+            self.dungeon.update(dt, player_refs=player_refs)
 
     def _is_cell_walkable(self, grid_x, grid_y):
         """Real wall/closed-door/etc. walkability for a single global cell on
-        the player's current floor -- ignores void (see _is_void_at, checked
+        the active floor -- ignores void (see _is_void_at, checked
         separately by _is_walkable's caller) and other entities (also
         checked separately), so it's exactly the "is there a real obstacle
         here" half of the corner check."""
@@ -435,12 +440,12 @@ class Explorator:
             self._last_debug_message = message
 
     def _is_void(self, rect):
-        """True if no room claims the cell under the player's feet on the
+        """True if no room claims the cell under a player's feet on the
         active floor -- distinct from being blocked by an actual wall/closed
         door/animal/enemy, which _is_walkable already covers. Single point
         (feet anchor), same convention as _update_current_room/
         check_button_trigger, not the 4-corner check is_rect_walkable uses --
-        falling is about where the player's feet are, not a strict hitbox
+        falling is about where a player's feet are, not a strict hitbox
         overlap test."""
         grid_x, grid_y = self._feet_grid_cell(rect)
         return self._is_void_at(grid_x, grid_y)
@@ -455,19 +460,21 @@ class Explorator:
             return True
         return self.dungeon.logical_grid[grid_y][grid_x] == EMPTY
 
-    def _attempt_fall(self):
-        """Called once the player's feet actually end up over void (see
+    def _attempt_fall(self, session):
+        """Called once session's player's feet actually end up over void (see
         _is_void): looks for the nearest floor below (within the same
         assembly) that owns this exact global cell and lands there --
-        current_placed_room changes, player.position doesn't need to (it's
-        already global, so "same tile, different floor" falls out for
+        current_placed_room changes, the player's position doesn't need to
+        (it's already global, so "same tile, different floor" falls out for
         free). No assembly (single-room mode) or nothing below at all: falls
-        out of the map entirely."""
+        out of the map entirely (see the "flagged, not decided" note on
+        _game_over -- this ends the whole session today, not just this
+        player)."""
         if self.assembly is None:
             self._game_over("Chute hors de la carte")
             return
 
-        hitbox = self.player.get_hitbox()
+        hitbox = session.player.get_hitbox()
         grid_x, grid_y = self._feet_grid_cell(hitbox)
         current_floor = self.current_placed_room.floor
 
@@ -476,27 +483,34 @@ class Explorator:
             if room is not None:
                 self.current_placed_room = room
                 self._last_door_obj = None  # new room/floor -- re-arm the door edge-trigger
-                self.player.play_fall()
+                session.player.play_fall()
                 return
 
         self._game_over("Chute hors de la carte")
 
     def _game_over(self, reason):
-        """No floor anywhere below catches a fall, or the player's health
-        hit 0 -- either way, game over. The real "monde de base" (étage
-        system) doesn't exist yet, so this returns to the main Menu for now,
-        same as ECHAP."""
+        """No floor anywhere below catches a fall, or a player's health hit
+        0 -- either way, game over for the whole session (see the "flagged,
+        not decided" notes -- whether a single player's death/fall should
+        instead only remove that one player is an open Phase 2+ question).
+        The real "monde de base" (étage system) doesn't exist yet, so this
+        returns to the main Menu for now, same as ECHAP."""
         print(f"[game] {reason} -- retour au menu.")
         self.game_manager.state = GameState.MENU
 
-    def _update_current_room(self):
-        """Edge-triggered room switch: stepping onto a gate/wall entry-exit
-        that connects to another room (door_target_room, stamped at
-        generation time -- see DungeonAssembly.resolve_room_transition) flips
-        current_placed_room exactly once, on entry, whether that door happens
-        to lead to a room on the same floor or a different one. Standing on
-        the door doesn't re-trigger, and going back requires fully leaving
-        the door cell and stepping onto it again from the other side.
+    def _update_current_room(self, session):
+        """Edge-triggered room switch: session's player stepping onto a
+        gate/wall entry-exit that connects to another room
+        (door_target_room, stamped at generation time -- see
+        DungeonAssembly.resolve_room_transition) flips current_placed_room
+        exactly once, on entry, whether that door happens to lead to a room
+        on the same floor or a different one. Standing on the door doesn't
+        re-trigger, and going back requires fully leaving the door cell and
+        stepping onto it again from the other side.
+
+        current_placed_room/the active floor stay singular/Explorator-level
+        (see PlayerSession/Phase 1 notes) -- with a real second player in a
+        different room/floor, this has no representation yet.
 
         A border-floor seam (two rooms glued edge-to-edge with continuous
         floor and no gate/wall object at all -- see assembly._border_edges)
@@ -509,7 +523,7 @@ class Explorator:
         WALL, not FLOOR, in both rooms, so locate_room's FLOOR-first check
         can't contradict it -- at worst it falls through to the same
         WALL-halo match resolve_room_transition already produced."""
-        hitbox = self.player.get_hitbox()
+        hitbox = session.player.get_hitbox()
         grid_x, grid_y = self._feet_grid_cell(hitbox)
 
         self.current_placed_room, self._last_door_obj = self.assembly.resolve_room_transition(
@@ -545,47 +559,38 @@ class Explorator:
         return False
     # ------------------------------------------------------
 
-    def update(self, dt):
+    def _read_input(self):
+        """Refreshes every currently-driven PlayerSession's InputState this
+        frame. Phase 1 always drives the single existing session from the
+        local keyboard -- Phase 2 needs a per-session input-source lookup
+        here before a second real, independently-driven session can be
+        added, instead of this hardcoded call."""
+        session = self.players[self._local_player_id]
+        session.input = read_local_keyboard_input(self.settings)
+        session.input.requested_actions = tuple(self._pending_local_actions)
+        session.input.inventory_toggle = self._pending_local_inventory_toggle
+        self._pending_local_actions = []
+        self._pending_local_inventory_toggle = False
 
-        if self.inventory_open:
-            # Monde entièrement en pause -- seule l'anim idle du joueur (pour
-            # la preview du panel) et le panel lui-même continuent de tourner.
-            if self.player.action is None:
-                self.player.animation = "idle"
-            self.player.update(dt)
-            self.inventory_panel.update(dt)
-            return
+    @staticmethod
+    def _update_frozen_player(session, dt):
+        """Ticks idle animation only -- shared by the inventory-open and
+        victory freeze branches of update()."""
+        if session.player.action is None:
+            session.player.animation = "idle"
+        session.player.update(dt)
 
-        if self.victory:
-            # Player input is frozen (no movement/combat), but the room
-            # itself keeps updating so the chest's own opening animation
-            # actually finishes playing instead of freezing mid-swing.
-            if self.player.action is None:
-                self.player.animation = "idle"
-            self.player.update(dt)
-            self._update_world(dt, self.player.get_hitbox())
-            return
+    def _player_refs(self):
+        return [PlayerRef(session.player, session.player.get_hitbox()) for session in self.players.values()]
 
-        keys = pygame.key.get_pressed()
+    def _apply_requested_actions(self, session):
+        for action_id in session.input.requested_actions:
+            self._trigger_action(session, action_id)
 
-        direction = pygame.Vector2()
-
-        if self.settings.is_action_pressed("move_up", keys):
-            direction.y -= 1
-
-        if self.settings.is_action_pressed("move_down", keys):
-            direction.y += 1
-
-        if self.settings.is_action_pressed("move_left", keys):
-            direction.x -= 1
-
-        if self.settings.is_action_pressed("move_right", keys):
-            direction.x += 1
-
-        # A single rebindable "run" binding replaces the old hardcoded
-        # "either shift key" check -- a deliberate scope trade-off, see
-        # core/data/settings.py.
-        running = self.settings.is_action_pressed("run", keys)
+    def _simulate_movement(self, session, dt):
+        player = session.player
+        direction = session.input.move_direction
+        running = session.input.running
 
         if direction.length_squared() > 0:
 
@@ -604,26 +609,26 @@ class Explorator:
             # fall-check runs below, after both axes and the door transition,
             # rather than blocking movement at the boundary of whatever room
             # happens to own the active floor.
-            future_hitbox = self.player.get_hitbox()
+            future_hitbox = player.get_hitbox()
             future_hitbox.x += movement.x
             if self._is_walkable(future_hitbox, debug_label="x"):
-                self.player.position.x += movement.x
+                player.position.x += movement.x
 
-            future_hitbox = self.player.get_hitbox()
+            future_hitbox = player.get_hitbox()
             future_hitbox.y += movement.y
             if self._is_walkable(future_hitbox, debug_label="y"):
-                self.player.position.y += movement.y
+                player.position.y += movement.y
 
             if self.assembly is not None:
-                self._update_current_room()
+                self._update_current_room(session)
 
             # Suppressed mid-jump so the player can actually clear a gap by
             # jumping over it instead of falling the instant their feet pass
             # over void while airborne -- the check resumes the very next
             # frame the one-shot jump animation ends (Player.action reverts
             # to None on its own), so landing on void still falls normally.
-            if self.player.action != "jump" and self._is_void(self.player.get_hitbox()):
-                self._attempt_fall()
+            if player.action != "jump" and self._is_void(player.get_hitbox()):
+                self._attempt_fall(session)
 
             # -----------------------------
             # Choix direction animation
@@ -632,61 +637,65 @@ class Explorator:
             if direction.y > 0.5:
 
                 if direction.x > 0.3:
-                    self.player.direction = "front_right"
+                    player.direction = "front_right"
 
                 elif direction.x < -0.3:
-                    self.player.direction = "front_left"
+                    player.direction = "front_left"
 
                 else:
-                    self.player.direction = "front"
+                    player.direction = "front"
 
             elif direction.y < -0.5:
 
                 if direction.x > 0.3:
-                    self.player.direction = "back_right"
+                    player.direction = "back_right"
 
                 elif direction.x < -0.3:
-                    self.player.direction = "back_left"
+                    player.direction = "back_left"
 
                 else:
-                    self.player.direction = "back"
+                    player.direction = "back"
 
             else:
 
                 if direction.x > 0:
-                    self.player.direction = "right"
+                    player.direction = "right"
 
                 else:
-                    self.player.direction = "left"
+                    player.direction = "left"
 
-            if self.player.action is None:
-                self.player.animation = "run" if running else "walk"
+            if player.action is None:
+                player.animation = "run" if running else "walk"
 
-            if self.player.action != "jump":
-                self._footstep_timer += dt
+            if player.action != "jump":
+                session.footstep_timer += dt
                 interval = self.FOOTSTEP_INTERVAL_RUN if running else self.FOOTSTEP_INTERVAL_WALK
-                if self._footstep_timer >= interval:
-                    self._footstep_timer = 0.0
-                    SoundManager().play(f"player_footstep_{self._footstep_alt + 1}")
-                    self._footstep_alt = 1 - self._footstep_alt
+                if session.footstep_timer >= interval:
+                    session.footstep_timer = 0.0
+                    SoundManager().play(f"player_footstep_{session.footstep_alt + 1}")
+                    session.footstep_alt = 1 - session.footstep_alt
 
         else:
 
-            if self.player.action is None:
-                self.player.animation = "idle"
+            if player.action is None:
+                player.animation = "idle"
 
-            self._footstep_timer = 0.0
+            session.footstep_timer = 0.0
 
-        self.player.update(dt)
+        player.update(dt)
 
-        # -----------------------------
-        # Combat -- joueur attaque un ennemi
-        # -----------------------------
-
-        if self.player.is_attack_active():
-            attack_hitbox = self.player.get_attack_hitbox()
+    def _resolve_player_attacks(self):
+        """Every session's attack, checked against the same one
+        _visible_enemies_global() snapshot (computed once, shared across
+        sessions -- was already implicitly frame-shared with 1 player)."""
+        enemies = self._visible_enemies_global()
+        for session in self.players.values():
+            player = session.player
+            if not player.is_attack_active():
+                continue
+            attack_hitbox = player.get_attack_hitbox()
             hit_landed = False
-            for enemy, enemy_rect, enemy_dungeon in self._visible_enemies_global():
+            for enemy, enemy_rect, enemy_dungeon in enemies:
                 if attack_hitbox.colliderect(enemy_rect):
                     was_alive = enemy.alive
                     enemy.take_damage(1)
@@ -694,48 +703,91 @@ class Explorator:
                     if was_alive and not enemy.alive:
                         self._spawn_loot(enemy, enemy_dungeon)
             if hit_landed:
-                self.player._hit_delivered_this_swing = True
+                player._hit_delivered_this_swing = True
+
+    def _resolve_pickups(self):
+        for session in self.players.values():
+            self._collect_pickups(session.player.get_hitbox(), session.inventory)
+
+    def _resolve_buttons(self):
+        for session in self.players.values():
+            grid_x, grid_y = self._feet_grid_cell(session.player.get_hitbox())
+            if self.assembly is not None:
+                self.assembly.check_button_trigger(
+                    grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
+                )
+            else:
+                self.dungeon.object_manager.check_button_trigger(grid_x, grid_y)
+
+    def _camera_target(self):
+        """World (x, y) the camera should center on this frame. Phase 1:
+        always the single existing PlayerSession's position -- swapping to a
+        different strategy later (average of several players, a designated
+        "camera owner") is a change to this one method, not update()/
+        render()."""
+        session = self.players[self._local_player_id]
+        return session.player.position.x, session.player.position.y
+
+    def _update_camera(self):
+        target_x, target_y = self._camera_target()
+        self.camera.center_on(target_x, target_y, self.screen.get_width(), self.screen.get_height())
+
+    def update(self, dt):
+
+        self._read_input()
+
+        if any(session.inventory_open for session in self.players.values()):
+            # Monde entièrement en pause -- seule l'anim idle de chaque
+            # joueur (pour la preview du panel) et les panels eux-mêmes
+            # continuent de tourner.
+            for session in self.players.values():
+                self._update_frozen_player(session, dt)
+                if session.inventory_open:
+                    session.inventory_panel.update(dt)
+            return
+
+        if self.victory:
+            # Player input is frozen (no movement/combat), but the room
+            # itself keeps updating so the chest's own opening animation
+            # actually finishes playing instead of freezing mid-swing.
+            for session in self.players.values():
+                self._update_frozen_player(session, dt)
+            self._update_world(dt, self._player_refs())
+            return
+
+        for session in self.players.values():
+            self._apply_requested_actions(session)
+            self._simulate_movement(session, dt)
+
+        # -----------------------------
+        # Combat -- joueurs attaquent un ennemi
+        # -----------------------------
+
+        self._resolve_player_attacks()
 
         # -----------------------------
         # Ramassage des pièces au sol
         # -----------------------------
 
-        self._collect_pickups(self.player.get_hitbox())
+        self._resolve_pickups()
 
         # -----------------------------
-        # Boutons / portes
+        # Monde (objets/animaux/ennemis/projectiles) + boutons / portes
         # -----------------------------
 
-        hitbox = self.player.get_hitbox()
-        self._update_world(dt, hitbox)
+        self._update_world(dt, self._player_refs())
+        self._resolve_buttons()
 
-        if self.assembly is not None:
-            player_grid_x, player_grid_y = self._feet_grid_cell(hitbox)
-            self.assembly.check_button_trigger(
-                player_grid_x, player_grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
-            )
-        else:
-            self.dungeon.update(dt, player=self.player, player_hitbox=hitbox)
-            player_grid_x, player_grid_y = self.dungeon.world_to_grid(
-                hitbox.centerx,
-                hitbox.bottom - 1,
-            )
-            self.dungeon.object_manager.check_button_trigger(player_grid_x, player_grid_y)
-
-        if self.player.health <= 0:
-            self._game_over("Le joueur est mort")
-            return
+        for session in self.players.values():
+            if session.player.health <= 0:
+                self._game_over("Le joueur est mort")
+                return
 
         # -----------------------------
         # Camera suit le joueur
         # -----------------------------
 
-        self.camera.center_on(
-            self.player.position.x,
-            self.player.position.y,
-            self.screen.get_width(),
-            self.screen.get_height(),
-        )
+        self._update_camera()
 
     # ------------------------------------------------------
 
@@ -749,7 +801,7 @@ class Explorator:
                 self.screen,
                 self.camera,
                 active_floor=self.current_placed_room.floor,
-                player_world_pos=(self.player.position.x, self.player.position.y),
+                player_world_pos=self._camera_target(),
                 hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_active_floor_foreground=True,
                 skip_active_floor_animals=True,
@@ -761,7 +813,7 @@ class Explorator:
                 self.screen,
                 self.camera,
                 self.current_placed_room.floor,
-                self.player,
+                [session.player for session in self.players.values()],
             )
 
             self.assembly.render_active_floor_foreground(
@@ -786,7 +838,7 @@ class Explorator:
             entities = (
                 list(self.dungeon.animal_manager.animals)
                 + list(self.dungeon.enemy_manager.enemies)
-                + [self.player]
+                + [session.player for session in self.players.values()]
             )
             entities.sort(key=lambda entity: entity.position.y)
             for entity in entities:
@@ -801,8 +853,9 @@ class Explorator:
         if self.debug_mode:
             self._draw_debug_hitboxes()
 
-        if self.inventory_open:
-            self.inventory_panel.render(self.screen, self.player)
+        for session in self.players.values():
+            if session.inventory_open:
+                session.inventory_panel.render(self.screen, session.player)
 
         if self.victory:
             self._draw_victory_banner()
@@ -826,20 +879,22 @@ class Explorator:
     DEBUG_VOID_RADIUS_TILES = 3
 
     def _draw_debug_hitboxes(self):
-        """F3 overlay: the player's hitbox in red (plus its attack reach in
+        """F3 overlay: every player's hitbox in red (plus its attack reach in
         orange while actually active), animals in yellow, enemies in purple
         (plus each attacking enemy's own melee reach in magenta, same idea as
-        the player's orange one) -- all already in the exact world
-        coordinates _is_walkable/combat compare, so any gap between "what
-        looks like it's touching" and "what's actually colliding" is
-        directly visible instead of guessed. Also outlines every cell
-        _is_void_at considers void (cyan) within a few tiles of the player --
-        to diagnose exactly which cells near a gate/wall entry-exit read as
-        void vs not, rather than guessing."""
+        a player's orange one) -- all already in the exact world coordinates
+        _is_walkable/combat compare, so any gap between "what looks like it's
+        touching" and "what's actually colliding" is directly visible
+        instead of guessed. Also outlines every cell _is_void_at considers
+        void (cyan) within a few tiles of the local player -- to diagnose
+        exactly which cells near a gate/wall entry-exit read as void vs not,
+        rather than guessing."""
         self._draw_debug_void_grid()
-        self._draw_debug_rect(self.player.get_hitbox(), (255, 60, 60))
-        if self.player.is_attack_active():
-            self._draw_debug_rect(self.player.get_attack_hitbox(), (255, 150, 30))
+        for session in self.players.values():
+            player = session.player
+            self._draw_debug_rect(player.get_hitbox(), (255, 60, 60))
+            if player.is_attack_active():
+                self._draw_debug_rect(player.get_attack_hitbox(), (255, 150, 30))
         for _animal, animal_rect in self._visible_animals_global():
             self._draw_debug_rect(animal_rect, (255, 220, 60))
         for enemy, enemy_rect, _dungeon in self._visible_enemies_global():
@@ -856,7 +911,9 @@ class Explorator:
                 self._draw_debug_rect(enemy.get_attack_hitbox().move(offset), (255, 60, 220))
 
     def _draw_debug_void_grid(self):
-        hitbox = self.player.get_hitbox()
+        """Centered on the local player only -- not extended to show every
+        player's own local void-grid (see Phase 1 notes)."""
+        hitbox = self.players[self._local_player_id].player.get_hitbox()
         center_grid_x, center_grid_y = self._feet_grid_cell(hitbox)
         tile_size = Dungeon.TILE_SIZE
         radius = self.DEBUG_VOID_RADIUS_TILES
@@ -892,18 +949,20 @@ class Explorator:
 
             for event in pygame.event.get():
 
+                local_session = self.players[self._local_player_id]
+
                 if event.type == pygame.QUIT:
 
                     self.game_manager.running = False
                     running = False
 
                 elif event.type == pygame.KEYDOWN and self.settings.matches_event("inventory", event):
-                    self.inventory_open = not self.inventory_open
+                    local_session.inventory_open = not local_session.inventory_open
 
-                elif self.inventory_open and event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    self.inventory_open = False
+                elif local_session.inventory_open and event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    local_session.inventory_open = False
 
-                elif self.inventory_open:
+                elif local_session.inventory_open:
                     continue  # avale tout le reste (clics, TAB, F3...) tant que le panel est ouvert
 
                 elif event.type == pygame.MOUSEWHEEL:
@@ -914,7 +973,7 @@ class Explorator:
 
                     for action_id in self.ONE_SHOT_ACTIONS:
                         if self.settings.matches_event(action_id, event):
-                            self._trigger_action(action_id)
+                            self._pending_local_actions.append(action_id)
 
                 elif event.type == pygame.KEYDOWN:
 
@@ -934,7 +993,7 @@ class Explorator:
                     else:
                         for action_id in self.ONE_SHOT_ACTIONS:
                             if self.settings.matches_event(action_id, event):
-                                self._trigger_action(action_id)
+                                self._pending_local_actions.append(action_id)
 
             self.update(dt)
 

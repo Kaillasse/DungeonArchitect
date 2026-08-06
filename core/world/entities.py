@@ -2,6 +2,7 @@
 from __future__ import annotations
 import math
 import random
+from collections import namedtuple
 from pathlib import Path
 import pygame
 
@@ -469,13 +470,16 @@ class Animal(_WanderingEntity):
         self._advance_animation(dt)
 
 
-def _entity_rect_is_free(dungeon, rect, entities, moving_entity, player_hitbox):
+PlayerRef = namedtuple("PlayerRef", ("player", "hitbox"))
+
+
+def _entity_rect_is_free(dungeon, rect, entities, moving_entity, player_refs):
     """Shared by AnimalManager/EnemyManager._is_free: walls/closed gates
     first (cheapest, most likely to reject), then every other live entity in
     `entities` (a dead Enemy -- getattr(other, "alive", True) -- doesn't
     block; Animal has no "alive" attribute at all, so it defaults to always
-    blocking), then the player if they're actually standing on this room's
-    floor right now (player_hitbox is None otherwise -- see Dungeon.update)."""
+    blocking), then every player actually standing on this room's floor
+    right now (`player_refs` is empty otherwise -- see Dungeon.update)."""
     if not dungeon.is_rect_walkable(rect):
         return False
 
@@ -483,8 +487,9 @@ def _entity_rect_is_free(dungeon, rect, entities, moving_entity, player_hitbox):
         if other is not moving_entity and getattr(other, "alive", True) and rect.colliderect(other.get_hitbox()):
             return False
 
-    if player_hitbox is not None and rect.colliderect(player_hitbox):
-        return False
+    for ref in player_refs:
+        if rect.colliderect(ref.hitbox):
+            return False
 
     return True
 
@@ -526,8 +531,8 @@ class _EntityManager:
             if obj["type"] in self.ENTITY_TYPES
         ]
 
-    def _is_free(self, rect, moving_entity, player_hitbox):
-        return _entity_rect_is_free(self.dungeon, rect, self._entities, moving_entity, player_hitbox)
+    def _is_free(self, rect, moving_entity, player_refs):
+        return _entity_rect_is_free(self.dungeon, rect, self._entities, moving_entity, player_refs)
 
     def draw(self, screen, camera):
         for entity in self._entities:
@@ -558,11 +563,11 @@ class AnimalManager(_EntityManager):
     def _entities(self, value):
         self.animals = value
 
-    def update(self, dt, player_hitbox=None):
+    def update(self, dt, player_refs=()):
         for animal in self.animals:
             animal.update(
                 dt,
-                lambda rect, _animal=animal: self._is_free(rect, _animal, player_hitbox),
+                lambda rect, _animal=animal: self._is_free(rect, _animal, player_refs),
             )
         # No death animation to play out (unlike Enemy) -- a dead animal
         # just disappears the moment its health runs out.
@@ -663,10 +668,24 @@ class Enemy(_WanderingEntity):
 
         self._wander_tick(dt, is_walkable, self.stats["move_speed"])
 
-    def _update_chase(self, dt, is_walkable, player_hitbox):
+    def _update_chase(self, dt, is_walkable, target_hitbox):
         self._enter_state("movement")
-        target = pygame.Vector2(player_hitbox.centerx, player_hitbox.centery)
+        target = pygame.Vector2(target_hitbox.centerx, target_hitbox.centery)
         self._move_toward(dt, is_walkable, target - self.position, self.stats["move_speed"])
+
+    def _nearest_player_ref(self, player_refs):
+        """(ref, distance_px) for whichever player in `player_refs` is
+        closest to this enemy right now, or (None, None) if there are none
+        -- aggro/attack-range/chase all target whichever player is nearest."""
+        nearest = None
+        nearest_distance = None
+        for ref in player_refs:
+            dx = ref.hitbox.centerx - self.position.x
+            dy = ref.hitbox.centery - self.position.y
+            distance = math.hypot(dx, dy)
+            if nearest_distance is None or distance < nearest_distance:
+                nearest, nearest_distance = ref, distance
+        return nearest, nearest_distance
 
     def _on_loop_frame_advanced(self):
         if self.state != "attack":
@@ -691,7 +710,7 @@ class Enemy(_WanderingEntity):
             self.frame = 0
         # else state == "death": holds on the last frame forever.
 
-    def update(self, dt, is_walkable, player, player_hitbox):
+    def update(self, dt, is_walkable, player_refs):
         if not self.alive:
             self._advance_animation(dt)
             return
@@ -700,17 +719,13 @@ class Enemy(_WanderingEntity):
             self._advance_animation(dt)
             return
 
-        distance_px = None
-        if player_hitbox is not None:
-            dx = player_hitbox.centerx - self.position.x
-            dy = player_hitbox.centery - self.position.y
-            distance_px = math.hypot(dx, dy)
+        nearest_ref, distance_px = self._nearest_player_ref(player_refs)
 
-        if distance_px is not None and distance_px <= self.stats["attack_range"] * self.tile_size:
+        if nearest_ref is not None and distance_px <= self.stats["attack_range"] * self.tile_size:
             self._enter_state("attack")
-            self.flip = player_hitbox.centerx < self.position.x
-        elif distance_px is not None and distance_px <= self.stats["aggro_range"] * self.tile_size:
-            self._update_chase(dt, is_walkable, player_hitbox)
+            self.flip = nearest_ref.hitbox.centerx < self.position.x
+        elif nearest_ref is not None and distance_px <= self.stats["aggro_range"] * self.tile_size:
+            self._update_chase(dt, is_walkable, nearest_ref.hitbox)
         else:
             self._update_wander(dt, is_walkable)
 
@@ -720,11 +735,17 @@ class Enemy(_WanderingEntity):
             self.state == "attack"
             and self.frame in self.stats["active_attack_frames"]
             and not self._hit_delivered_this_swing
-            and player_hitbox is not None
-            and self.get_attack_hitbox().colliderect(player_hitbox)
         ):
-            player.take_damage(1)
-            self._hit_delivered_this_swing = True
+            # Mirrors the player's own attack, which already hits every
+            # overlapping enemy in one swing rather than just the nearest.
+            attack_hitbox = self.get_attack_hitbox()
+            hit_landed = False
+            for ref in player_refs:
+                if attack_hitbox.colliderect(ref.hitbox):
+                    ref.player.take_damage(1)
+                    hit_landed = True
+            if hit_landed:
+                self._hit_delivered_this_swing = True
 
 
 class EnemyManager(_EntityManager):
@@ -750,13 +771,12 @@ class EnemyManager(_EntityManager):
     def _entities(self, value):
         self.enemies = value
 
-    def update(self, dt, player=None, player_hitbox=None):
+    def update(self, dt, player_refs=()):
         for enemy in self.enemies:
             enemy.update(
                 dt,
-                lambda rect, _enemy=enemy: self._is_free(rect, _enemy, player_hitbox),
-                player,
-                player_hitbox,
+                lambda rect, _enemy=enemy: self._is_free(rect, _enemy, player_refs),
+                player_refs,
             )
 
 
@@ -1023,13 +1043,13 @@ class ProjectileManager:
     def throw_dynamite(self, world_x, world_y, direction):
         self.dynamites.append(ThrownDynamite(world_x, world_y, direction))
 
-    def update(self, dt, player=None, player_hitbox=None):
+    def update(self, dt, player_refs=()):
         for dynamite in self.dynamites:
             dynamite.update(dt)
             if dynamite.exploded:
                 grid_x, grid_y = self.dungeon.world_to_grid(dynamite.position.x, dynamite.position.y)
                 self.dungeon.destroy_area(grid_x, grid_y, dynamite.BLAST_RADIUS_TILES)
-                self._apply_blast_damage(dynamite, player, player_hitbox)
+                self._apply_blast_damage(dynamite, player_refs)
                 self.explosions.append(Explosion(dynamite.position.x, dynamite.position.y))
         self.dynamites = [dynamite for dynamite in self.dynamites if not dynamite.exploded]
 
@@ -1037,13 +1057,13 @@ class ProjectileManager:
             explosion.update(dt)
         self.explosions = [explosion for explosion in self.explosions if not explosion.finished]
 
-    def _apply_blast_damage(self, dynamite, player, player_hitbox):
-        """Deals dynamite.BLAST_DAMAGE to the player (if in this room right
-        now -- player_hitbox is None otherwise, see Dungeon.update) and every
-        live Animal/Enemy in this room, whenever their hitbox center falls
-        within the same circular radius destroy_area just carved into the
-        terrain. No immunity for whoever threw it -- standing too close to
-        your own blast hurts just the same."""
+    def _apply_blast_damage(self, dynamite, player_refs):
+        """Deals dynamite.BLAST_DAMAGE to every player in this room right now
+        (`player_refs` is empty otherwise, see Dungeon.update) and every live
+        Animal/Enemy in this room, whenever their hitbox center falls within
+        the same circular radius destroy_area just carved into the terrain.
+        No immunity for whoever threw it -- standing too close to your own
+        blast hurts just the same."""
         radius_px = dynamite.BLAST_RADIUS_TILES * self.dungeon.tile_size
 
         def _in_blast(hitbox):
@@ -1051,8 +1071,9 @@ class ProjectileManager:
             dy = hitbox.centery - dynamite.position.y
             return dx * dx + dy * dy <= radius_px * radius_px
 
-        if player_hitbox is not None and _in_blast(player_hitbox):
-            player.take_damage(dynamite.BLAST_DAMAGE)
+        for ref in player_refs:
+            if _in_blast(ref.hitbox):
+                ref.player.take_damage(dynamite.BLAST_DAMAGE)
 
         for animal in self.dungeon.animal_manager.animals:
             if animal.alive and _in_blast(animal.get_hitbox()):

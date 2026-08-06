@@ -96,12 +96,12 @@ class Dungeon:
         self.sprite_grid = resolve_sprite_grid(self.logical_grid)
         self.object_manager.prune_invalid()
 
-    def update(self, dt: float, player=None, player_hitbox=None) -> None:
+    def update(self, dt: float, player_refs=()) -> None:
         self.object_manager.update(dt)
-        self.animal_manager.update(dt, player_hitbox=player_hitbox)
-        self.enemy_manager.update(dt, player=player, player_hitbox=player_hitbox)
+        self.animal_manager.update(dt, player_refs=player_refs)
+        self.enemy_manager.update(dt, player_refs=player_refs)
         self.pickup_manager.update(dt)
-        self.projectile_manager.update(dt, player=player, player_hitbox=player_hitbox)
+        self.projectile_manager.update(dt, player_refs=player_refs)
 
     def destroy_area(self, center_x: int, center_y: int, radius_tiles: int) -> None:
         """Carves a circular hole into the terrain -- both FLOOR and WALL

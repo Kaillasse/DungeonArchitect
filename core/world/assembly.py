@@ -13,6 +13,7 @@ import random
 import pygame
 
 from core.world.dungeon import Dungeon
+from core.world.entities import PlayerRef
 from core.world.object_manager import OBJECT_TYPES
 from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DONJONS_DIRECTORY
@@ -270,27 +271,30 @@ class DungeonAssembly:
             target["frame"] = 0
             target["anim_timer"] = 0.0
 
-    def update(self, dt, player=None, player_hitbox=None, player_floor=None):
-        """player_hitbox only ever gets passed down to rooms on player_floor
-        -- an animal/enemy on another floor has no business colliding (or,
-        for enemies, aggroing) with a player who isn't physically there
-        (mirrors locate_room's per-floor scoping). player_hitbox arrives in
-        global coordinates (that's what Explorator/the player use
-        everywhere), but each room's own Dungeon only ever thinks in that
-        room's local coordinates -- same as is_global_cell_walkable
-        converting before delegating to a room's ObjectManager -- so it's
-        shifted back by that room's offset here before being handed down.
-        `player` (the actual object, for Enemy.take_damage) is forwarded
-        as-is -- no coordinate transform needed since only its identity
-        matters here, never its .position (see EnemyManager/Enemy, which
-        only ever read distances from the already-shifted player_hitbox).
+    def update(self, dt, player_refs=(), player_floor=None):
+        """player_refs only ever gets passed down to rooms on player_floor --
+        an animal/enemy on another floor has no business colliding (or, for
+        enemies, aggroing) with a player who isn't physically there (mirrors
+        locate_room's per-floor scoping). Each ref's hitbox arrives in global
+        coordinates (that's what Explorator/the player use everywhere), but
+        each room's own Dungeon only ever thinks in that room's local
+        coordinates -- same as is_global_cell_walkable converting before
+        delegating to a room's ObjectManager -- so it's shifted back by that
+        room's offset here before being handed down. Each ref's `player` (the
+        actual object, for take_damage) is forwarded as-is -- no coordinate
+        transform needed since only its identity matters here, never its
+        .position (see EnemyManager/Enemy, which only ever read distances
+        from the already-shifted hitbox).
         """
         tile_size = Dungeon.TILE_SIZE
         for room in self.rooms:
-            hitbox = None
-            if player_hitbox is not None and room.floor == player_floor:
-                hitbox = player_hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size)
-            room.dungeon.update(dt, player=player, player_hitbox=hitbox)
+            local_refs = ()
+            if room.floor == player_floor:
+                local_refs = [
+                    PlayerRef(ref.player, ref.hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size))
+                    for ref in player_refs
+                ]
+            room.dungeon.update(dt, player_refs=local_refs)
 
     # ------------------------------------------------------------------
     # Rendering -- the active floor is drawn normally (full tiles/objects/
@@ -365,18 +369,18 @@ class DungeonAssembly:
             offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
             room.dungeon.render_foreground(screen, offset_camera, hide_object_types=hide_object_types)
 
-    def render_active_floor_entities(self, screen, camera, active_floor, player):
-        """Y-sorted draw of every live Animal/Enemy on active_floor plus the
-        player: whichever entity's feet (.position.y, in the same
-        world-pixel sense Animal/Enemy/Player.get_hitbox() anchor their
+    def render_active_floor_entities(self, screen, camera, active_floor, players):
+        """Y-sorted draw of every live Animal/Enemy on active_floor plus every
+        player in `players`: whichever entity's feet (.position.y, in the
+        same world-pixel sense Animal/Enemy/Player.get_hitbox() anchor their
         hitbox to) sit lower on screen draws in front, matching how a
         top-down scene actually reads. Call after render(...,
         skip_active_floor_animals=True, skip_active_floor_enemies=True) and
-        before render_active_floor_foreground() -- same slot the player used
-        to occupy alone via a plain player.draw().
+        before render_active_floor_foreground() -- same slot a single player
+        used to occupy alone via a plain player.draw().
 
         An animal's/enemy's .position is local to its own room's Dungeon (no
-        offset baked in, unlike the player's, which is already global -- see
+        offset baked in, unlike a player's, which is already global -- see
         DungeonAssembly.update's docstring), so it's converted to a global y
         here purely for comparison; drawing itself still goes through that
         room's own offset camera, same as every other per-room draw call.
@@ -393,7 +397,8 @@ class DungeonAssembly:
                 global_y = enemy.position.y + room.offset_y * tile_size
                 entries.append((global_y, enemy, offset_camera))
 
-        entries.append((player.position.y, player, camera))
+        for player in players:
+            entries.append((player.position.y, player, camera))
 
         entries.sort(key=lambda entry: entry[0])
         for _, entity, entity_camera in entries:
