@@ -8,17 +8,18 @@ import pygame
 from core.world.dungeon import Dungeon, corner_cells
 from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
-from core.world.entities import Player, PlayerRef
+from core.world.entities import Player, PlayerRef, Animal, Enemy, Pickup, ItemPickup, ThrownDynamite, Explosion
 from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES
 from core.exploration.player_session import PlayerSession
 from core.engine.input import (
-    read_local_keyboard_input,
+    InputState, read_local_keyboard_input,
     read_secondary_keyboard_input, secondary_keyboard_matches_event, SECONDARY_KEYBOARD_BINDINGS,
     read_gamepad_input, gamepad_matches_event,
 )
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
 from core.data.sound_manager import SoundManager
+from core.network import protocol
 
 # Placed objects that are only ever markers during exploration -- a spawn
 # point and each animal's/enemy's placement cell -- and get replaced by a
@@ -599,6 +600,17 @@ class Explorator:
                 state = read_local_keyboard_input(self.settings)
             elif session.input_source_kind == "secondary_keyboard":
                 state = read_secondary_keyboard_input()
+            elif session.input_source_kind == "network":
+                # Server-side (Phase 3): no local device to poll -- reuse
+                # whatever the connection reader thread last decoded from
+                # this client's "input" messages (see
+                # core/network/server.py), or an idle InputState() if
+                # nothing has arrived yet (e.g. the very first tick after
+                # join). requested_actions still flows through
+                # session.pending_actions below like every other source --
+                # the server appends decoded one-shot action ids there
+                # itself, mirroring _handle_session_event's local buffering.
+                state = session.network_input if session.network_input is not None else InputState()
             else:  # "gamepad"
                 state = read_gamepad_input(session.joystick)
             state.requested_actions = tuple(session.pending_actions)
@@ -793,6 +805,14 @@ class Explorator:
         mouse-wheel zoom simply has no effect while this is in control."""
         positions = [session.player.position for session in self.players.values()]
 
+        if len(positions) == 0:
+            # A headless server (Phase 3) keeps ticking the world even
+            # before any client has joined, unlike every local mode, which
+            # always has at least the local player -- there's nothing to
+            # center on yet, so this frame is simply unused (the server
+            # never renders).
+            return 0.0, 0.0, self.camera.zoom
+
         if len(positions) <= 1:
             pos = positions[0]
             return pos.x, pos.y, self.camera.zoom
@@ -818,6 +838,277 @@ class Explorator:
         target_x, target_y, zoom = self._camera_frame()
         self.camera.zoom = zoom
         self.camera.center_on(target_x, target_y, self.screen.get_width(), self.screen.get_height())
+
+    # ------------------------------------------------------
+    # Networking (Phase 3) -- server-side: bringing a connected client's
+    # session into self.players (see core/network/server.py, which owns an
+    # Explorator exactly like this one, minus rendering).
+    # ------------------------------------------------------
+
+    def add_network_session(self, player_id):
+        """A client just connected -- create its PlayerSession, add it to
+        self.players (simulated/rendered exactly like any local session, see
+        Phase 1/2's players dict), and spawn it the same way every other
+        session gets spawned. Mirrors open_room/open_donjon's own per-session
+        spawn loop, just for a single session joining after the fact rather
+        than every session at room-load time."""
+        session = PlayerSession(player_id, "network")
+        self.players[player_id] = session
+
+        if self.assembly is not None:
+            room = self.current_placed_room
+            spawn_local = room.dungeon.get_spawn_world_position() or (
+                room.dungeon.tile_size, room.dungeon.tile_size
+            )
+            tile_size = room.dungeon.tile_size
+            session.player.position.update(
+                room.offset_x * tile_size + spawn_local[0] + self._spawn_offset_x(session, tile_size),
+                room.offset_y * tile_size + spawn_local[1],
+            )
+        else:
+            self._position_player_at_spawn(session)
+
+        return session
+
+    def remove_session(self, player_id):
+        self.players.pop(player_id, None)
+
+    # ------------------------------------------------------
+    # Networking (Phase 3) -- client-side: applying a server snapshot onto
+    # this Explorator's local mirror world instead of simulating it (see
+    # run_networked). No physics/collision is recomputed here -- purely
+    # presentation state, so render()/WorldRenderer/Player.draw/etc need no
+    # changes at all to work off it.
+    # ------------------------------------------------------
+
+    def adopt_local_player_id(self, new_id):
+        """__init__ always creates this Explorator's own local session under
+        id 0 (today's solo-keyboard default) -- re-keys it to whatever
+        player_id the server actually assigned in its "welcome" message,
+        which only coincidentally is 0 (whoever connects first)."""
+        if new_id == self._local_player_id:
+            return
+        session = self.players.pop(self._local_player_id)
+        session.player_id = new_id
+        self.players[new_id] = session
+        self._local_player_id = new_id
+
+    def _dungeon_for_room(self, room_ref):
+        """room_ref is None (single-room mode) or a PlacedRoom.index (see
+        protocol.build_snapshot) -- the same room-identity convention the
+        server used to build this snapshot."""
+        if room_ref is None:
+            return self.dungeon
+        return next((room.dungeon for room in self.assembly.rooms if room.index == room_ref), None)
+
+    @staticmethod
+    def _sync_mirror_list(mirror_map, live_list, entries, factory, updater):
+        """Reconciles one dungeon's live entity list (e.g.
+        animal_manager.animals) against this tick's snapshot entries for it:
+        creates a local mirror object the first time a network id is seen,
+        updates it every time, and drops any mirror whose id no longer
+        appears (despawned/died server-side). `mirror_map` is
+        {network_id: local_object}, persisted across ticks on
+        self._network_mirrors."""
+        seen_ids = set()
+        for entry in entries:
+            seen_ids.add(entry["id"])
+            obj = mirror_map.get(entry["id"])
+            if obj is None:
+                obj = factory(entry)
+                mirror_map[entry["id"]] = obj
+                live_list.append(obj)
+            updater(obj, entry)
+        for stale_id in [network_id for network_id in mirror_map if network_id not in seen_ids]:
+            stale_obj = mirror_map.pop(stale_id)
+            if stale_obj in live_list:
+                live_list.remove(stale_obj)
+
+    @staticmethod
+    def _apply_animal_entry(animal, entry):
+        animal.position.update(entry["x"], entry["y"])
+        animal.state = entry["state"]
+        animal.direction = pygame.Vector2(entry["dir_x"], entry["dir_y"])
+        animal.flip = entry["flip"]
+        animal.frame = entry["frame"]
+        animal.health = entry["health"]
+
+    @staticmethod
+    def _apply_enemy_entry(enemy, entry):
+        enemy.position.update(entry["x"], entry["y"])
+        enemy.state = entry["state"]
+        enemy.direction = pygame.Vector2(entry["dir_x"], entry["dir_y"])
+        enemy.flip = entry["flip"]
+        enemy.frame = entry["frame"]
+        enemy.health = entry["health"]
+        enemy.alive = entry["alive"]
+
+    @staticmethod
+    def _apply_pickup_entry(pickup, entry):
+        pickup.position.update(entry["x"], entry["y"])
+        pickup.state = entry["state"]
+        pickup.frame = entry["frame"]
+
+    @staticmethod
+    def _apply_item_pickup_entry(item_pickup, entry):
+        item_pickup.position.update(entry["x"], entry["y"])
+
+    @staticmethod
+    def _apply_projectile_entry(projectile, entry):
+        projectile.position.update(entry["x"], entry["y"])
+        projectile.frame = entry["frame"]
+
+    def apply_network_snapshot(self, payload):
+        """Client-side only (Phase 3): writes a server snapshot's fields
+        straight onto this Explorator's local mirror world."""
+        self.pvp_enabled = payload["pvp_enabled"]
+        self.victory = payload["victory"]
+        if payload.get("game_over") and self.game_manager.state == GameState.EXPLORATION:
+            self.game_manager.state = GameState.MENU
+
+        seen_players = set()
+        for entry in payload["players"]:
+            seen_players.add(entry["id"])
+            session = self.players.get(entry["id"])
+            if session is None:
+                session = PlayerSession(entry["id"], "network")
+                self.players[entry["id"]] = session
+            player = session.player
+            player.position.update(entry["x"], entry["y"])
+            player.direction = entry["direction"]
+            player.animation = entry["animation"]
+            player.action = entry["action"]
+            player.frame = entry["frame"]
+            player.health = entry["health"]
+        for stale_id in [pid for pid in self.players if pid not in seen_players and pid != self._local_player_id]:
+            del self.players[stale_id]
+
+        if not hasattr(self, "_network_mirrors"):
+            self._network_mirrors = {}  # room_ref -> {"animals": {...}, ...}
+
+        grouped = {}
+        for category in ("animals", "enemies", "pickups", "dynamites", "explosions"):
+            for entry in payload[category]:
+                grouped.setdefault(entry["room"], {}).setdefault(category, []).append(entry)
+
+        for room_ref, categories in grouped.items():
+            dungeon = self._dungeon_for_room(room_ref)
+            if dungeon is None:
+                continue
+            mirrors = self._network_mirrors.setdefault(room_ref, {
+                "animals": {}, "enemies": {}, "pickups": {}, "item_pickups": {},
+                "dynamites": {}, "explosions": {},
+            })
+
+            currency_entries = [e for e in categories.get("pickups", []) if e["kind"] == "currency"]
+            item_entries = [e for e in categories.get("pickups", []) if e["kind"] == "item"]
+
+            self._sync_mirror_list(
+                mirrors["animals"], dungeon.animal_manager.animals, categories.get("animals", []),
+                factory=lambda e, d=dungeon: Animal(e["animal_type"], 0, 0, d),
+                updater=self._apply_animal_entry,
+            )
+            self._sync_mirror_list(
+                mirrors["enemies"], dungeon.enemy_manager.enemies, categories.get("enemies", []),
+                factory=lambda e, d=dungeon: Enemy(e["enemy_type"], 0, 0, d),
+                updater=self._apply_enemy_entry,
+            )
+            self._sync_mirror_list(
+                mirrors["pickups"], dungeon.pickup_manager.pickups, currency_entries,
+                factory=lambda e: Pickup(e["currency_type"], e["x"], e["y"]),
+                updater=self._apply_pickup_entry,
+            )
+            self._sync_mirror_list(
+                mirrors["item_pickups"], dungeon.pickup_manager.item_pickups, item_entries,
+                factory=lambda e: ItemPickup(make_item(e["item_id"]), e["slot"], e["x"], e["y"]),
+                updater=self._apply_item_pickup_entry,
+            )
+            self._sync_mirror_list(
+                mirrors["dynamites"], dungeon.projectile_manager.dynamites, categories.get("dynamites", []),
+                factory=lambda e: ThrownDynamite(e["x"], e["y"], pygame.Vector2()),
+                updater=self._apply_projectile_entry,
+            )
+            self._sync_mirror_list(
+                mirrors["explosions"], dungeon.projectile_manager.explosions, categories.get("explosions", []),
+                factory=lambda e: Explosion(e["x"], e["y"]),
+                updater=self._apply_projectile_entry,
+            )
+
+        for entry in payload["objects"]:
+            dungeon = self._dungeon_for_room(entry["room"])
+            if dungeon is None or entry["index"] >= len(dungeon.object_manager.objects):
+                continue
+            obj = dungeon.object_manager.objects[entry["index"]]
+            obj["activated"] = entry["activated"]
+            obj["open"] = entry["open"]
+            obj["frame"] = entry["frame"]
+
+        for entry in payload["terrain"]:
+            dungeon = self._dungeon_for_room(entry["room"])
+            if dungeon is not None:
+                dungeon.logical_grid = entry["logical_grid"]
+                dungeon.sprite_grid = entry["sprite_grid"]
+
+    def run_networked(self, client):
+        """Client-side main loop for Phase 3's networked play -- the
+        network-driven counterpart to run(): same event handling for
+        QUIT/mouse-wheel-zoom/F3/ESC (TAB has nothing to switch to here, no
+        local editor on a network client), but F4 sends a pvp_toggle request
+        instead of flipping the flag locally (must stay server-authoritative
+        -- it gates real damage), and every frame sends this session's own
+        input to the server and applies whatever snapshot(s) arrived instead
+        of calling update() -- no local simulation of the shared world (the
+        confirmed "thin client, no prediction" decision)."""
+        pygame.display.set_caption("Dungeon Architect - Exploration (reseau)")
+
+        local_session = self.players[self._local_player_id]
+        running = True
+
+        while running:
+            dt = self.clock.tick(60) / 1000  # noqa: F841 -- kept for parity with run(); unused, server owns simulation dt
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.game_manager.running = False
+                    running = False
+                    continue
+
+                if event.type == pygame.MOUSEWHEEL:
+                    mouse_x, mouse_y = pygame.mouse.get_pos()
+                    self.camera.zoom_at(mouse_x, mouse_y, event.y, self.screen.get_width(), self.screen.get_height())
+                    continue
+
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_F3:
+                    self.debug_mode = not self.debug_mode
+                    self._last_debug_message = None
+                    continue
+
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_F4:
+                    client.send(protocol.MSG_PVP_TOGGLE)
+                    continue
+
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    if local_session.inventory_open:
+                        local_session.inventory_open = False
+                    else:
+                        self.game_manager.state = GameState.MENU
+                        running = False
+                    continue
+
+                self._handle_session_event(local_session, event)
+
+            self._read_input()
+            client.send(protocol.MSG_INPUT, **protocol.input_state_to_fields(local_session.input))
+
+            for payload in client.drain():
+                if payload["type"] == protocol.MSG_SNAPSHOT:
+                    self.apply_network_snapshot(payload)
+
+            if self.game_manager.state != GameState.EXPLORATION:
+                break
+
+            self._update_camera()
+            self.render()
 
     def update(self, dt):
 

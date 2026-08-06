@@ -28,10 +28,18 @@ class PlayerSession:
         self.input = InputState()
         # "keyboard" (Settings-driven, player 1 only) | "secondary_keyboard"
         # | "gamepad" (joystick set, see core/engine/input.py's read_*/
-        # *_matches_event pairs) -- which device Explorator._read_input/
-        # _handle_session_event should read this session from.
+        # *_matches_event pairs) | "network" (Phase 3 -- a remote client's
+        # session, driven by network_input below instead of a local device)
+        # -- which device Explorator._read_input/_handle_session_event
+        # should read this session from.
         self.input_source_kind = input_source_kind
         self.joystick = joystick
+        # Latest InputState decoded from that client's most recent "input"
+        # message (None until the first one arrives) -- only ever set/read
+        # for "network" sessions, see Explorator._read_input's "network"
+        # branch (core/network/server.py writes this from its connection
+        # reader thread; the main tick thread only ever reads it).
+        self.network_input = None
         # One-shot action ids (Explorator.ONE_SHOT_ACTIONS) buffered by this
         # session's own event matches during run()'s event loop, applied at
         # the start of the next update() -- per-session since Phase 2 has
