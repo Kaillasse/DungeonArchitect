@@ -491,20 +491,28 @@ def _entity_rect_is_free(dungeon, rect, entities, moving_entity, player_hitbox):
 
 class _EntityManager:
     """Shared shape for AnimalManager/EnemyManager: both own a list of live,
-    per-frame NPCs (stored under LIST_ATTR -- "animals"/"enemies", kept as a
-    plain attribute rather than a property since callers across
-    explorator.py/assembly.py read it directly) spawned from a dungeon's
-    currently-placed objects of ENTITY_TYPES, testing free space and drawing
-    identically. Only update() -- each entity's own per-frame behavior
-    signature -- differs, so that's all subclasses define."""
+    per-frame NPCs spawned from a dungeon's currently-placed objects of
+    ENTITY_TYPES, testing free space and drawing identically. Only update()
+    -- each entity's own per-frame behavior signature -- differs, so that's
+    all subclasses define. Each subclass declares its own list as a plain,
+    statically-visible attribute (self.animals/self.enemies -- callers across
+    explorator.py/assembly.py read those directly) and exposes it to the base
+    class through the `_entities` property, rather than this base class
+    assembling the attribute itself via getattr/setattr on a name string."""
 
     ENTITY_CLASS = None
     ENTITY_TYPES = ()
-    LIST_ATTR = ""
 
     def __init__(self, dungeon):
         self.dungeon = dungeon
-        setattr(self, self.LIST_ATTR, [])
+
+    @property
+    def _entities(self):
+        raise NotImplementedError
+
+    @_entities.setter
+    def _entities(self, value):
+        raise NotImplementedError
 
     def spawn(self):
         """(Re)build the live entity list from the dungeon's currently-placed
@@ -512,19 +520,17 @@ class _EntityManager:
         room -- never during editing, which would reset wandering/chase state
         on every paint stroke, and never by Creator, whose static preview
         only ever shows placed objects' frame-0 icon."""
-        setattr(self, self.LIST_ATTR, [
+        self._entities = [
             self.ENTITY_CLASS(obj["type"], obj["x"], obj["y"], self.dungeon)
             for obj in self.dungeon.object_manager.objects
             if obj["type"] in self.ENTITY_TYPES
-        ])
+        ]
 
     def _is_free(self, rect, moving_entity, player_hitbox):
-        return _entity_rect_is_free(
-            self.dungeon, rect, getattr(self, self.LIST_ATTR), moving_entity, player_hitbox
-        )
+        return _entity_rect_is_free(self.dungeon, rect, self._entities, moving_entity, player_hitbox)
 
     def draw(self, screen, camera):
-        for entity in getattr(self, self.LIST_ATTR):
+        for entity in self._entities:
             entity.draw(screen, camera)
 
 
@@ -539,7 +545,18 @@ class AnimalManager(_EntityManager):
 
     ENTITY_CLASS = Animal
     ENTITY_TYPES = ANIMAL_TYPES
-    LIST_ATTR = "animals"
+
+    def __init__(self, dungeon):
+        super().__init__(dungeon)
+        self.animals = []
+
+    @property
+    def _entities(self):
+        return self.animals
+
+    @_entities.setter
+    def _entities(self, value):
+        self.animals = value
 
     def update(self, dt, player_hitbox=None):
         for animal in self.animals:
@@ -720,7 +737,18 @@ class EnemyManager(_EntityManager):
 
     ENTITY_CLASS = Enemy
     ENTITY_TYPES = ENEMY_TYPES
-    LIST_ATTR = "enemies"
+
+    def __init__(self, dungeon):
+        super().__init__(dungeon)
+        self.enemies = []
+
+    @property
+    def _entities(self):
+        return self.enemies
+
+    @_entities.setter
+    def _entities(self, value):
+        self.enemies = value
 
     def update(self, dt, player=None, player_hitbox=None):
         for enemy in self.enemies:
