@@ -46,9 +46,28 @@ class WorldRenderer:
                skip_foreground_objects=False, show_grid=True, hide_border_cells=None):
         zoom = camera.zoom
         tile_size = dungeon.tile_size
-        tile_px = tile_size * zoom
+        # Snapped to a whole pixel count -- see _get_scaled_tile: every tile
+        # texture at this zoom is exactly tile_px wide/tall. If we instead
+        # positioned each tile with camera.world_to_screen's raw float and
+        # let pygame.blit truncate that per tile, consecutive tiles would
+        # step by floor(tile_px) some of the time and ceil(tile_px) other
+        # times (whenever the true fractional-pixel position crosses an
+        # integer boundary) while the texture itself always stays the same
+        # rounded width -- a 1px gap flickers in wherever the step exceeded
+        # the texture's width. That's the "irregular grid that isn't there
+        # at min/max zoom" bug: min/max zoom happen to land on an exact
+        # integer tile_px (e.g. 32*0.5, 32*4), so there was nothing to round
+        # in the first place; every other zoom level (reached via
+        # Camera.zoom_at's *1.2/0.8 steps) doesn't. Deriving every tile's
+        # screen position from one shared, already-rounded origin plus an
+        # integer multiple of this same tile_px guarantees adjacent tiles
+        # are always exactly contiguous, no matter the zoom.
+        tile_px = round(tile_size * zoom)
         columns = self.tileset.get_width() // TILE_SIZE
         doorway_cells = self._doorway_cells(dungeon)
+
+        origin_x, origin_y = camera.world_to_screen(0, 0)
+        origin_x, origin_y = round(origin_x), round(origin_y)
 
         for y, row in enumerate(dungeon.sprite_grid):
             for x, tile_index in enumerate(row):
@@ -59,11 +78,7 @@ class WorldRenderer:
                     tile_index = DEFAULT_FLOOR_SPRITE
 
                 scaled = self._get_scaled_tile(tile_index, zoom, tile_px, columns)
-
-                world_x = x * tile_size
-                world_y = y * tile_size
-                screen_x, screen_y = camera.world_to_screen(world_x, world_y)
-                screen.blit(scaled, (screen_x, screen_y))
+                screen.blit(scaled, (origin_x + x * tile_px, origin_y + y * tile_px))
 
         self._draw_objects(
             screen, dungeon, camera,
@@ -80,8 +95,7 @@ class WorldRenderer:
                     south_y = y + 1
                     if south_y >= dungeon.height or dungeon.logical_grid[south_y][x] == EMPTY:
                         scaled = self._get_scaled_tile(self.BORDER_TILE_INDEX, zoom, tile_px, columns)
-                        screen_x, screen_y = camera.world_to_screen(x * tile_size, south_y * tile_size)
-                        screen.blit(scaled, (screen_x, screen_y))
+                        screen.blit(scaled, (origin_x + x * tile_px, origin_y + south_y * tile_px))
 
             for gy in range(dungeon.height + 1):
                 world_y = gy * tile_size
