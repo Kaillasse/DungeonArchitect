@@ -185,12 +185,24 @@ class Dungeon:
 
         return True
 
+    def is_void_at(self, grid_x, grid_y) -> bool:
+        """True if (grid_x, grid_y) is out of this dungeon's own bounds or an
+        EMPTY logical cell -- e.g. a hole carved by destroy_area, or simply
+        past the room's edge. Shared by every live entity manager's own
+        void-culling (AnimalManager/EnemyManager/PickupManager.update) and
+        by Explorator._is_void_at's single-room branch, which used to
+        duplicate this exact check locally."""
+        if not (0 <= grid_x < self.width and 0 <= grid_y < self.height):
+            return True
+        return self.logical_grid[grid_y][grid_x] == EMPTY
+
     # ------------------------------------------------------------------
     # Rendu
     # ------------------------------------------------------------------
 
     def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
-               skip_foreground_objects=False, skip_animals=False, skip_enemies=False, show_grid=True):
+               skip_foreground_objects=False, skip_animals=False, skip_enemies=False, show_grid=True,
+               hide_border_cells=None):
         self.renderer.render(
             screen, self, camera,
             spawn_preview=spawn_preview,
@@ -198,6 +210,7 @@ class Dungeon:
             show_link_indicators=show_link_indicators,
             skip_foreground_objects=skip_foreground_objects,
             show_grid=show_grid,
+            hide_border_cells=hide_border_cells,
         )
         if not skip_animals:
             self.animal_manager.draw(screen, camera)

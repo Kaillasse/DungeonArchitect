@@ -14,12 +14,13 @@ class WorldRenderer:
     LINK_INDICATOR_RADIUS = 5
 
     # basictileset.png (6 cols x 5 rows, the only sheet load_tileset ever
-    # resolves to -- no tileset.png exists) -- a decorative ledge/edge tile
-    # drawn one cell south of every non-empty cell whose south neighbor is
-    # EMPTY, purely cosmetic: that cell stays EMPTY in logical_grid, so
-    # Explorator._is_void still treats it as void (the player falls there
-    # same as any other void cell, this just avoids a flat black gap at the
-    # visible edge of a room).
+    # resolves to -- no tileset.png exists) -- a ledge/edge tile drawn one
+    # cell south of every non-empty cell whose south neighbor is EMPTY, only
+    # while show_grid is True (F3 debug -- see render()'s "hide_border_cells"
+    # too): a debug visualization of the logical grid's floor boundary, not
+    # player-facing art, since a void cell is real, walkable-into terrain
+    # (see Explorator._is_void/_attempt_fall) rather than a gap to visually
+    # patch over.
     BORDER_TILE_INDEX = 25
 
     def __init__(self):
@@ -41,7 +42,8 @@ class WorldRenderer:
             self._tile_cache[cache_key] = pygame.transform.scale(tile_surface, (tile_px, tile_px))
         return self._tile_cache[cache_key]
 
-    def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False, skip_foreground_objects=False, show_grid=True):
+    def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
+               skip_foreground_objects=False, show_grid=True, hide_border_cells=None):
         zoom = camera.zoom
         tile_size = dungeon.tile_size
         tile_px = tile_size * zoom
@@ -63,16 +65,6 @@ class WorldRenderer:
                 screen_x, screen_y = camera.world_to_screen(world_x, world_y)
                 screen.blit(scaled, (screen_x, screen_y))
 
-        for y, row in enumerate(dungeon.logical_grid):
-            for x, cell in enumerate(row):
-                if cell == EMPTY:
-                    continue
-                south_y = y + 1
-                if south_y >= dungeon.height or dungeon.logical_grid[south_y][x] == EMPTY:
-                    scaled = self._get_scaled_tile(self.BORDER_TILE_INDEX, zoom, tile_px, columns)
-                    screen_x, screen_y = camera.world_to_screen(x * tile_size, south_y * tile_size)
-                    screen.blit(scaled, (screen_x, screen_y))
-
         self._draw_objects(
             screen, dungeon, camera,
             hide_object_types=hide_object_types,
@@ -80,6 +72,17 @@ class WorldRenderer:
         )
 
         if show_grid:
+            hide_border_cells = hide_border_cells or ()
+            for y, row in enumerate(dungeon.logical_grid):
+                for x, cell in enumerate(row):
+                    if cell == EMPTY or (x, y) in hide_border_cells:
+                        continue
+                    south_y = y + 1
+                    if south_y >= dungeon.height or dungeon.logical_grid[south_y][x] == EMPTY:
+                        scaled = self._get_scaled_tile(self.BORDER_TILE_INDEX, zoom, tile_px, columns)
+                        screen_x, screen_y = camera.world_to_screen(x * tile_size, south_y * tile_size)
+                        screen.blit(scaled, (screen_x, screen_y))
+
             for gy in range(dungeon.height + 1):
                 world_y = gy * tile_size
                 p1 = camera.world_to_screen(0, world_y)

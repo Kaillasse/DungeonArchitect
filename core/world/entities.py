@@ -534,6 +534,13 @@ class _EntityManager:
     def _is_free(self, rect, moving_entity, player_refs):
         return _entity_rect_is_free(self.dungeon, rect, self._entities, moving_entity, player_refs)
 
+    def _is_over_void(self, entity):
+        """True if `entity`'s feet position now sits over an EMPTY cell --
+        destroyed terrain (see Dungeon.destroy_area) or simply having
+        wandered off the room's edge. Shared by AnimalManager/EnemyManager's
+        own per-frame void-culling (see their update())."""
+        return self.dungeon.is_void_at(*self.dungeon.world_to_grid(entity.position.x, entity.position.y))
+
     def draw(self, screen, camera):
         for entity in self._entities:
             entity.draw(screen, camera)
@@ -570,8 +577,11 @@ class AnimalManager(_EntityManager):
                 lambda rect, _animal=animal: self._is_free(rect, _animal, player_refs),
             )
         # No death animation to play out (unlike Enemy) -- a dead animal
-        # just disappears the moment its health runs out.
-        self.animals = [animal for animal in self.animals if animal.alive]
+        # just disappears the moment its health runs out, same as one that's
+        # wandered over void (destroyed terrain, or off the edge of the
+        # room) -- there's no "falling" animation for a wandering NPC,
+        # unlike the player (see Explorator._attempt_fall).
+        self.animals = [animal for animal in self.animals if animal.alive and not self._is_over_void(animal)]
 
 
 class Enemy(_WanderingEntity):
@@ -753,8 +763,11 @@ class EnemyManager(_EntityManager):
     objects (ENEMY_TYPES) -- mirrors AnimalManager's shape exactly (see
     _EntityManager/AnimalManager's docstrings for why this stays a separate
     list rather than folding into ObjectManager.objects). Unlike
-    AnimalManager.update, a dead Enemy is never filtered out here -- it stays
-    to play out its death animation and hold on the last frame."""
+    AnimalManager.update, a dead Enemy is never filtered out for having 0
+    health -- it stays to play out its death animation and hold on the last
+    frame. One standing over void is still removed outright, though (see
+    update()) -- there's no sensible corpse for something that fell through
+    the floor."""
 
     ENTITY_CLASS = Enemy
     ENTITY_TYPES = ENEMY_TYPES
@@ -778,6 +791,7 @@ class EnemyManager(_EntityManager):
                 lambda rect, _enemy=enemy: self._is_free(rect, _enemy, player_refs),
                 player_refs,
             )
+        self.enemies = [enemy for enemy in self.enemies if not self._is_over_void(enemy)]
 
 
 def _advance_frame_once(entity, dt, duration, frame_count):
@@ -912,8 +926,19 @@ class PickupManager:
     def update(self, dt):
         for pickup in self.pickups:
             pickup.update(dt)
-        self.pickups = [pickup for pickup in self.pickups if not pickup.finished]
-        self.item_pickups = [pickup for pickup in self.item_pickups if not pickup.collected]
+        # A pickup sitting where the terrain got destroyed out from under it
+        # (see Dungeon.destroy_area) falls through and is lost, same as
+        # every other live entity's void-culling (AnimalManager/
+        # EnemyManager) -- ground loot has no "recover it" mechanic.
+        self.pickups = [
+            pickup for pickup in self.pickups if not pickup.finished and not self._is_over_void(pickup)
+        ]
+        self.item_pickups = [
+            pickup for pickup in self.item_pickups if not pickup.collected and not self._is_over_void(pickup)
+        ]
+
+    def _is_over_void(self, pickup):
+        return self.dungeon.is_void_at(*self.dungeon.world_to_grid(pickup.position.x, pickup.position.y))
 
     def collect(self, player_hitbox, inventory):
         """Credits inventory.currency[pickup.currency_type] += 1 the instant

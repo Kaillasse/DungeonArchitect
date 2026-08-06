@@ -16,7 +16,6 @@ from core.engine.input import (
     read_secondary_keyboard_input, secondary_keyboard_matches_event, SECONDARY_KEYBOARD_BINDINGS,
     read_gamepad_input, gamepad_matches_event,
 )
-from core.editor.autotile import EMPTY
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
 from core.data.sound_manager import SoundManager
@@ -68,6 +67,12 @@ class Explorator:
         # grid is normally only useful while editing, not exploring.
         self.debug_mode = False
         self._last_debug_message = None
+
+        # PvP (F4 toggles, separate from F3's debug_mode -- see run()): off
+        # by default, since normal co-op play shouldn't have players
+        # accidentally damaging each other. When on, _resolve_player_attacks
+        # also checks every other session's hitbox.
+        self.pvp_enabled = False
 
         self.grid_offset_x = 0
         self.grid_offset_y = 0
@@ -485,9 +490,7 @@ class Explorator:
                 grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
             ) is None
 
-        if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
-            return True
-        return self.dungeon.logical_grid[grid_y][grid_x] == EMPTY
+        return self.dungeon.is_void_at(grid_x, grid_y)
 
     def _attempt_fall(self, session):
         """Called once session's player's feet actually end up over void (see
@@ -719,15 +722,25 @@ class Explorator:
 
     def _resolve_player_attacks(self):
         """Every session's attack, checked against the same one
-        _visible_enemies_global() snapshot (computed once, shared across
-        sessions -- was already implicitly frame-shared with 1 player)."""
+        _visible_enemies_global()/_visible_animals_global() snapshots
+        (computed once, shared across sessions -- was already implicitly
+        frame-shared with 1 player). Animals take damage the same as
+        enemies (no loot table of their own, so no _spawn_loot call for
+        them) -- previously only enemies were ever checked here, so a
+        melee swing could never actually kill an animal, only a dynamite
+        blast could (see ProjectileManager._apply_blast_damage).
+        self.pvp_enabled additionally checks every *other* session's hitbox
+        -- off by default (see run()'s F4 toggle), since normal co-op play
+        shouldn't have players accidentally hurting each other."""
         enemies = self._visible_enemies_global()
+        animals = self._visible_animals_global()
         for session in self.players.values():
             player = session.player
             if not player.is_attack_active():
                 continue
             attack_hitbox = player.get_attack_hitbox()
             hit_landed = False
+
             for enemy, enemy_rect, enemy_dungeon in enemies:
                 if attack_hitbox.colliderect(enemy_rect):
                     was_alive = enemy.alive
@@ -735,6 +748,20 @@ class Explorator:
                     hit_landed = True
                     if was_alive and not enemy.alive:
                         self._spawn_loot(enemy, enemy_dungeon)
+
+            for animal, animal_rect in animals:
+                if attack_hitbox.colliderect(animal_rect):
+                    animal.take_damage(1)
+                    hit_landed = True
+
+            if self.pvp_enabled:
+                for other_session in self.players.values():
+                    if other_session is session:
+                        continue
+                    if attack_hitbox.colliderect(other_session.player.get_hitbox()):
+                        other_session.player.take_damage(1)
+                        hit_landed = True
+
             if hit_landed:
                 player._hit_delivered_this_swing = True
 
@@ -1079,6 +1106,11 @@ class Explorator:
                     self.debug_mode = not self.debug_mode
                     self._last_debug_message = None
                     print(f"[debug] debug mode {'ON' if self.debug_mode else 'OFF'} (grid + hitboxes)")
+                    continue
+
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_F4:
+                    self.pvp_enabled = not self.pvp_enabled
+                    print(f"[debug] PvP {'ON' if self.pvp_enabled else 'OFF'} (players can damage each other)")
                     continue
 
                 # ESC is a physical-keyboard-only gesture -- scoped to player

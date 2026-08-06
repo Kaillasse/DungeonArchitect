@@ -407,7 +407,20 @@ class DungeonAssembly:
     def _render_floor(self, screen, camera, floor, hide_object_types=None, skip_foreground=False,
                        skip_animals=False, skip_enemies=False, show_grid=True):
         tile_size = Dungeon.TILE_SIZE
-        for room in self.rooms_on_floor(floor):
+        rooms = self.rooms_on_floor(floor)
+
+        # Every FLOOR cell any room on this floor claims, in global
+        # coordinates -- used below to tell a genuine void edge (show the
+        # debug border ledge) apart from a _border_edges seam glued flush
+        # against another room's floor (suppress it there instead, or it'd
+        # paint a false ledge over that neighboring room's own floor).
+        floor_floor_cells = set()
+        for room in rooms:
+            for global_cell, cell_type in room.occupied_cells().items():
+                if cell_type == FLOOR:
+                    floor_floor_cells.add(global_cell)
+
+        for room in rooms:
             offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
             room.dungeon.render(
                 screen, offset_camera,
@@ -416,7 +429,23 @@ class DungeonAssembly:
                 skip_animals=skip_animals,
                 skip_enemies=skip_enemies,
                 show_grid=show_grid,
+                hide_border_cells=self._south_seam_cells(room, floor_floor_cells),
             )
+
+    @staticmethod
+    def _south_seam_cells(room, floor_floor_cells):
+        """Local (x, height-1) south-edge FLOOR cells of `room` whose global
+        south neighbor is FLOOR belonging to some room on the same floor --
+        a genuine _border_edges seam, not real void (see _render_floor)."""
+        height, width = room.dungeon.height, room.dungeon.width
+        grid = room.dungeon.logical_grid
+        seam_cells = set()
+        for x in range(width):
+            if grid[height - 1][x] != FLOOR:
+                continue
+            if room.to_global(x, height) in floor_floor_cells:
+                seam_cells.add((x, height - 1))
+        return seam_cells
 
     def _render_floor_shadow(self, screen, camera, floor, active_floor, player_world_pos=None):
         """player_world_pos only ever matters for a floor ABOVE active_floor
