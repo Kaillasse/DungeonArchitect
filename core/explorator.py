@@ -715,7 +715,6 @@ class Explorator:
                 player_grid_x, player_grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
             )
         else:
-            self.dungeon.update(dt, player=self.player, player_hitbox=hitbox)
             player_grid_x, player_grid_y = self.dungeon.world_to_grid(
                 hitbox.centerx,
                 hitbox.bottom - 1,
