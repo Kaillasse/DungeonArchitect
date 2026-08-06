@@ -13,7 +13,8 @@ gates real damage).
 
 Server -> client: "welcome" (assigned player_id + which room/donjon to load
 locally), "snapshot" (every tick -- see build_snapshot), "leave" (a session
-disconnected)."""
+disconnected), "server_full" (Phase 5 -- sent instead of "welcome" and the
+connection closed right after, when --max-players is already reached)."""
 
 from __future__ import annotations
 
@@ -28,6 +29,15 @@ MSG_PVP_TOGGLE = "pvp_toggle"
 MSG_WELCOME = "welcome"
 MSG_SNAPSHOT = "snapshot"
 MSG_LEAVE = "leave"
+MSG_SERVER_FULL = "server_full"
+
+_KNOWN_MESSAGE_TYPES = (MSG_JOIN, MSG_INPUT, MSG_PVP_TOGGLE)
+
+# Phase 5 hardening: a client's raw axis input is never meant to exceed ~1.4
+# (two keys held at once, unnormalized -- see read_local_keyboard_input).
+# This is a generous sanity bound, not a gameplay constraint -- it exists to
+# reject obviously-bogus values, not to second-guess legitimate input.
+MAX_INPUT_AXIS_MAGNITUDE = 10.0
 
 
 def encode(msg_type: str, **fields) -> bytes:
@@ -49,6 +59,42 @@ def decode(line) -> dict:
     if isinstance(line, bytes):
         line = line.decode("utf-8")
     return json.loads(line)
+
+
+def validate_message(payload) -> None:
+    """Phase 5 hardening: raises ValueError/TypeError if `payload` isn't a
+    well-formed message this protocol understands. Called by the server's
+    per-connection reader thread on every decoded line (GameServer._handle_
+    connection), *before* it's ever queued for the shared tick thread -- so a
+    client can't crash or feed garbage into the simulation just by sending
+    a syntactically-valid-JSON-but-nonsensical payload. Deliberately doesn't
+    check `requested_actions` entries against Explorator.ONE_SHOT_ACTIONS --
+    that would need importing from core.exploration.explorator, which
+    already imports this module (circular), and Player.play_action already
+    silently ignores an unrecognized action id -- only the wire shape (a
+    list of strings) is this layer's concern."""
+    if not isinstance(payload, dict):
+        raise TypeError(f"message is not a JSON object: {payload!r}")
+
+    msg_type = payload.get("type")
+    if msg_type not in _KNOWN_MESSAGE_TYPES:
+        raise ValueError(f"unknown message type: {msg_type!r}")
+
+    if msg_type == MSG_INPUT:
+        for key in ("move_x", "move_y"):
+            value = payload.get(key, 0.0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{key} must be a number, got {value!r}")
+            if abs(value) > MAX_INPUT_AXIS_MAGNITUDE:
+                raise ValueError(f"{key} out of range: {value!r}")
+
+        actions = payload.get("requested_actions", [])
+        if not isinstance(actions, list) or not all(isinstance(a, str) for a in actions):
+            raise TypeError(f"requested_actions must be a list of strings, got {actions!r}")
+
+        seq = payload.get("seq")
+        if seq is not None and (isinstance(seq, bool) or not isinstance(seq, int)):
+            raise TypeError(f"seq must be an int, got {seq!r}")
 
 
 def input_state_to_fields(input_state: InputState) -> dict:

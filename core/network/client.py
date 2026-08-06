@@ -15,6 +15,12 @@ import time
 from core.network import protocol
 
 
+class ServerFullError(Exception):
+    """Raised by wait_for_welcome() when the server answers "server_full"
+    (Phase 5's --max-players) instead of "welcome" -- lets the caller react
+    immediately instead of waiting out the generic TimeoutError."""
+
+
 class NetworkClient:
     def __init__(self, host, port, name="player"):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -33,7 +39,10 @@ class NetworkClient:
         """Blocks (briefly) for the server's initial "welcome" message --
         called once, before the render loop starts, so the caller knows
         which room to load locally and which player_id is its own (see
-        Explorator.adopt_local_player_id)."""
+        Explorator.adopt_local_player_id). Raises ServerFullError right away
+        if the server answers "server_full" instead (Phase 5's
+        --max-players) -- no need to wait out the full timeout for that,
+        the server already gave a definitive answer."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -42,6 +51,8 @@ class NetworkClient:
                 continue
             if payload["type"] == protocol.MSG_WELCOME:
                 return payload
+            if payload["type"] == protocol.MSG_SERVER_FULL:
+                raise ServerFullError("Server is full")
         raise TimeoutError("No welcome message received from server")
 
     def send(self, msg_type, **fields):

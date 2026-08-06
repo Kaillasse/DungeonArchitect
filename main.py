@@ -32,6 +32,7 @@ def parse_args():
     room_source = parser.add_mutually_exclusive_group()
     room_source.add_argument("--room", help="Server: room to host, from assets/rooms")
     room_source.add_argument("--donjon", help="Server: donjon to host, from assets/donjons")
+    parser.add_argument("--max-players", type=int, default=4, help="Server: max simultaneous connections (default 4)")
     parser.add_argument("--name", default="player", help="Client: display name sent to the server on join")
 
     args = parser.parse_args()
@@ -52,7 +53,7 @@ def run_local():
 def run_server(args):
     from core.network.server import GameServer
 
-    server = GameServer(args.port, room=args.room, donjon=args.donjon)
+    server = GameServer(args.port, room=args.room, donjon=args.donjon, max_players=args.max_players)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -60,7 +61,7 @@ def run_server(args):
 
 
 def run_client(args):
-    from core.network.client import NetworkClient
+    from core.network.client import NetworkClient, ServerFullError
     from core.engine.gamestate import GameState
 
     host, _, port_str = args.connect.partition(":")
@@ -79,7 +80,7 @@ def run_client(args):
     client = NetworkClient(host, port, name=args.name)
     try:
         welcome = client.wait_for_welcome()
-    except TimeoutError as exc:
+    except (TimeoutError, ServerFullError) as exc:
         print(f"[client] {exc}")
         client.close()
         return
