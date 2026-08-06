@@ -25,13 +25,6 @@ class ObjectTool:
 
 
 
-    def set_type(self, object_type):
-
-        self.object_type = object_type
-
-
-        self.timer = 0
-
     def handle_event(self, event):
 
         if not self.dragging:
@@ -40,13 +33,6 @@ class ObjectTool:
         if event.type == pygame.MOUSEMOTION:
 
             self.position.update(event.pos)
-
-
-    def reset(self):
-
-        self.position = self.origin.copy()
-        self.dragging = False
-        self.timer = 0
 
     def draw(self, screen):
 

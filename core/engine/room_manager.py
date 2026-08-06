@@ -17,9 +17,6 @@ class RoomManager:
     def save(self, name):
         self.grid.save_to_json(name)
 
-    def load(self, name):
-        self.grid.load_from_json(name)
-
     def delete(self, name):
         path = ROOMS_DIRECTORY / f"{name}.json"
         if path.exists():

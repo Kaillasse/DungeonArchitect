@@ -10,7 +10,7 @@ from core.world.assembly import load_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player
 from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES
-from core.world.inventory import Inventory, Item
+from core.world.inventory import Inventory
 from core.inventory_ui import InventoryPanel
 from core.editor.autotile import EMPTY
 from core.engine.gamestate import GameState
@@ -89,13 +89,6 @@ class Explorator:
         # -----------------------------
 
         self.inventory = Inventory()
-        # Objets de test TEMPORAIRES pour vérifier visuellement le panel --
-        # aucun système de loot/ramassage n'existe encore ; à retirer une
-        # fois qu'un vrai système d'objets existe.
-        self.inventory.main_slots["attack"] = Item("torch_test", "Torche (test)", "tiles/Torch Yellow.png")
-        self.inventory.grid_slots[0] = Item("vase_test", "Vase (test)", "tiles/Vase.png")
-        self.inventory.grid_slots[7] = Item("button_test", "Bouton (test)", "tiles/Button.png")
-
         self.inventory_panel = InventoryPanel(self.inventory)
         self.inventory_open = False
 
@@ -399,6 +392,28 @@ class Explorator:
         self._last_debug_message = None  # unblocked -- next block (even the same reason) should log again
         return True
 
+    @staticmethod
+    def _feet_grid_cell(rect):
+        """The grid cell under a hitbox's feet anchor (centerx, bottom-1) --
+        the single-point convention shared by every void/room-transition/
+        collision check in this file, as opposed to is_rect_walkable's
+        4-corner check."""
+        return int(rect.centerx // Dungeon.TILE_SIZE), int((rect.bottom - 1) // Dungeon.TILE_SIZE)
+
+    def _update_world(self, dt, hitbox):
+        """Advances the room(s) the player can currently affect -- objects,
+        animals/enemies, pickups -- via whichever of assembly/single-dungeon
+        mode is active. Shared by the frozen victory/inventory tick and the
+        normal per-frame update, which additionally runs button-trigger
+        checks this helper deliberately leaves out (not meaningful while
+        input is frozen)."""
+        if self.assembly is not None:
+            self.assembly.update(
+                dt, player=self.player, player_hitbox=hitbox, player_floor=self.current_placed_room.floor
+            )
+        else:
+            self.dungeon.update(dt, player=self.player, player_hitbox=hitbox)
+
     def _is_cell_walkable(self, grid_x, grid_y):
         """Real wall/closed-door/etc. walkability for a single global cell on
         the player's current floor -- ignores void (see _is_void_at, checked
@@ -406,12 +421,9 @@ class Explorator:
         checked separately), so it's exactly the "is there a real obstacle
         here" half of the corner check."""
         if self.assembly is not None:
-            room = self.assembly.locate_room(
+            return self.assembly.is_global_cell_walkable(
                 grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
             )
-            if room is None:
-                return False
-            return room.dungeon.object_manager.is_cell_walkable(grid_x - room.offset_x, grid_y - room.offset_y)
         return self.dungeon.object_manager.is_cell_walkable(grid_x, grid_y)
 
     def _debug_log(self, label, reason):
@@ -430,8 +442,7 @@ class Explorator:
         check_button_trigger, not the 4-corner check is_rect_walkable uses --
         falling is about where the player's feet are, not a strict hitbox
         overlap test."""
-        grid_x = int(rect.centerx // Dungeon.TILE_SIZE)
-        grid_y = int((rect.bottom - 1) // Dungeon.TILE_SIZE)
+        grid_x, grid_y = self._feet_grid_cell(rect)
         return self._is_void_at(grid_x, grid_y)
 
     def _is_void_at(self, grid_x, grid_y):
@@ -457,8 +468,7 @@ class Explorator:
             return
 
         hitbox = self.player.get_hitbox()
-        grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
-        grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
+        grid_x, grid_y = self._feet_grid_cell(hitbox)
         current_floor = self.current_placed_room.floor
 
         for floor in sorted((f for f in self.assembly.floors() if f < current_floor), reverse=True):
@@ -500,8 +510,7 @@ class Explorator:
         can't contradict it -- at worst it falls through to the same
         WALL-halo match resolve_room_transition already produced."""
         hitbox = self.player.get_hitbox()
-        grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
-        grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
+        grid_x, grid_y = self._feet_grid_cell(hitbox)
 
         self.current_placed_room, self._last_door_obj = self.assembly.resolve_room_transition(
             self.current_placed_room, self._last_door_obj, grid_x, grid_y
@@ -554,13 +563,7 @@ class Explorator:
             if self.player.action is None:
                 self.player.animation = "idle"
             self.player.update(dt)
-            hitbox = self.player.get_hitbox()
-            if self.assembly is not None:
-                self.assembly.update(
-                    dt, player=self.player, player_hitbox=hitbox, player_floor=self.current_placed_room.floor
-                )
-            else:
-                self.dungeon.update(dt, player=self.player, player_hitbox=hitbox)
+            self._update_world(dt, self.player.get_hitbox())
             return
 
         keys = pygame.key.get_pressed()
@@ -704,13 +707,10 @@ class Explorator:
         # -----------------------------
 
         hitbox = self.player.get_hitbox()
+        self._update_world(dt, hitbox)
 
         if self.assembly is not None:
-            self.assembly.update(
-                dt, player=self.player, player_hitbox=hitbox, player_floor=self.current_placed_room.floor
-            )
-            player_grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
-            player_grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
+            player_grid_x, player_grid_y = self._feet_grid_cell(hitbox)
             self.assembly.check_button_trigger(
                 player_grid_x, player_grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
             )
@@ -857,8 +857,7 @@ class Explorator:
 
     def _draw_debug_void_grid(self):
         hitbox = self.player.get_hitbox()
-        center_grid_x = int(hitbox.centerx // Dungeon.TILE_SIZE)
-        center_grid_y = int((hitbox.bottom - 1) // Dungeon.TILE_SIZE)
+        center_grid_x, center_grid_y = self._feet_grid_cell(hitbox)
         tile_size = Dungeon.TILE_SIZE
         radius = self.DEBUG_VOID_RADIUS_TILES
 

@@ -171,6 +171,15 @@ class BorderManager:
         surface = font.render(text, True, color)
         screen.blit(surface, (rect.centerx - surface.get_width() / 2, rect.centery - surface.get_height() / 2))
 
+    ENABLED_COLOR = (255, 255, 255)
+    DISABLED_COLOR = (110, 110, 110)
+
+    def draw_enabled_label(self, screen, rect, font, text, enabled):
+        """draw_centered_label, greyed out when `enabled` is False -- the
+        "Valider"/"Generer" confirm-button pattern repeated across
+        RoomPanelUI, GeneratorPanelUI, and Menu's room-picker."""
+        self.draw_centered_label(screen, rect, font, text, self.ENABLED_COLOR if enabled else self.DISABLED_COLOR)
+
 
 # ---------------------------------------------------------------------
 # Border picker (Settings > Bordure)

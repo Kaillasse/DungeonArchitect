@@ -329,8 +329,7 @@ class RoomPanelUI:
         self.browser.render(screen)
 
         enabled = self.browser.selected_name is not None
-        color = (255, 255, 255) if enabled else (110, 110, 110)
-        self.border.draw_centered_label(screen, self.confirm_rect, self.font, "Valider", color)
+        self.border.draw_enabled_label(screen, self.confirm_rect, self.font, "Valider", enabled)
 
 
 # ---------------------------------------------------------------------
@@ -421,8 +420,7 @@ class GeneratorPanelUI:
         self.border.draw_centered_label(screen, self.plus_rect, self.font, "+")
 
         enabled = bool(self.pool_browser.selected_names)
-        color = (255, 255, 255) if enabled else (110, 110, 110)
-        self.border.draw_centered_label(screen, self.generate_rect, self.font, "Generer", color)
+        self.border.draw_enabled_label(screen, self.generate_rect, self.font, "Generer", enabled)
 
         if self.status_text:
             status = self.font.render(self.status_text, True, (200, 200, 200))

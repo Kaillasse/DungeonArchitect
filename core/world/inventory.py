@@ -1,7 +1,7 @@
 """Minimal inventory data model: just the structure InventoryPanel reads to
-draw itself. No add/remove/equip logic yet -- there's no loot/pickup system
-in the game to drive it, so this is intentionally a shell (see CLAUDE.md
-roadmap for the "coquille" scope decision)."""
+draw itself, plus main_slots/currency, which PickupManager.collect mutates
+directly. grid_slots has no producer yet -- nothing currently drops loot
+into the 15-slot general inventory, only into a main_slot or currency."""
 
 from __future__ import annotations
 

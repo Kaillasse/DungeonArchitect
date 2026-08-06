@@ -12,7 +12,7 @@ import random
 
 import pygame
 
-from core.world.dungeon import Dungeon, corner_cells
+from core.world.dungeon import Dungeon
 from core.world.object_manager import OBJECT_TYPES
 from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DONJONS_DIRECTORY
@@ -225,13 +225,6 @@ class DungeonAssembly:
         if room is None:
             return False
         return room.dungeon.object_manager.is_cell_walkable(global_x - room.offset_x, global_y - room.offset_y)
-
-    def is_rect_walkable(self, rect, floor, prefer_room=None):
-        for grid_x, grid_y in corner_cells(rect, Dungeon.TILE_SIZE):
-            if not self.is_global_cell_walkable(grid_x, grid_y, floor, prefer_room=prefer_room):
-                return False
-
-        return True
 
     def check_button_trigger(self, global_x, global_y, floor, prefer_room=None):
         """Assembly-aware equivalent of ObjectManager.check_button_trigger -- resolves

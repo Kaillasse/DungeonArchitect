@@ -377,8 +377,7 @@ class Menu:
 
             confirm_rect = self._room_confirm_rect()
             enabled = self.room_browser.selected_name is not None
-            color = (255, 255, 255) if enabled else (110, 110, 110)
-            self.border.draw_centered_label(self.screen, confirm_rect, self.option_font, "Valider", color)
+            self.border.draw_enabled_label(self.screen, confirm_rect, self.option_font, "Valider", enabled)
 
             back_rect = self._room_back_rect()
             self.border.draw_centered_label(self.screen, back_rect, self.option_font, "Retour")

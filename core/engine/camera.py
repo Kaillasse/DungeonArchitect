@@ -9,10 +9,6 @@ class Camera:
         self.max_zoom = float(max_zoom)
         self.zoom = float(zoom)
 
-    def set_zoom(self, zoom: float):
-        self.zoom = max(self.min_zoom, min(self.max_zoom, float(zoom)))
-        return self.zoom
-
     def zoom_at(self, screen_x: float, screen_y: float, delta: float = 0.0, screen_width: float | None = None, screen_height: float | None = None):
         if delta == 0:
             return self.zoom
@@ -49,6 +45,3 @@ class Camera:
         self.x = world_x - screen_width / (2 * self.zoom)
         self.y = world_y - screen_height / (2 * self.zoom)
         return self.x, self.y
-
-    def world_to_screen_vector(self, world_pos):
-        return self.world_to_screen(world_pos.x, world_pos.y)

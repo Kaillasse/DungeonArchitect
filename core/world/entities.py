@@ -12,29 +12,30 @@ from core.world.object_manager import (
     load_dynamite_frames, load_explosion_frames,
 )
 
-class SpriteAnimation:
-    def __init__(self, image, frame_w, frame_h, animations):
-        self.frames = []
+def _draw_cached_sprite(screen, camera, cache, key_prefix, sprite, position, frame_w, frame_h, flip=False, anchor_feet=False):
+    """Scale+cache `sprite` at the camera's current zoom and blit it in world
+    space. `key_prefix` plus a zoom bucket forms the cache key -- shared by
+    every live entity/VFX's draw() (Player, Animal/Enemy, Pickup/ItemPickup,
+    ThrownDynamite, Explosion), which otherwise each re-derive this
+    identically. `anchor_feet=True` anchors at (bottom-center) == position,
+    matching a live entity's feet; the default (center) matches ground
+    VFX/pickups."""
+    render_scale = camera.zoom * WORLD_SCALE
+    zoom_key = max(1, int(round(render_scale * 100)))
+    cache_key = key_prefix + (zoom_key,)
+    if cache_key not in cache:
+        scaled = pygame.transform.scale_by(sprite, render_scale)
+        if flip:
+            scaled = pygame.transform.flip(scaled, True, False)
+        cache[cache_key] = scaled
+    scaled = cache[cache_key]
 
-        cols = image.get_width() // frame_w
-        rows = image.get_height() // frame_h
+    top_frac = 1.0 if anchor_feet else 0.5
+    sprite_left_world = position.x - frame_w * WORLD_SCALE / 2
+    sprite_top_world = position.y - frame_h * WORLD_SCALE * top_frac
+    sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
+    screen.blit(scaled, (int(sx), int(sy)))
 
-        for y in range(rows):
-            for x in range(cols):
-                rect = pygame.Rect(
-                    x * frame_w,
-                    y * frame_h,
-                    frame_w,
-                    frame_h
-                )
-                self.frames.append(image.subsurface(rect).convert_alpha())
-
-        self.animations = animations
-
-        self.current = "idle"
-
-        self.frame = 0
-        self.timer = 0
 
 class Player:
 
@@ -279,23 +280,13 @@ class Player:
     def draw(self, screen, camera):
         direction, flip = self.get_sprite_direction()
         frames = self._frames_for(self.animation, direction)
-        base_sprite = frames[min(self.frame, len(frames) - 1)]
-        if flip:
-            base_sprite = pygame.transform.flip(base_sprite, True, False)
-
-        render_scale = camera.zoom * WORLD_SCALE
-        zoom_key = max(1, int(round(render_scale * 100)))
-        cache_key = (self.animation, direction, flip,self.frame, zoom_key)
-        if cache_key not in self._render_cache:
-            scaled = pygame.transform.scale_by(base_sprite, render_scale)
-            self._render_cache[cache_key] = scaled
-        sprite = self._render_cache[cache_key]
-
-        sprite_left_world = self.position.x - base_sprite.get_width() * WORLD_SCALE / 2
-        sprite_top_world = self.position.y - base_sprite.get_height() * WORLD_SCALE
-        sprite_screen_x, sprite_screen_y = camera.world_to_screen(sprite_left_world, sprite_top_world)
-
-        screen.blit(sprite, (int(sprite_screen_x), int(sprite_screen_y)))
+        sprite = frames[min(self.frame, len(frames) - 1)]
+        _draw_cached_sprite(
+            screen, camera, self._render_cache,
+            (self.animation, direction, flip, self.frame),
+            sprite, self.position, sprite.get_width(), sprite.get_height(),
+            flip=flip, anchor_feet=True,
+        )
 
 
 class _WanderingEntity:
@@ -340,6 +331,19 @@ class _WanderingEntity:
         else:
             self.direction = pygame.Vector2()
             self.state_timer = random.uniform(*self.IDLE_DURATION)
+
+    def _wander_tick(self, dt, is_walkable, speed):
+        """Ambient idle/move(ment) alternation on a random timer: shared by
+        Animal.update and Enemy._update_wander. Doesn't call
+        _advance_animation -- callers do that themselves, since Enemy needs
+        to regardless of which state (wander/chase/attack) it lands in this
+        frame."""
+        self.state_timer -= dt
+        if self.state_timer <= 0:
+            self._enter_wander_state(self.MOVE_STATE_NAME if self.state == "idle" else "idle")
+
+        if self.state == self.MOVE_STATE_NAME:
+            self._move_toward(dt, is_walkable, self.direction, speed)
 
     def _move_toward(self, dt, is_walkable, direction, speed):
         """Per-axis collision-tested movement toward `direction` (any
@@ -398,22 +402,12 @@ class _WanderingEntity:
     def draw(self, screen, camera):
         frames = self.frames[self.state]
         sprite = frames[min(self.frame, len(frames) - 1)]
-
-        render_scale = camera.zoom * WORLD_SCALE
-        zoom_key = max(1, int(round(render_scale * 100)))
-        cache_key = (self.state, self.flip, self.frame, zoom_key)
-        if cache_key not in self._render_cache:
-            scaled = pygame.transform.scale_by(sprite, render_scale)
-            if self.flip:
-                scaled = pygame.transform.flip(scaled, True, False)
-            self._render_cache[cache_key] = scaled
-        sprite = self._render_cache[cache_key]
-
-        sprite_left_world = self.position.x - self.FRAME_SIZE * WORLD_SCALE / 2
-        sprite_top_world = self.position.y - self.FRAME_SIZE * WORLD_SCALE
-        sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
-
-        screen.blit(sprite, (int(sx), int(sy)))
+        _draw_cached_sprite(
+            screen, camera, self._render_cache,
+            (self.state, self.flip, self.frame),
+            sprite, self.position, self.FRAME_SIZE, self.FRAME_SIZE,
+            flip=self.flip, anchor_feet=True,
+        )
 
 
 class Animal(_WanderingEntity):
@@ -471,13 +465,7 @@ class Animal(_WanderingEntity):
             self.alive = False
 
     def update(self, dt, is_walkable):
-        self.state_timer -= dt
-        if self.state_timer <= 0:
-            self._enter_wander_state("move" if self.state == "idle" else "idle")
-
-        if self.state == "move":
-            self._move_toward(dt, is_walkable, self.direction, self.MOVE_SPEED)
-
+        self._wander_tick(dt, is_walkable, self.MOVE_SPEED)
         self._advance_animation(dt)
 
 
@@ -501,7 +489,46 @@ def _entity_rect_is_free(dungeon, rect, entities, moving_entity, player_hitbox):
     return True
 
 
-class AnimalManager:
+class _EntityManager:
+    """Shared shape for AnimalManager/EnemyManager: both own a list of live,
+    per-frame NPCs (stored under LIST_ATTR -- "animals"/"enemies", kept as a
+    plain attribute rather than a property since callers across
+    explorator.py/assembly.py read it directly) spawned from a dungeon's
+    currently-placed objects of ENTITY_TYPES, testing free space and drawing
+    identically. Only update() -- each entity's own per-frame behavior
+    signature -- differs, so that's all subclasses define."""
+
+    ENTITY_CLASS = None
+    ENTITY_TYPES = ()
+    LIST_ATTR = ""
+
+    def __init__(self, dungeon):
+        self.dungeon = dungeon
+        setattr(self, self.LIST_ATTR, [])
+
+    def spawn(self):
+        """(Re)build the live entity list from the dungeon's currently-placed
+        objects of ENTITY_TYPES. Only called by Explorator when it loads a
+        room -- never during editing, which would reset wandering/chase state
+        on every paint stroke, and never by Creator, whose static preview
+        only ever shows placed objects' frame-0 icon."""
+        setattr(self, self.LIST_ATTR, [
+            self.ENTITY_CLASS(obj["type"], obj["x"], obj["y"], self.dungeon)
+            for obj in self.dungeon.object_manager.objects
+            if obj["type"] in self.ENTITY_TYPES
+        ])
+
+    def _is_free(self, rect, moving_entity, player_hitbox):
+        return _entity_rect_is_free(
+            self.dungeon, rect, getattr(self, self.LIST_ATTR), moving_entity, player_hitbox
+        )
+
+    def draw(self, screen, camera):
+        for entity in getattr(self, self.LIST_ATTR):
+            entity.draw(screen, camera)
+
+
+class AnimalManager(_EntityManager):
     """Owns the live Animal entities wandering a room, spawned from its placed
     animal objects (ObjectManager.OBJECT_TYPES entries flagged "animal": True).
     Mirrors ObjectManager's dungeon-owned-component role, but for per-frame NPC
@@ -510,24 +537,9 @@ class AnimalManager:
     position/state never gets confused with its origin object's fixed grid
     cell (which stays put and is what actually gets saved to room.json)."""
 
-    def __init__(self, dungeon):
-        self.dungeon = dungeon
-        self.animals = []
-
-    def spawn(self):
-        """(Re)build the live Animal list from the dungeon's currently-placed
-        animal objects. Only called by Explorator when it loads a room --
-        never during editing, which would reset wandering state on every
-        paint stroke, and never by Creator, whose static preview only ever
-        shows placed objects' frame-0 icon."""
-        self.animals = [
-            Animal(obj["type"], obj["x"], obj["y"], self.dungeon)
-            for obj in self.dungeon.object_manager.objects
-            if obj["type"] in ANIMAL_TYPES
-        ]
-
-    def _is_free(self, rect, moving_animal, player_hitbox):
-        return _entity_rect_is_free(self.dungeon, rect, self.animals, moving_animal, player_hitbox)
+    ENTITY_CLASS = Animal
+    ENTITY_TYPES = ANIMAL_TYPES
+    LIST_ATTR = "animals"
 
     def update(self, dt, player_hitbox=None):
         for animal in self.animals:
@@ -538,10 +550,6 @@ class AnimalManager:
         # No death animation to play out (unlike Enemy) -- a dead animal
         # just disappears the moment its health runs out.
         self.animals = [animal for animal in self.animals if animal.alive]
-
-    def draw(self, screen, camera):
-        for animal in self.animals:
-            animal.draw(screen, camera)
 
 
 class Enemy(_WanderingEntity):
@@ -636,12 +644,7 @@ class Enemy(_WanderingEntity):
         if self.state not in ("idle", "movement"):
             self._enter_wander_state("idle")
 
-        self.state_timer -= dt
-        if self.state_timer <= 0:
-            self._enter_wander_state("movement" if self.state == "idle" else "idle")
-
-        if self.state == "movement":
-            self._move_toward(dt, is_walkable, self.direction, self.stats["move_speed"])
+        self._wander_tick(dt, is_walkable, self.stats["move_speed"])
 
     def _update_chase(self, dt, is_walkable, player_hitbox):
         self._enter_state("movement")
@@ -707,27 +710,17 @@ class Enemy(_WanderingEntity):
             self._hit_delivered_this_swing = True
 
 
-class EnemyManager:
+class EnemyManager(_EntityManager):
     """Owns the live Enemy entities in a room, spawned from its placed enemy
-    objects (ENEMY_TYPES) -- mirrors AnimalManager's shape exactly, see its
-    docstring for why this stays a separate list rather than folding into
-    ObjectManager.objects."""
+    objects (ENEMY_TYPES) -- mirrors AnimalManager's shape exactly (see
+    _EntityManager/AnimalManager's docstrings for why this stays a separate
+    list rather than folding into ObjectManager.objects). Unlike
+    AnimalManager.update, a dead Enemy is never filtered out here -- it stays
+    to play out its death animation and hold on the last frame."""
 
-    def __init__(self, dungeon):
-        self.dungeon = dungeon
-        self.enemies = []
-
-    def spawn(self):
-        """Only called by Explorator after loading a room, same rule as
-        AnimalManager.spawn -- never during editing or by Creator."""
-        self.enemies = [
-            Enemy(obj["type"], obj["x"], obj["y"], self.dungeon)
-            for obj in self.dungeon.object_manager.objects
-            if obj["type"] in ENEMY_TYPES
-        ]
-
-    def _is_free(self, rect, moving_enemy, player_hitbox):
-        return _entity_rect_is_free(self.dungeon, rect, self.enemies, moving_enemy, player_hitbox)
+    ENTITY_CLASS = Enemy
+    ENTITY_TYPES = ENEMY_TYPES
+    LIST_ATTR = "enemies"
 
     def update(self, dt, player=None, player_hitbox=None):
         for enemy in self.enemies:
@@ -738,9 +731,21 @@ class EnemyManager:
                 player_hitbox,
             )
 
-    def draw(self, screen, camera):
-        for enemy in self.enemies:
-            enemy.draw(screen, camera)
+
+def _advance_frame_once(entity, dt, duration, frame_count):
+    """Ticks entity.animation_timer/frame toward frame_count-1 and holds
+    there once reached, returning True the frame it arrives -- the caller
+    sets its own "finished"/"exploded" flag then. Shared "play once" timer
+    tail for Pickup's "collect" state, ThrownDynamite, and Explosion (each
+    otherwise re-derives this identically)."""
+    entity.animation_timer += dt
+    if entity.animation_timer < duration:
+        return False
+    entity.animation_timer = 0
+    if entity.frame < frame_count - 1:
+        entity.frame += 1
+        return False
+    return True
 
 
 class Pickup:
@@ -784,33 +789,22 @@ class Pickup:
 
     def update(self, dt):
         frames = self.frames[self.state]
-        self.animation_timer += dt
-        if self.animation_timer < self.ANIMATION_SPEED:
-            return
-        self.animation_timer = 0
-
         if self.state == "spin":
+            self.animation_timer += dt
+            if self.animation_timer < self.ANIMATION_SPEED:
+                return
+            self.animation_timer = 0
             self.frame = (self.frame + 1) % len(frames)
-        elif self.frame < len(frames) - 1:
-            self.frame += 1
-        else:
+        elif _advance_frame_once(self, dt, self.ANIMATION_SPEED, len(frames)):
             self.finished = True
 
     def draw(self, screen, camera):
         sprite = self.frames[self.state][self.frame]
-
-        render_scale = camera.zoom * WORLD_SCALE
-        zoom_key = max(1, int(round(render_scale * 100)))
-        cache_key = (self.state, self.frame, zoom_key)
-        if cache_key not in self._render_cache:
-            self._render_cache[cache_key] = pygame.transform.scale_by(sprite, render_scale)
-        scaled = self._render_cache[cache_key]
-
-        sprite_left_world = self.position.x - self.FRAME_SIZE * WORLD_SCALE / 2
-        sprite_top_world = self.position.y - self.FRAME_SIZE * WORLD_SCALE / 2
-        sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
-
-        screen.blit(scaled, (int(sx), int(sy)))
+        _draw_cached_sprite(
+            screen, camera, self._render_cache,
+            (self.state, self.frame),
+            sprite, self.position, self.FRAME_SIZE, self.FRAME_SIZE,
+        )
 
 
 class ItemPickup:
@@ -843,18 +837,11 @@ class ItemPickup:
 
     def draw(self, screen, camera):
         icon = self.item.get_icon()
-
-        render_scale = camera.zoom * WORLD_SCALE
-        zoom_key = max(1, int(round(render_scale * 100)))
-        if zoom_key not in self._render_cache:
-            self._render_cache[zoom_key] = pygame.transform.scale_by(icon, render_scale)
-        scaled = self._render_cache[zoom_key]
-
-        sprite_left_world = self.position.x - icon.get_width() * WORLD_SCALE / 2
-        sprite_top_world = self.position.y - icon.get_height() * WORLD_SCALE / 2
-        sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
-
-        screen.blit(scaled, (int(sx), int(sy)))
+        _draw_cached_sprite(
+            screen, camera, self._render_cache,
+            (),
+            icon, self.position, icon.get_width(), icon.get_height(),
+        )
 
 
 class PickupManager:
@@ -945,31 +932,16 @@ class ThrownDynamite:
 
         self.position += self.direction * self.THROW_SPEED * dt
 
-        self.animation_timer += dt
-        if self.animation_timer < self.FRAME_DURATION:
-            return
-        self.animation_timer = 0
-
-        if self.frame < len(self.frames) - 1:
-            self.frame += 1
-        else:
+        if _advance_frame_once(self, dt, self.FRAME_DURATION, len(self.frames)):
             self.exploded = True
 
     def draw(self, screen, camera):
         sprite = self.frames[self.frame]
-
-        render_scale = camera.zoom * WORLD_SCALE
-        zoom_key = max(1, int(round(render_scale * 100)))
-        cache_key = (self.frame, zoom_key)
-        if cache_key not in self._render_cache:
-            self._render_cache[cache_key] = pygame.transform.scale_by(sprite, render_scale)
-        scaled = self._render_cache[cache_key]
-
-        sprite_left_world = self.position.x - self.FRAME_SIZE * WORLD_SCALE / 2
-        sprite_top_world = self.position.y - self.FRAME_SIZE * WORLD_SCALE / 2
-        sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
-
-        screen.blit(scaled, (int(sx), int(sy)))
+        _draw_cached_sprite(
+            screen, camera, self._render_cache,
+            (self.frame,),
+            sprite, self.position, self.FRAME_SIZE, self.FRAME_SIZE,
+        )
 
 
 class Explosion:
@@ -993,30 +965,16 @@ class Explosion:
     def update(self, dt):
         if self.finished:
             return
-        self.animation_timer += dt
-        if self.animation_timer < self.ANIMATION_SPEED:
-            return
-        self.animation_timer = 0
-        if self.frame < len(self.frames) - 1:
-            self.frame += 1
-        else:
+        if _advance_frame_once(self, dt, self.ANIMATION_SPEED, len(self.frames)):
             self.finished = True
 
     def draw(self, screen, camera):
         sprite = self.frames[self.frame]
-
-        render_scale = camera.zoom * WORLD_SCALE
-        zoom_key = max(1, int(round(render_scale * 100)))
-        cache_key = (self.frame, zoom_key)
-        if cache_key not in self._render_cache:
-            self._render_cache[cache_key] = pygame.transform.scale_by(sprite, render_scale)
-        scaled = self._render_cache[cache_key]
-
-        sprite_left_world = self.position.x - self.FRAME_SIZE * WORLD_SCALE / 2
-        sprite_top_world = self.position.y - self.FRAME_SIZE * WORLD_SCALE / 2
-        sx, sy = camera.world_to_screen(sprite_left_world, sprite_top_world)
-
-        screen.blit(scaled, (int(sx), int(sy)))
+        _draw_cached_sprite(
+            screen, camera, self._render_cache,
+            (self.frame,),
+            sprite, self.position, self.FRAME_SIZE, self.FRAME_SIZE,
+        )
 
 
 class ProjectileManager:
