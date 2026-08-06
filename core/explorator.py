@@ -265,8 +265,6 @@ class Explorator:
         over the player's own inventory."""
         if action_id == "interact" and (self._interact_with_chest() or self._throw_interact_item()):
             return
-        if action_id == "attack" and self.player.action is None:
-            SoundManager().play("player_attack")
         self.player.play_action(action_id)
 
     def _current_room_and_offset(self):

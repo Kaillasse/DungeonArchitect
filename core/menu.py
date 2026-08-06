@@ -23,8 +23,11 @@ class Menu:
         ("Touches", "keys"),
         ("Affichage", "display"),
         ("Bordure", "border"),
+        ("Volume", "volume"),
         ("Retour", "back"),
     )
+
+    VOLUME_STEP = 0.1
 
     # Windowed-mode presets cycled by the "Affichage" screen's resolution button.
     DISPLAY_PRESETS = ((1280, 720), (1600, 900), (1920, 1080))
@@ -102,6 +105,19 @@ class Menu:
     def _display_rects(self):
         return self._option_rect(0), self._option_rect(1), self._option_rect(2)
 
+    # -- "Volume" sub-screen: a -/value/+ stepper sharing row 0's bounding
+    # box, back button reusing row 1 -- same "reuse the main list's rects"
+    # trick as _display_rects.
+    def _volume_stepper_rects(self):
+        row_rect = self._option_rect(0)
+        minus = pygame.Rect(row_rect.x, row_rect.y, 50, row_rect.height)
+        plus = pygame.Rect(row_rect.right - 50, row_rect.y, 50, row_rect.height)
+        display_rect = pygame.Rect(minus.right + 4, row_rect.y, plus.x - minus.right - 8, row_rect.height)
+        return minus, display_rect, plus
+
+    def _volume_back_rect(self):
+        return self._option_rect(1)
+
     # -- "Bordure" sub-screen: back button positioned right under the picker.
     def _border_back_rect(self):
         x = self.border_picker.x
@@ -149,6 +165,10 @@ class Menu:
 
         if action == "border":
             self.mode = "settings_border"
+            return False
+
+        if action == "volume":
+            self.mode = "settings_volume"
             return False
 
         if action == "quit":
@@ -206,7 +226,7 @@ class Menu:
                         self.awaiting_action = None
 
                     elif event.key == pygame.K_ESCAPE:
-                        if self.mode in ("settings_keys", "settings_display", "settings_border"):
+                        if self.mode in ("settings_keys", "settings_display", "settings_border", "settings_volume"):
                             self.mode = "settings"
                         elif self.mode != "main":
                             self.mode = "main"
@@ -288,6 +308,20 @@ class Menu:
                             if self._border_back_rect().collidepoint(event.pos):
                                 self.mode = "settings"
 
+                    elif self.mode == "settings_volume":
+
+                        settings = self.game_manager.settings
+                        minus_rect, _display_rect, plus_rect = self._volume_stepper_rects()
+
+                        if minus_rect.collidepoint(event.pos):
+                            settings.adjust_volume(-self.VOLUME_STEP)
+
+                        elif plus_rect.collidepoint(event.pos):
+                            settings.adjust_volume(self.VOLUME_STEP)
+
+                        elif self._volume_back_rect().collidepoint(event.pos):
+                            self.mode = "settings"
+
                     elif self.mode == "rooms":
 
                         if self.room_browser.handle_event(event):
@@ -327,6 +361,7 @@ class Menu:
             "settings_keys": "Touches",
             "settings_display": "Affichage",
             "settings_border": "Bordure",
+            "settings_volume": "Volume",
         }
         title_text = TITLES.get(self.mode, "Dungeon Architect")
 
@@ -388,6 +423,19 @@ class Menu:
 
             back_rect = self._border_back_rect()
             self.border.draw_centered_label(self.screen, back_rect, self.option_font, "Retour")
+
+        elif self.mode == "settings_volume":
+
+            settings = self.game_manager.settings
+            minus_rect, display_rect, plus_rect = self._volume_stepper_rects()
+
+            self.border.draw_centered_label(self.screen, minus_rect, self.option_font, "-")
+            self.border.draw_centered_label(
+                self.screen, display_rect, self.option_font, f"{round(settings.volume * 100)}%"
+            )
+            self.border.draw_centered_label(self.screen, plus_rect, self.option_font, "+")
+
+            self.border.draw_centered_label(self.screen, self._volume_back_rect(), self.option_font, "Retour")
 
         else:
 

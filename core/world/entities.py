@@ -109,6 +109,7 @@ class Player:
 
         self.health = self.MAX_HEALTH
         self._hit_delivered_this_swing = False
+        self._attack_sound_played = False
 
 
     def load_assets(self):
@@ -220,6 +221,7 @@ class Player:
         self.frame = 0
         self.animation_timer = 0
         self._hit_delivered_this_swing = False
+        self._attack_sound_played = False
 
     def play_fall(self):
         """One-shot fall animation played on a successful landing after
@@ -263,6 +265,16 @@ class Player:
                 if self.action is not None and self.animation == self.action:
                     # One-shot finished; caller picks idle/walk/run again next frame.
                     self.action = None
+            elif (
+                self.action == "attack"
+                and self.frame in self.ACTIVE_ATTACK_FRAMES
+                and not self._attack_sound_played
+            ):
+                # Right as the swing's actual hit-frame window begins, not
+                # at the start of the animation -- matches when
+                # is_attack_active()/the real hitbox actually becomes live.
+                SoundManager().play("player_attack")
+                self._attack_sound_played = True
 
     def draw(self, screen, camera):
         direction, flip = self.get_sprite_direction()
@@ -576,6 +588,7 @@ class Enemy(_WanderingEntity):
         self.animation_timer = 0
         self.state_timer = random.uniform(*self.IDLE_DURATION)
         self._hit_delivered_this_swing = False
+        self._attack_sound_played = False
 
         self._render_cache = {}
 
@@ -614,7 +627,7 @@ class Enemy(_WanderingEntity):
         self.animation_timer = 0
         if state == "attack":
             self._hit_delivered_this_swing = False
-            SoundManager().play(f"{self.enemy_type}_attack")
+            self._attack_sound_played = False
 
     def _update_wander(self, dt, is_walkable):
         """Ambient background behavior, identical in spirit to Animal.update:
@@ -636,9 +649,19 @@ class Enemy(_WanderingEntity):
         self._move_toward(dt, is_walkable, target - self.position, self.stats["move_speed"])
 
     def _on_loop_frame_advanced(self):
+        if self.state != "attack":
+            return
         # A fresh attack swing starts its own new active-frame window.
-        if self.state == "attack" and self.frame == 0:
+        if self.frame == 0:
             self._hit_delivered_this_swing = False
+            self._attack_sound_played = False
+        # Right as the swing's actual hit-frame window begins, not at the
+        # start of the animation -- matches when the real hitbox
+        # (active_attack_frames, checked in update() below) actually
+        # becomes live.
+        if self.frame in self.stats["active_attack_frames"] and not self._attack_sound_played:
+            SoundManager().play(f"{self.enemy_type}_attack")
+            self._attack_sound_played = True
 
     def _on_final_frame_reached(self):
         if self.state == "damaged":

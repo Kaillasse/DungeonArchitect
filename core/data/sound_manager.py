@@ -49,12 +49,22 @@ class SoundManager:
         self._initialized = True
 
         self._sounds = {}
+        self._volume = 1.0
         self._enabled = True
         try:
             if not pygame.mixer.get_init():
                 pygame.mixer.init()
         except pygame.error:
             self._enabled = False
+
+    def set_volume(self, volume):
+        """Applied to every already-loaded Sound immediately, and to any
+        Sound loaded from here on (see play()) -- Settings is the only
+        caller right now (the "Volume" screen), but nothing here depends on
+        that."""
+        self._volume = max(0.0, min(1.0, volume))
+        for sound in self._sounds.values():
+            sound.set_volume(self._volume)
 
     def play(self, event_key):
         """No-op if the mixer isn't available, event_key isn't in
@@ -76,6 +86,7 @@ class SoundManager:
                 sound = pygame.mixer.Sound(str(path))
             except pygame.error:
                 return
+            sound.set_volume(self._volume)
             self._sounds[event_key] = sound
 
         sound.play()

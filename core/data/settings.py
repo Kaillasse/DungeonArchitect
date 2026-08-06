@@ -9,10 +9,13 @@ from pathlib import Path
 
 import pygame
 
+from core.data.sound_manager import SoundManager
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SETTINGS_PATH = PROJECT_ROOT / "assets" / "settings.json"
 
 DEFAULT_RESOLUTION = (1280, 720)
+DEFAULT_VOLUME = 1.0
 
 MOUSE_BUTTON_NAMES = {1: "Clic gauche", 2: "Clic molette", 3: "Clic droit"}
 
@@ -70,6 +73,7 @@ class Settings:
         self.bindings = {action_id: dict(default) for action_id, _, default, _ in ACTIONS}
         self.display = {"fullscreen": False, "resolution": list(DEFAULT_RESOLUTION)}
         self.border_cell = [0, 0]
+        self.volume = DEFAULT_VOLUME
 
     # ------------------------------------------------------------------
     # Reading bindings during gameplay
@@ -118,6 +122,22 @@ class Settings:
             return (0, 0), pygame.FULLSCREEN
         return tuple(self.display["resolution"]), 0
 
+    def set_volume(self, volume):
+        """Clamp/round, apply to the live SoundManager immediately, and save."""
+        self.volume = max(0.0, min(1.0, round(volume, 2)))
+        self._apply_volume()
+        self.save()
+
+    def adjust_volume(self, delta):
+        self.set_volume(self.volume + delta)
+
+    def _apply_volume(self):
+        """Push self.volume onto the live SoundManager singleton without
+        saving -- used by set_volume (which also saves) and once right after
+        loading, so a freshly-loaded volume takes effect immediately without
+        writing the file straight back out on every startup."""
+        SoundManager().set_volume(self.volume)
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
@@ -128,6 +148,7 @@ class Settings:
             "bindings": {action_id: _binding_to_json(binding) for action_id, binding in self.bindings.items()},
             "display": dict(self.display),
             "border_cell": list(self.border_cell),
+            "volume": self.volume,
         }
 
     @classmethod
@@ -150,6 +171,11 @@ class Settings:
         border_cell = payload.get("border_cell")
         if isinstance(border_cell, list) and len(border_cell) == 2:
             settings.border_cell = [int(border_cell[0]), int(border_cell[1])]
+
+        volume = payload.get("volume")
+        if isinstance(volume, (int, float)):
+            settings.volume = max(0.0, min(1.0, float(volume)))
+        settings._apply_volume()
 
         return settings
 
