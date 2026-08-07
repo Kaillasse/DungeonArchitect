@@ -7,6 +7,7 @@ import threading
 
 import pygame
 from core.world.dungeon import Dungeon, corner_cells
+from core.editor.autotile import FLOOR
 from core.world.assembly import load_assembly, generate_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player, PlayerRef, Animal, Enemy, Pickup, ItemPickup, ThrownDynamite, Explosion
@@ -31,6 +32,34 @@ from core.network import protocol
 # live entity (the Player, an AnimalManager-owned Animal, an
 # EnemyManager-owned Enemy) instead of being drawn as a static object sprite.
 HIDDEN_OBJECT_TYPES = {"spawn", *ANIMAL_TYPES, *ENEMY_TYPES}
+
+
+def _doorway_interior_offset(dungeon, grid_x, grid_y):
+    """(dx, dy) from a doorway cell (grid_x, grid_y) toward its FLOOR-side
+    neighbor -- the room interior, as opposed to the EMPTY/void side --
+    same up/down-vs-left/right shape ObjectManager.is_valid_doorway itself
+    checks (a doorway is only ever valid with exactly one FLOOR neighbor
+    directly opposite one EMPTY neighbor). Used by
+    Explorator._cancel_dungeon_entrance_wait to put a player who backs out
+    of the sync barrier back on the room side of the door they just tried
+    to take, not stranded exactly on the door tile itself. None if this
+    cell isn't actually shaped like a valid doorway (shouldn't happen for
+    an object that was placed through the normal validated path, but
+    defensive)."""
+    def cell_at(x, y):
+        if 0 <= x < dungeon.width and 0 <= y < dungeon.height:
+            return dungeon.logical_grid[y][x]
+        return None  # off-grid is never FLOOR, that's all this needs to know
+
+    if cell_at(grid_x, grid_y - 1) == FLOOR:
+        return 0, -1
+    if cell_at(grid_x, grid_y + 1) == FLOOR:
+        return 0, 1
+    if cell_at(grid_x - 1, grid_y) == FLOOR:
+        return -1, 0
+    if cell_at(grid_x + 1, grid_y) == FLOOR:
+        return 1, 0
+    return None
 
 class Explorator:
 
@@ -443,6 +472,32 @@ class Explorator:
         self.dungeon_entrance_ready.add(session.player_id)
         return self._maybe_complete_dungeon_entrance_barrier()
 
+    def _cancel_dungeon_entrance_wait(self, session):
+        """Un-freezes a session waiting at the sync barrier the moment they
+        press any movement key (checked in update()'s per-session loop) --
+        without this, a waiting player has no way back out on their own,
+        and since a single-cell doorway can only hold one hitbox at a time
+        (see _is_walkable's own carve-out for a waiting session), the very
+        first player to cross would otherwise be the only one who ever
+        could, permanently blocking everyone else from ever reaching that
+        same cell to cross it themselves -- exactly the stuck-solo-tester
+        symptom reported. Repositions the session one cell in front of the
+        doorway (the room-interior side, via _doorway_interior_offset)
+        instead of leaving them exactly on the door tile they just tried
+        to take."""
+        self.dungeon_entrance_ready.discard(session.player_id)
+        last_pos = session.last_dungeon_entrance_pos
+        session.last_dungeon_entrance_pos = None
+        if last_pos is None:
+            return
+
+        offset = _doorway_interior_offset(self.dungeon, *last_pos)
+        if offset is None:
+            return
+        dx, dy = offset
+        world_x, world_y = self.dungeon.grid_to_world(last_pos[0] + dx, last_pos[1] + dy)
+        session.player.position.update(world_x, world_y)
+
     def _check_dungeon_exit(self, session):
         """Edge-triggered off session's feet grid cell freshly matching an
         E/S (gate/wall/cave_entrance/big_entrance) flagged role=
@@ -733,6 +788,15 @@ class Explorator:
 
         for other_session in self.players.values():
             if other_session is moving_session:
+                continue
+            if other_session.player_id in self.dungeon_entrance_ready:
+                # Waiting at the sync barrier (see _check_dungeon_entrance)
+                # -- deliberately excluded from collision, not just hidden
+                # from rendering (_render_viewport's own entity-sort skips
+                # them too): a single-cell doorway can only ever hold one
+                # hitbox, so leaving a waiting player solid there would
+                # permanently block every other player from ever reaching
+                # the same cell to cross it themselves.
                 continue
             if rect.colliderect(other_session.player.get_hitbox()):
                 self._debug_log(debug_label, f"player({other_session.player_id})")
@@ -1975,8 +2039,17 @@ class Explorator:
                 session.inventory_panel.update(dt)
                 continue
             if session.player_id in self.dungeon_entrance_ready:
-                session.update_frozen(dt)
-                continue
+                # Any movement input backs a waiting player out of the
+                # barrier on their own (see _cancel_dungeon_entrance_wait)
+                # instead of leaving them with no way back -- falls
+                # straight through to normal movement this same frame
+                # rather than waiting an extra one, so backing out feels
+                # immediate.
+                if session.input.move_direction.length_squared() > 0:
+                    self._cancel_dungeon_entrance_wait(session)
+                else:
+                    session.update_frozen(dt)
+                    continue
             self._apply_requested_actions(session)
             self._simulate_movement(session, dt)
 
@@ -2159,7 +2232,8 @@ class Explorator:
             floor = room.floor
             players_on_floor = [
                 other.player for other in self.players.values()
-                if other.current_placed_room is None or other.current_placed_room.floor == floor
+                if other.player_id not in self.dungeon_entrance_ready
+                and (other.current_placed_room is None or other.current_placed_room.floor == floor)
             ]
             # Wherever the camera is actually centered, in world space --
             # the vision-hole punch-out on floors above should always be
@@ -2198,7 +2272,10 @@ class Explorator:
             entities = (
                 list(self.dungeon.animal_manager.animals)
                 + list(self.dungeon.enemy_manager.enemies)
-                + [other.player for other in self.players.values()]
+                + [
+                    other.player for other in self.players.values()
+                    if other.player_id not in self.dungeon_entrance_ready
+                ]
             )
             entities.sort(key=lambda entity: entity.position.y)
             for entity in entities:
