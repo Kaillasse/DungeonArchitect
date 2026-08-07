@@ -28,6 +28,16 @@ class GameManager:
         # threshold instead of its camera's own stale/default zoom (see
         # core.world.home).
         self.pending_zoom_carry = None
+        # (world_x, world_y) to center the destination camera on, right
+        # after applying pending_zoom_carry -- set by Explorator's
+        # zoom-switch back to Creator (see core.world.home) so Creator
+        # opens centered on where the player actually was, instead of
+        # Creator's own camera keeping whatever stale pan position it was
+        # left at last time it was open (the "camera bouge" jump the user
+        # reported). Exploration never needs the equivalent: its own
+        # per-frame camera-follow already recenters on the player the very
+        # first frame regardless of carried position.
+        self.pending_camera_center = None
         # One-shot: True until the first time Menu.run() actually executes
         # with a known player name, at which point it redirects straight
         # into home instead of showing the main list (see
@@ -77,6 +87,10 @@ class GameManager:
                     if self.pending_zoom_carry is not None:
                         self.creator.camera.zoom = self.pending_zoom_carry
                         self.pending_zoom_carry = None
+                    if self.pending_camera_center is not None:
+                        cx, cy = self.pending_camera_center
+                        self.creator.camera.center_on(cx, cy, self.screen.get_width(), self.screen.get_height())
+                        self.pending_camera_center = None
                 self.creator.run()
 
             elif self.state == GameState.EXPLORATION:

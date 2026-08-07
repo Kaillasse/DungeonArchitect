@@ -147,8 +147,7 @@ OBJECT_TYPES = {
         # gate/wall (ObjectManager.is_valid_doorway) -- see
         # _resolve_placement -- but always open: no "linkable"/
         # "blocks_until_open", just "walkable" like a button, since this is
-        # meant as a level-exit marker, not a lockable door. Not yet wired
-        # into core.world.assembly's ENTRY_EXIT_TYPES (Phase 6e).
+        # meant as a level-exit marker, not a lockable door.
         "asset": "tiles/cave_entrance.png",
         "placement": "doorway",
         "size": (1, 1),
@@ -157,14 +156,20 @@ OBJECT_TYPES = {
     },
     "big_entrance": {
         # basictileset.png frames 17 (left half) + 23 (right half), composed
-        # side-by-side once into one 32x16 static asset (Phase 6a) -- purely
-        # decorative wall dressing, 2 cells wide, placed on a WALL cell like
-        # the plain (non-L/R) torch variant. "frames": 1 with a non-square
-        # asset is why load_object_frames gained its whole-image branch.
+        # side-by-side once into one 32x16 static asset (Phase 6a). "frames":
+        # 1 with a non-square asset is why load_object_frames gained its
+        # whole-image branch. Promoted from purely-decorative wall dressing
+        # to a real functional E/S (role system, see get_role/set_role
+        # below): same doorway shape/validity as gate/wall/cave_entrance
+        # (ObjectManager.is_valid_doorway, checked off its origin cell only
+        # -- already proven to work for a 2-wide footprint by "wall"), and
+        # always open like cave_entrance (no "linkable"/"blocks_until_open"
+        # -- there's no button-linking use case for a 2-wide entrance).
         "asset": "tiles/big_entrance.png",
-        "placement": "wall",
+        "placement": "doorway",
         "size": (2, 1),
         "frames": 1,
+        "walkable": True,
     },
     "pillar": {
         # basictileset.png frame 18 (base). A single ordinary object, placed
@@ -246,6 +251,22 @@ ANIMAL_TYPES = tuple(name for name, config in OBJECT_TYPES.items() if config.get
 
 # Same idea as ANIMAL_TYPES, for core.world.entities.Enemy/EnemyManager.
 ENEMY_TYPES = tuple(name for name, config in OBJECT_TYPES.items() if config.get("enemy"))
+
+# Object types that function as an entry/exit (a doorway between rooms, or
+# the boundary of a room's void edge) -- the only types get_role/set_role
+# below accept a "connector"/"dungeon_entrance"/"dungeon_exit" role for, and
+# what core.world.assembly's procedural generator treats as a possible
+# room-to-room connector (imported there instead of a second, separately
+# maintained tuple).
+ES_TYPES = ("gate", "wall", "cave_entrance", "big_entrance")
+
+# Allowed "role" values (ObjectManager.get_role/set_role) per object kind --
+# an E/S (ES_TYPES) or a chest (is_chest()). Each kind's first entry is its
+# default when a placed object carries no "role" key at all (old saves,
+# every object placed before this system existed) -- "connector"/"loot" are
+# both exactly today's pre-role behavior, so nothing needs migrating.
+ES_ROLES = ("connector", "dungeon_entrance", "dungeon_exit")
+CHEST_ROLES = ("loot", "dungeon_exit")
 
 # Each enemy type has its own assets/characters/Ennemies/<folder>/ directory
 # with one fixed-name sheet per animation (idle/movement/attack/damaged/death.png).
@@ -495,6 +516,48 @@ class ObjectManager:
     def is_linkable(self, object_type):
         return OBJECT_TYPES[object_type].get("linkable", False)
 
+    def is_es_type(self, object_type):
+        """True for gate/wall/cave_entrance/big_entrance -- the object
+        kinds that carry a role (get_role/set_role below) and that
+        core.world.assembly's generator can treat as a room-to-room
+        connector. Used by Creator's right-click role-picker dispatch."""
+        return object_type in ES_TYPES
+
+    def get_role(self, obj):
+        """The object's role -- "connector"/"dungeon_entrance"/
+        "dungeon_exit" for an E/S, "loot"/"dungeon_exit" for a chest.
+        Missing "role" key (every object placed before this system
+        existed, or a fresh default placement) reads as that kind's
+        default -- "connector" for an E/S, "loot" for a chest -- so old
+        saves need no migration. Object kinds with no role concept at all
+        just get None."""
+        role = obj.get("role")
+        if role is not None:
+            return role
+        if self.is_es_type(obj["type"]):
+            return "connector"
+        if self.is_chest(obj["type"]):
+            return "loot"
+        return None
+
+    def set_role(self, obj, role):
+        """Assigns a role, validated against the allowed set for this
+        object's kind (ES_ROLES/CHEST_ROLES) -- an invalid value (not
+        offered by the editor UI, but this is also the one place a future
+        network-facing admin command would come through) is silently
+        ignored rather than corrupting the object dict. Returns True if
+        the role was actually applied."""
+        if self.is_es_type(obj["type"]):
+            allowed = ES_ROLES
+        elif self.is_chest(obj["type"]):
+            allowed = CHEST_ROLES
+        else:
+            return False
+        if role not in allowed:
+            return False
+        obj["role"] = role
+        return True
+
     def is_foreground_object(self, obj):
         """Drawn after (in front of) the player, and walkable despite sitting on a WALL cell -- currently just L/R wall-mounted torches; a straight torch stays a plain blocking wall decoration. (A pillar's decorative top half gets the same front-of-player treatment, but it isn't a real object -- see WorldRenderer._draw_pillar_tops -- so it never reaches this method.)"""
         return obj["type"] == "torch" and obj.get("variant") in ("L", "R")
@@ -613,7 +676,7 @@ class ObjectManager:
                 return True, None
             return False, None
 
-        if object_type in ("gate", "wall", "cave_entrance"):
+        if object_type in ES_TYPES:
             return self.is_valid_doorway(grid_x, grid_y), None
 
         if object_type == "stairs":

@@ -6,7 +6,7 @@ import random
 
 import pygame
 from core.world.dungeon import Dungeon, corner_cells
-from core.world.assembly import load_assembly
+from core.world.assembly import load_assembly, generate_assembly
 from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player, PlayerRef, Animal, Enemy, Pickup, ItemPickup, ThrownDynamite, Explosion
 from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES
@@ -196,7 +196,16 @@ class Explorator:
     def open_donjon(self, name):
         """Load a saved procedurally-assembled dungeon and spawn every
         current session's player in its starting room."""
-        self.assembly = load_assembly(name)
+        self._enter_assembly(load_assembly(name))
+
+    def _enter_assembly(self, assembly):
+        """Shared by open_donjon (a saved assembly, chosen from the menu)
+        and _check_dungeon_entrance (a freshly procedurally-generated one,
+        triggered mid-update() by crossing a dungeon_entrance in home):
+        assigns it as the active world, spawns every room's animals/
+        enemies, and places every current session at the start room's
+        spawn point."""
+        self.assembly = assembly
         self.current_room = None
         self.victory = False
 
@@ -223,6 +232,8 @@ class Explorator:
             )
             session.current_placed_room = start_room
             session.last_door_obj = None
+            session.last_dungeon_entrance_pos = None
+            session.last_dungeon_exit_pos = None
 
     @staticmethod
     def _spawn_offset_x(session, tile_size):
@@ -261,9 +272,103 @@ class Explorator:
         if self.current_room != home_room_name(self.settings.local_player_name):
             return
         if wants_creator(self.camera.zoom):
+            local_position = self.players[self._local_player_id].player.position
             self.game_manager.pending_room = self.current_room
             self.game_manager.pending_zoom_carry = self.camera.zoom
+            self.game_manager.pending_camera_center = (local_position.x, local_position.y)
             self.game_manager.state = GameState.CREATOR
+
+    def _resolve_dungeon_transitions(self):
+        """Checks the two new E/S roles (core.world.object_manager.get_role)
+        once per frame, after every session's own movement has already been
+        simulated this frame -- deliberately its own separate pass (not
+        folded into the per-session movement loop) so a dungeon_entrance
+        crossing, which replaces the entire active world mid-frame, can
+        never leave a session later in that same loop iteration processed
+        against a world that's about to be swapped out from under it. Lives
+        in update(), not run() -- unlike the zoom-switch above, this must
+        run identically on a solo client and the headless server, same
+        server-authoritative principle every other gameplay fact already
+        follows (buttons, combat, pickups)."""
+        if self.assembly is None:
+            for session in self.players.values():
+                if self._check_dungeon_entrance(session):
+                    return  # world just got replaced -- nothing else this frame is still valid to check
+        for session in self.players.values():
+            self._check_dungeon_exit(session)
+
+    def _check_dungeon_entrance(self, session):
+        """Single-room mode only -- a dungeon_entrance-role object can only
+        ever be placed while editing home (Creator._is_home_room() gates
+        RolePanelUI's "Entree de donjon" row), so this never fires in
+        assembly mode. Edge-triggered off session's feet grid cell freshly
+        matching such an object (session.last_dungeon_entrance_pos, same
+        shape as last_door_obj). On a fresh crossing: loads the local
+        profile's saved generation parameters (Creator._apply_generation
+        persists the same ones there), runs generate_assembly exactly like
+        the "Generer" button does, and on success switches straight into
+        Exploration in the result via _enter_assembly -- without
+        GameManager's pending_room indirection, since this already fires
+        mid-update() inside Exploration. Returns True iff a generation
+        actually happened this frame."""
+        hitbox = session.player.get_hitbox()
+        grid_x, grid_y = self._feet_grid_cell(hitbox)
+        obj = self.dungeon.object_manager.get_object_at(grid_x, grid_y)
+
+        if obj is None or self.dungeon.object_manager.get_role(obj) != "dungeon_entrance":
+            session.last_dungeon_entrance_pos = None
+            return False
+
+        if session.last_dungeon_entrance_pos == (grid_x, grid_y):
+            return False
+        session.last_dungeon_entrance_pos = (grid_x, grid_y)
+
+        if self.settings is None or not self.settings.local_player_name:
+            return False
+        profile = ProfileManager().load(self.settings.local_player_name)
+        if not profile.generator_room_names:
+            print("[dungeon_entrance] Aucune selection de generation enregistree (voir le panneau Generation dans le Creator).")
+            return False
+
+        assembly = generate_assembly(profile.generator_room_names, profile.generator_room_count)
+        if assembly is None:
+            print("[dungeon_entrance] Aucune salle avec spawn + sortie dans la selection.")
+            return False
+
+        self._enter_assembly(assembly)
+        return True
+
+    def _check_dungeon_exit(self, session):
+        """Edge-triggered off session's feet grid cell freshly matching an
+        E/S (gate/wall/cave_entrance/big_entrance) flagged role=
+        "dungeon_exit" -- sets self.victory the same way a dungeon_exit
+        chest already does (_interact_with_chest). Works in both
+        single-room and assembly mode, unlike dungeon_entrance -- a
+        dungeon_exit isn't restricted to home. No-ops once victory is
+        already set (nothing left to trigger)."""
+        if self.victory:
+            return
+
+        dungeon, offset_x, offset_y = self._current_room_and_offset(session)
+        hitbox = session.player.get_hitbox()
+        global_grid_x, global_grid_y = self._feet_grid_cell(hitbox)
+        grid_x, grid_y = global_grid_x - offset_x, global_grid_y - offset_y
+
+        obj = dungeon.object_manager.get_object_at(grid_x, grid_y)
+        if (
+            obj is None
+            or not dungeon.object_manager.is_es_type(obj["type"])
+            or dungeon.object_manager.get_role(obj) != "dungeon_exit"
+        ):
+            session.last_dungeon_exit_pos = None
+            return
+
+        if session.last_dungeon_exit_pos == (grid_x, grid_y):
+            return
+        session.last_dungeon_exit_pos = (grid_x, grid_y)
+
+        self.victory = True
+        self._grant_xp(session, XP_DUNGEON_CLEAR)
 
     def _active_floors(self):
         """Every floor at least one session currently occupies, in assembly
@@ -431,15 +536,18 @@ class Explorator:
         OBJECT_TYPES["lilchest"] -- ObjectManager.update takes it from there
         and holds on the last frame once reached, same mechanism as any
         other blocks_until_open object), spawns its configured currency/item
-        loot scattered around its own position, and triggers the victory
-        screen -- the only win condition that exists right now. Reuses the
-        player's own melee reach (get_attack_hitbox: their hitbox shifted one
-        tile in their facing direction) rather than a separate "interact
-        range", since a chest blocks movement (blocks_movement) so a player
-        can only ever be standing right next to it, never on top of it.
-        Returns False (no-op) if there's no such chest in reach or it's
-        already open, leaving _trigger_action to fall back to throwing/the
-        plain interact animation."""
+        loot scattered around its own position, and -- only if this
+        particular chest is explicitly flagged role="dungeon_exit" (see
+        ObjectManager.get_role/set_role; an ordinary role="loot" chest,
+        including every one placed before the role system existed, no
+        longer auto-wins just by being opened) -- triggers the victory
+        screen. Reuses the player's own melee reach (get_attack_hitbox:
+        their hitbox shifted one tile in their facing direction) rather
+        than a separate "interact range", since a chest blocks movement
+        (blocks_movement) so a player can only ever be standing right next
+        to it, never on top of it. Returns False (no-op) if there's no such
+        chest in reach or it's already open, leaving _trigger_action to
+        fall back to throwing/the plain interact animation."""
         dungeon, offset_x, offset_y = self._current_room_and_offset(session)
         tile_size = dungeon.tile_size
 
@@ -473,8 +581,9 @@ class Explorator:
                 )
 
         session.player.play_action("interact")
-        self.victory = True
-        self._grant_xp(session, XP_DUNGEON_CLEAR)
+        if dungeon.object_manager.get_role(obj) == "dungeon_exit":
+            self.victory = True
+            self._grant_xp(session, XP_DUNGEON_CLEAR)
         return True
 
     def _is_walkable(self, rect, moving_session, debug_label=None):
@@ -1571,6 +1680,8 @@ class Explorator:
                 continue
             self._apply_requested_actions(session)
             self._simulate_movement(session, dt)
+
+        self._resolve_dungeon_transitions()
 
         # -----------------------------
         # Combat -- joueurs attaquent un ennemi

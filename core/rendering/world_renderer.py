@@ -277,7 +277,13 @@ class WorldRenderer:
 
     def _draw_link_indicators(self, screen, dungeon, camera):
         for obj in dungeon.object_manager.objects:
-            if not dungeon.object_manager.is_linkable(obj["type"]):
+            # Also shown for E/S types that aren't "linkable" (cave_entrance/
+            # big_entrance never button-link to anything, so their own
+            # `links` list -- read below -- always stays empty, drawing just
+            # a bare dot with no lines) -- this is what gives them a
+            # right-clickable target for RolePanelUI (see Creator), same dot
+            # gate/wall's own link-drag already uses.
+            if not (dungeon.object_manager.is_linkable(obj["type"]) or dungeon.object_manager.is_es_type(obj["type"])):
                 continue
 
             sx, sy = camera.world_to_screen(*dungeon.object_indicator_position(obj))

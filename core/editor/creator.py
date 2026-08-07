@@ -13,7 +13,7 @@ from core.data.ressources import FLOOR, next_new_donjon_name
 from core.data.profile_manager import ProfileManager
 from core.data.progression import unlocked_objects
 from core.world.home import home_room_name, wants_exploration
-from core.editor.ui import GeneratorPanelUI, ObjectPalette, RoomPanelUI, ChestPanelUI
+from core.editor.ui import GeneratorPanelUI, ObjectPalette, RoomPanelUI, ChestPanelUI, RolePanelUI
 from core.editor.tools import ObjectTool
 
 class Creator:
@@ -49,6 +49,15 @@ class Creator:
             x=self.screen.get_width() / 2 - 130,
             y=180,
         )
+        self.role_panel = RolePanelUI(
+            x=self.screen.get_width() / 2 - 130,
+            y=180,
+        )
+        # See _refresh_generator_panel -- seeded lazily from the local
+        # profile once a player identity actually exists, not here
+        # (Creator is constructed before Menu's name-entry screen has
+        # necessarily run).
+        self._generator_panel_seeded = False
 
         self.painting = False
         self.erasing = False
@@ -99,6 +108,7 @@ class Creator:
         self.current_room = name
         self.last_assembly = None
         self.chest_panel.close()
+        self.role_panel.close()
         self.dungeon.load_from_json(name)
 
     def open_donjon(self, name):
@@ -107,6 +117,7 @@ class Creator:
         self.assembly_active_floor = 0
         self.current_room = None
         self.chest_panel.close()
+        self.role_panel.close()
 
     def _is_home_room(self):
         """True while the currently-open room is the local player's own
@@ -157,11 +168,26 @@ class Creator:
             f"{donjon_name} : {len(assembly.rooms)} salle(s) sur {len(assembly.floors())} etage(s)."
         )
 
+        # Persist this pool/count so a dungeon_entrance crossing (see
+        # Explorator._check_dungeon_entrance) has the same parameters to
+        # generate from later, and so the panel reopens with this choice
+        # on a fresh app launch instead of resetting to "every room, 3".
+        profile = self._load_profile()
+        if profile is not None:
+            profile.generator_room_names = list(room_names)
+            profile.generator_room_count = room_count
+            ProfileManager().save(profile)
+
     def _find_indicator_at(self, mouse_pos):
         mx, my = mouse_pos
+        object_manager = self.dungeon.object_manager
 
-        for obj in self.dungeon.object_manager.objects:
-            if not self.dungeon.object_manager.is_linkable(obj["type"]):
+        for obj in object_manager.objects:
+            # Also matches E/S types (gate/wall/cave_entrance/big_entrance)
+            # even when not "linkable" -- cave_entrance/big_entrance never
+            # button-link to anything, but still need a dot to right-click
+            # for RolePanelUI (see run()'s MOUSEBUTTONDOWN handling).
+            if not (object_manager.is_linkable(obj["type"]) or object_manager.is_es_type(obj["type"])):
                 continue
 
             sx, sy = self.camera.world_to_screen(*self.dungeon.object_indicator_position(obj))
@@ -219,11 +245,39 @@ class Creator:
         if self.object_palette.set_unlocked_types(unlocked):
             self.generator_panel.set_y(self.object_palette.y + self.object_palette.height + 20)
 
+    def _load_profile(self):
+        """The local player's Profile, or None if there's no identity yet
+        (headless smoke test, or -- Creator itself is constructed before
+        Menu's name-entry screen has necessarily run -- the very first
+        frame of a fresh install). Reloaded on demand rather than cached,
+        same as _current_level, since XP/level can change during
+        Exploration between visits to Creator."""
+        settings = self.game_manager.settings
+        name = settings.local_player_name if settings is not None else None
+        if not name:
+            return None
+        return ProfileManager().load(name)
+
+    def _refresh_generator_panel(self):
+        """Seeds GeneratorPanelUI's room pool/count from the local profile's
+        saved selection exactly once (self._generator_panel_seeded) -- not
+        on every entry into Creator, which would otherwise stomp on
+        whatever the player has live-selected in the panel this session
+        with whatever was last saved to disk."""
+        if self._generator_panel_seeded:
+            return
+        profile = self._load_profile()
+        if profile is None:
+            return
+        self.generator_panel.apply_profile(profile)
+        self._generator_panel_seeded = True
+
     def run(self):
 
         pygame.display.set_caption("DungeonArchitect - Dungeon Editor")
 
         self._refresh_object_palette()
+        self._refresh_generator_panel()
 
         clock = pygame.time.Clock()
 
@@ -243,9 +297,9 @@ class Creator:
 
             for event in pygame.event.get():
 
-                if self.chest_panel.is_open:
+                if self.chest_panel.is_open or self.role_panel.is_open:
                     # Fully modal -- every other tool/panel acts on
-                    # self.dungeon, which is exactly what the open chest
+                    # self.dungeon, which is exactly what the open chest/E-S
                     # belongs to, so letting painting/saving/etc. run
                     # "underneath" it would be confusing at best. QUIT must
                     # still always work.
@@ -254,7 +308,12 @@ class Creator:
                         self.game_manager.running = False
                         break
                     if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
-                        self.chest_panel.handle_event(event)
+                        if self.chest_panel.is_open:
+                            self.chest_panel.handle_event(event)
+                        else:
+                            role = self.role_panel.handle_event(event)
+                            if role is not None:
+                                self.dungeon.object_manager.set_role(self.role_panel.obj, role)
                     continue
 
                 self.object_tool.handle_event(event)
@@ -322,9 +381,13 @@ class Creator:
 
                             if self.dungeon.object_manager.is_chest(indicator_obj["type"]):
                                 self.chest_panel.open(indicator_obj)
-                            else:
+                            elif self.dungeon.object_manager.is_linkable(indicator_obj["type"]):
                                 self.link_source = indicator_obj
                                 self.link_drag_pos = event.pos
+                            # else: a cave_entrance/big_entrance dot (E/S but
+                            # not linkable) -- left-click has no meaning for
+                            # it, just consumed; right-click on the same dot
+                            # opens RolePanelUI (below).
                             continue
 
                         if self._is_valid_grid_cell(event.pos):
@@ -343,6 +406,12 @@ class Creator:
                             self.erasing = False
 
                     elif event.button == 3:
+
+                        indicator_obj = self._find_indicator_at(event.pos)
+
+                        if indicator_obj is not None and self.dungeon.object_manager.is_es_type(indicator_obj["type"]):
+                            self.role_panel.open(indicator_obj, allow_dungeon_entrance=self._is_home_room())
+                            continue
 
                         if self._is_valid_grid_cell(event.pos):
 
@@ -560,6 +629,7 @@ class Creator:
             self.room_panel.render(self.screen)
             self.generator_panel.render(self.screen)
             self.chest_panel.render(self.screen)
+            self.role_panel.render(self.screen)
 
             pygame.display.flip()
 

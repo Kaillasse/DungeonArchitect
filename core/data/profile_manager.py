@@ -29,9 +29,19 @@ def _sanitize_name(name) -> str:
 
 
 class Profile:
-    def __init__(self, name: str, xp: int = 0):
+    def __init__(self, name: str, xp: int = 0, generator_room_names=None, generator_room_count: int = 3):
         self.name = name
         self.xp = xp
+        # Creator's GeneratorPanelUI room-pool selection + room-count
+        # stepper, persisted here so a dungeon_entrance crossing (see
+        # Explorator._check_dungeon_entrance) has generation parameters to
+        # read even on a fresh app launch, and so the panel itself reopens
+        # with the player's last choice instead of resetting to "every room,
+        # count 3" -- defaults here match GeneratorPanelUI's own constructor
+        # defaults exactly, so an absent/fresh profile behaves identically
+        # to before this field existed.
+        self.generator_room_names = list(generator_room_names) if generator_room_names else []
+        self.generator_room_count = generator_room_count
 
     @property
     def level(self) -> int:
@@ -64,14 +74,25 @@ class ProfileManager:
         except (OSError, ValueError, json.JSONDecodeError):
             return Profile(safe_name)
 
-        return Profile(safe_name, xp=int(payload.get("xp", 0)))
+        return Profile(
+            safe_name,
+            xp=int(payload.get("xp", 0)),
+            generator_room_names=payload.get("generator_room_names"),
+            generator_room_count=int(payload.get("generator_room_count", 3)),
+        )
 
     def save(self, profile: Profile) -> Path:
         path = self.get_profile_path(profile.name)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
             json.dump(
-                {"version": 1, "name": profile.name, "xp": profile.xp},
+                {
+                    "version": 1,
+                    "name": profile.name,
+                    "xp": profile.xp,
+                    "generator_room_names": profile.generator_room_names,
+                    "generator_room_count": profile.generator_room_count,
+                },
                 handle, indent=2, ensure_ascii=False,
             )
         return path

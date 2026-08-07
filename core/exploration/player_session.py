@@ -83,6 +83,18 @@ class PlayerSession:
         # from last frame." Also per-session now, for the same reason as
         # current_placed_room above.
         self.last_door_obj = None
+        # Same edge-trigger shape as last_door_obj above, for the two new
+        # E/S roles (see core.world.object_manager.get_role/set_role):
+        # (grid_x, grid_y) this session was last resolved standing on a
+        # dungeon_entrance/dungeon_exit-flagged object, or None -- tells
+        # "just stepped onto this cell" apart from "still standing there
+        # from last frame" so Explorator._check_dungeon_entrance/
+        # _check_dungeon_exit don't re-trigger every single frame spent on
+        # the cell. Local grid coordinates (dungeon_entrance is always
+        # single-room/home; dungeon_exit's own check converts global to
+        # local itself), not global -- see both methods.
+        self.last_dungeon_entrance_pos = None
+        self.last_dungeon_exit_pos = None
         # This session's own camera -- real split-screen (one independent
         # viewport per LOCAL session, see Explorator._viewport_rects) means
         # each local player follows their own position at their own zoom,

@@ -14,27 +14,37 @@ import pygame
 
 from core.world.dungeon import Dungeon
 from core.world.entities import PlayerRef
-from core.world.object_manager import OBJECT_TYPES
+from core.world.object_manager import OBJECT_TYPES, ES_TYPES
 from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DONJONS_DIRECTORY
 from core.data.sound_manager import SoundManager
 
-ENTRY_EXIT_TYPES = ("gate", "wall", "cave_entrance")
+# The canonical E/S type list lives in object_manager.py (ES_TYPES) --
+# kept under this name here since every existing reference in this module
+# already says ENTRY_EXIT_TYPES.
+ENTRY_EXIT_TYPES = ES_TYPES
 
 OPPOSITE_SIDE = {"north": "south", "south": "north", "east": "west", "west": "east"}
 
 
 def _valid_entry_exits(dungeon):
-    """gate/wall objects that actually qualify as a room-to-room connection:
-    ObjectManager.is_valid_doorway (a WALL cell with one FLOOR neighbor
-    opposite one EMPTY neighbor, WALL flanking the rest) means this exit
-    genuinely borders the void, not just another spot inside the room. A
-    gate/wall placed with no void neighbor (e.g. a locked door gating a side
-    room) still works as an ordinary in-room obstacle -- it's just never
-    picked as a connector here."""
+    """gate/wall/cave_entrance/big_entrance objects that actually qualify as
+    a room-to-room connection: ObjectManager.is_valid_doorway (a WALL cell
+    with one FLOOR neighbor opposite one EMPTY neighbor, WALL flanking the
+    rest) means this exit genuinely borders the void, not just another spot
+    inside the room. A gate/wall placed with no void neighbor (e.g. a locked
+    door gating a side room) still works as an ordinary in-room obstacle --
+    it's just never picked as a connector here. Also excludes anything
+    flagged "dungeon_entrance"/"dungeon_exit" (ObjectManager.get_role) --
+    neither is ever an ordinary inter-room connector: a dungeon_entrance
+    only ever lives in home (never generation material in practice) and a
+    dungeon_exit is meant to stay a genuine dead end in whichever room it
+    lands in, not get merged with another room."""
     return [
         obj for obj in dungeon.object_manager.objects
-        if obj["type"] in ENTRY_EXIT_TYPES and dungeon.object_manager.is_valid_doorway(obj["x"], obj["y"])
+        if obj["type"] in ENTRY_EXIT_TYPES
+        and dungeon.object_manager.get_role(obj) == "connector"
+        and dungeon.object_manager.is_valid_doorway(obj["x"], obj["y"])
     ]
 
 
@@ -946,7 +956,38 @@ def generate_assembly(room_names, room_count, rng=None):
         for edge in candidate_room.border_edges():
             pending.append((candidate_room, ("border", edge)))
 
+    _enforce_single_dungeon_exit(assembly)
+
     return assembly
+
+
+def _enforce_single_dungeon_exit(assembly):
+    """At most one "dungeon_exit"-role object (an E/S or a chest --
+    ObjectManager.get_role) survives across the whole assembled dungeon --
+    the first one found, in room-index order, wins; every later one is
+    demoted back to its type's own default role. Runs once, after every
+    room is already placed, rather than tracking a "claimed" flag per
+    add_room call site -- simpler and provably correct regardless of which
+    of the two attach paths (entry-exit merge or border glue) placed a
+    given room. Only mutates each room's already-generation-local copy of
+    its objects (PlacedRoom.dungeon is a fresh load, never the same
+    in-memory objects as the source room file on disk), so a room reused
+    unflagged in a later, separate generation is unaffected.
+
+    Documented limitation: this is an upper bound only, not a guarantee --
+    a generation can still end up with zero dungeon_exit objects if no
+    drawn room happened to carry one. No attempt is made to force-include
+    one."""
+    claimed = False
+    for room in assembly.rooms:
+        for obj in room.dungeon.object_manager.objects:
+            manager = room.dungeon.object_manager
+            if manager.get_role(obj) != "dungeon_exit":
+                continue
+            if claimed:
+                manager.set_role(obj, "connector" if manager.is_es_type(obj["type"]) else "loot")
+            else:
+                claimed = True
 
 
 def _donjon_path(name):
