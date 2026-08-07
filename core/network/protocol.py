@@ -9,12 +9,16 @@ one-shot actions buffered since the last send, plus a "seq" -- Phase 4's
 client-side prediction sequence number, echoed back per-player in "snapshot"
 as "last_input_seq" so the client knows which of its own predicted inputs are
 now confirmed), "pvp_toggle" (F4 -- must be server-authoritative since it
-gates real damage).
+gates real damage), "chat" (a "text" string -- plain chat if it doesn't start
+with "/", a command otherwise; see GameServer._dispatch_command for the
+host-only gating on privileged commands like level/kick/stop).
 
 Server -> client: "welcome" (assigned player_id + which room/donjon to load
 locally), "snapshot" (every tick -- see build_snapshot), "leave" (a session
 disconnected), "server_full" (Phase 5 -- sent instead of "welcome" and the
-connection closed right after, when --max-players is already reached)."""
+connection closed right after, when --max-players is already reached),
+"chat" (broadcast to every client for an ordinary message, or sent to just
+the requester alone -- "system": true -- for a command's reply/rejection)."""
 
 from __future__ import annotations
 
@@ -25,19 +29,26 @@ from core.engine.input import InputState
 MSG_JOIN = "join"
 MSG_INPUT = "input"
 MSG_PVP_TOGGLE = "pvp_toggle"
+MSG_CHAT = "chat"
 
 MSG_WELCOME = "welcome"
 MSG_SNAPSHOT = "snapshot"
 MSG_LEAVE = "leave"
 MSG_SERVER_FULL = "server_full"
 
-_KNOWN_MESSAGE_TYPES = (MSG_JOIN, MSG_INPUT, MSG_PVP_TOGGLE)
+_KNOWN_MESSAGE_TYPES = (MSG_JOIN, MSG_INPUT, MSG_PVP_TOGGLE, MSG_CHAT)
 
 # Phase 5 hardening: a client's raw axis input is never meant to exceed ~1.4
 # (two keys held at once, unnormalized -- see read_local_keyboard_input).
 # This is a generous sanity bound, not a gameplay constraint -- it exists to
 # reject obviously-bogus values, not to second-guess legitimate input.
 MAX_INPUT_AXIS_MAGNITUDE = 10.0
+
+# A chat line (plain message or a "/command") is capped generously above
+# any reasonable typed message -- just enough to reject an obviously-bogus
+# payload, not a real UX constraint (ChatOverlay's own input box enforces a
+# tighter, user-visible cap well below this).
+MAX_CHAT_TEXT_LENGTH = 256
 
 
 def encode(msg_type: str, **fields) -> bytes:
@@ -87,6 +98,15 @@ def validate_message(payload) -> None:
                 raise TypeError(f"{key} must be a number, got {value!r}")
             if abs(value) > MAX_INPUT_AXIS_MAGNITUDE:
                 raise ValueError(f"{key} out of range: {value!r}")
+
+    if msg_type == MSG_CHAT:
+        text = payload.get("text")
+        if not isinstance(text, str):
+            raise TypeError(f"text must be a string, got {text!r}")
+        if not text.strip():
+            raise ValueError("text must not be empty")
+        if len(text) > MAX_CHAT_TEXT_LENGTH:
+            raise ValueError(f"text too long ({len(text)} > {MAX_CHAT_TEXT_LENGTH})")
 
         actions = payload.get("requested_actions", [])
         if not isinstance(actions, list) or not all(isinstance(a, str) for a in actions):

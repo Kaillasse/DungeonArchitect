@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import threading
 
 import pygame
 from core.world.dungeon import Dungeon, corner_cells
@@ -11,6 +12,7 @@ from core.data.ressources import ROOMS_DIRECTORY
 from core.world.entities import Player, PlayerRef, Animal, Enemy, Pickup, ItemPickup, ThrownDynamite, Explosion
 from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES
 from core.exploration.player_session import PlayerSession
+from core.exploration.multiplayer_ui import MultiplayerPanelUI
 from core.engine.input import (
     InputState, read_local_keyboard_input,
     read_secondary_keyboard_input, secondary_keyboard_matches_event, SECONDARY_KEYBOARD_BINDINGS,
@@ -34,6 +36,13 @@ class Explorator:
 
     MOVE_SPEED = 180  # pixels/seconde
     RUN_SPEED = 260  # pixels/seconde -- held with SHIFT
+
+    # Chat overlay tuning (see run_networked/_render_chat) -- CHAT_MAX_LENGTH
+    # is enforced client-side as the box is typed into, well under
+    # protocol.MAX_CHAT_TEXT_LENGTH's own wire-level sanity cap.
+    CHAT_MAX_LENGTH = 200
+    CHAT_LOG_MAX = 50
+    CHAT_VISIBLE_LINES = 8
 
     # Footstep sound cadence -- alternates player_footstep_1/2 (see
     # SoundManager) on a plain timer rather than specific walk/run animation
@@ -93,6 +102,24 @@ class Explorator:
         # accidentally damaging each other. When on, _resolve_player_attacks
         # also checks every other session's hitbox.
         self.pvp_enabled = False
+
+        # Chat overlay (T toggles, network play only -- see run_networked):
+        # one shared box, not per-session (there's only ever one local
+        # keyboard typing on a network client). chat_log entries are
+        # {"player_id", "name", "text", "system", "time"} dicts, newest
+        # last, capped at CHAT_LOG_MAX. Never touched by solo run() -- T is
+        # simply unhandled there, nobody to talk to.
+        self.chat_open = False
+        self.chat_input = ""
+        self.chat_log = []
+        self._chat_font = None  # lazily created on first render (needs pygame.font initialized)
+
+        # Multiplayer panel (M toggles, home only while not yet connected --
+        # see run()/run_networked()'s event loops and _is_home_room below).
+        self.multiplayer_panel = MultiplayerPanelUI(
+            x=self.screen.get_width() / 2 - MultiplayerPanelUI.PANEL_WIDTH / 2,
+            y=140,
+        )
 
         self.grid_offset_x = 0
         self.grid_offset_y = 0
@@ -257,6 +284,18 @@ class Explorator:
             spawn[0] + self._spawn_offset_x(session, self.dungeon.tile_size), spawn[1]
         )
 
+    def _is_home_room(self):
+        """True while the currently-open single room is the local player's
+        own home -- mirrors Creator._is_home_room exactly. Shared by
+        _check_home_zoom_switch (further gated to solo play there) and the
+        M-key multiplayer-panel toggle in run() (players host/join "from
+        home only")."""
+        if self.current_room is None:
+            return False
+        if self.settings is None or not self.settings.local_player_name:
+            return False
+        return self.current_room == home_room_name(self.settings.local_player_name)
+
     def _check_home_zoom_switch(self):
         """Zoom-driven switch back to Creator, home room only (see
         core.world.home) -- called from run() only, never run_networked or
@@ -265,11 +304,7 @@ class Explorator:
         home room together is out of scope -- Phase 6e, not yet built), and
         uses self.camera (the merged-view camera, always what a lone local
         session renders through)."""
-        if len(self.players) != 1 or self.current_room is None:
-            return
-        if self.settings is None or not self.settings.local_player_name:
-            return
-        if self.current_room != home_room_name(self.settings.local_player_name):
+        if len(self.players) != 1 or not self._is_home_room():
             return
         if wants_creator(self.camera.zoom):
             local_position = self.players[self._local_player_id].player.position
@@ -1238,6 +1273,114 @@ class Explorator:
         self.players[new_id] = session
         self._local_player_id = new_id
 
+    def start_hosting(self, port=None):
+        """Starts hosting whichever single room this Explorator currently
+        has open (always home in practice -- see MultiplayerPanelUI, only
+        offered while Creator/Explorator._is_home_room()) and immediately
+        connects THIS SAME process to it as a normal NetworkClient over
+        loopback (127.0.0.1) -- the host plays their own hosted world
+        exactly like any other connected player (confirmed with the user
+        over a separate local-authority path: reuses 100% of existing
+        client code -- prediction, chat, rendering -- with zero
+        special-casing, at the cost of a tiny loopback round-trip for the
+        host's own input too). Also starts a discovery.HostAnnouncer so
+        other players on the LAN can find this session without typing an
+        IP. Returns (client, error) -- error is None on success, an
+        explanatory string otherwise, so the caller (MultiplayerPanelUI)
+        can show it as a status line instead of an exception surfacing
+        into the render loop."""
+        from core.network.server import GameServer, DEFAULT_PORT
+        from core.network.client import NetworkClient, ServerFullError
+        from core.network.discovery import HostAnnouncer
+
+        if self.current_room is None:
+            return None, "Aucune salle a heberger (uniquement depuis home)."
+        if port is None:
+            port = DEFAULT_PORT
+
+        try:
+            server = GameServer(port, room=self.current_room, screen=self.screen)
+        except OSError as exc:
+            return None, f"Impossible de demarrer le serveur : {exc}"
+
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+
+        host_name = self.settings.local_player_name if self.settings is not None else "host"
+        announcer = HostAnnouncer(host_name, port, "room", self.current_room)
+        announcer.start()
+
+        try:
+            client = NetworkClient("127.0.0.1", port, name=host_name)
+            welcome = client.wait_for_welcome()
+        except (OSError, TimeoutError, ServerFullError) as exc:
+            server._running = False
+            announcer.stop()
+            return None, f"Connexion locale au serveur echouee : {exc}"
+
+        self._finish_connecting(client, welcome)
+        self.game_manager._game_server = server
+        self.game_manager._host_announcer = announcer
+        return client, None
+
+    def join_session(self, host_ip, port, name=None):
+        """Connects to someone else's hosted session (an entry picked from
+        MultiplayerPanelUI's discovery.SessionBrowser list, or -- not yet
+        exposed in the UI -- a manually-entered address). Returns (client,
+        error), same contract as start_hosting."""
+        from core.network.client import NetworkClient, ServerFullError
+
+        if name is None:
+            name = self.settings.local_player_name if self.settings is not None else "player"
+
+        try:
+            client = NetworkClient(host_ip, port, name=name)
+            welcome = client.wait_for_welcome()
+        except (OSError, TimeoutError, ServerFullError) as exc:
+            return None, f"Connexion echouee : {exc}"
+
+        self._finish_connecting(client, welcome)
+        return client, None
+
+    def _finish_connecting(self, client, welcome):
+        """Shared by start_hosting (connecting to its own loopback server)
+        and join_session (connecting to someone else's) -- loads whichever
+        room/donjon the server says to (mirrors main.py's old run_client
+        sequence), adopts the assigned player_id, and hands the live
+        client to GameManager so its dispatch routes into run_networked
+        instead of run() from now on (see GameManager.run())."""
+        if welcome["room_kind"] == "donjon":
+            self.open_donjon(welcome["room_name"])
+        else:
+            self.open_room(welcome["room_name"])
+        self.adopt_local_player_id(welcome["player_id"])
+        self.game_manager.network_client = client
+
+    def stop_networking(self):
+        """Disconnects (or stops hosting) and returns to solo play. Rather
+        than unwinding every bit of network-driven state (mirrored remote
+        entities/sessions, an assembly that might not even be a real local
+        Dungeon) by hand, GameManager gets a fresh Explorator -- same
+        object graph a brand-new app launch's own GameManager.__init__
+        would build -- and this method's job is just tearing down the
+        network/server objects and handing back that reset. Doesn't touch
+        game_manager.state/pending_room/boot_into_home itself -- the
+        caller (MultiplayerPanelUI's "Deconnecter" handler, inside
+        run_networked's own event loop) sets those and breaks its loop
+        exactly the same way ESC already does, so this method stays a pure
+        teardown with no control-flow side effects of its own."""
+        gm = self.game_manager
+        if gm.network_client is not None:
+            gm.network_client.close()
+            gm.network_client = None
+        if gm._host_announcer is not None:
+            gm._host_announcer.stop()
+            gm._host_announcer = None
+        if gm._game_server is not None:
+            gm._game_server._running = False
+            gm._game_server = None
+        gm.explorator = Explorator(gm)
+        gm.boot_into_home = True
+
     def _dungeon_for_room(self, room_ref):
         """room_ref is None (single-room mode) or a PlacedRoom.index (see
         protocol.build_snapshot) -- the same room-identity convention the
@@ -1625,6 +1768,31 @@ class Explorator:
                 if shared_result == "handled":
                     continue
 
+                if self.multiplayer_panel.is_open:
+                    if event.type == pygame.MOUSEBUTTONDOWN:
+                        result = self.multiplayer_panel.handle_event(event, self)
+                        if result == "disconnected":
+                            self.game_manager.state = GameState.MENU
+                            running = False
+                        continue
+                    if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_m):
+                        self.multiplayer_panel.close()
+                        continue
+                    continue
+
+                if self.chat_open:
+                    self._handle_chat_event(event, client)
+                    continue
+
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_m:
+                    self.multiplayer_panel.open()
+                    continue
+
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_t:
+                    self.chat_open = True
+                    self.chat_input = ""
+                    continue
+
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_F4:
                     client.send(protocol.MSG_PVP_TOGGLE)
                     continue
@@ -1646,6 +1814,8 @@ class Explorator:
             for payload in client.drain():
                 if payload["type"] == protocol.MSG_SNAPSHOT:
                     self.apply_network_snapshot(payload)
+                elif payload["type"] == protocol.MSG_CHAT:
+                    self._append_chat(payload)
 
             if self.game_manager.state != GameState.EXPLORATION:
                 break
@@ -1653,6 +1823,42 @@ class Explorator:
             self._smooth_network_entities(dt)
             self._update_camera()
             self.render()
+
+    def _handle_chat_event(self, event, client):
+        """Routes every event while the chat box is open (run_networked's
+        top-of-loop guard, checked before F4/ESC/session gameplay dispatch
+        so a keystroke while typing can never also trigger PvP-toggle or
+        close the menu) into the text buffer instead -- the identical
+        input pattern Menu's own name-entry field already uses (backspace,
+        printable-char filter, length cap, K_RETURN sends, K_ESCAPE cancels
+        without sending)."""
+        if event.type != pygame.KEYDOWN:
+            return
+        if event.key == pygame.K_RETURN:
+            text = self.chat_input.strip()
+            if text:
+                client.send(protocol.MSG_CHAT, text=text)
+            self.chat_input = ""
+            self.chat_open = False
+        elif event.key == pygame.K_ESCAPE:
+            self.chat_input = ""
+            self.chat_open = False
+        elif event.key == pygame.K_BACKSPACE:
+            self.chat_input = self.chat_input[:-1]
+        elif event.unicode and event.unicode.isprintable():
+            if len(self.chat_input) < self.CHAT_MAX_LENGTH:
+                self.chat_input += event.unicode
+
+    def _append_chat(self, payload):
+        self.chat_log.append({
+            "player_id": payload.get("player_id"),
+            "name": payload.get("name", "?"),
+            "text": payload.get("text", ""),
+            "system": bool(payload.get("system", False)),
+            "time": pygame.time.get_ticks(),
+        })
+        if len(self.chat_log) > self.CHAT_LOG_MAX:
+            self.chat_log = self.chat_log[-self.CHAT_LOG_MAX:]
 
     def update(self, dt):
 
@@ -1737,7 +1943,50 @@ class Explorator:
         if self.victory:
             self._draw_victory_banner()
 
+        self._render_chat()
+
+        self.multiplayer_panel.update(self.game_manager.network_client is not None)
+        self.multiplayer_panel.render(self.screen, self)
+
         pygame.display.flip()
+
+    def _render_chat(self):
+        """A simple Minecraft-style scrollback overlay in the bottom-left
+        corner -- last CHAT_VISIBLE_LINES messages, plus a live input line
+        while chat_open. Deliberately not a new widget class (unlike
+        InventoryPanel) -- just a handful of left-aligned text lines over a
+        translucent backing strip, simple enough not to earn one. No-op
+        with an empty log and the box closed (the common case in solo
+        play, which never opens or receives chat at all)."""
+        if not self.chat_log and not self.chat_open:
+            return
+        if self._chat_font is None:
+            self._chat_font = pygame.font.SysFont("arial", 16)
+        font = self._chat_font
+
+        x = 12
+        y = self.screen.get_height() - (34 if not self.chat_open else 56)
+
+        for entry in reversed(self.chat_log[-self.CHAT_VISIBLE_LINES:]):
+            if entry["system"]:
+                text, color = entry["text"], (255, 210, 90)
+            else:
+                text, color = f"{entry['name']}: {entry['text']}", (255, 255, 255)
+            surface = font.render(text, True, color)
+            backing = pygame.Surface((surface.get_width() + 8, surface.get_height() + 4), pygame.SRCALPHA)
+            backing.fill((0, 0, 0, 140))
+            self.screen.blit(backing, (x - 4, y - 2))
+            self.screen.blit(surface, (x, y))
+            y -= surface.get_height() + 4
+
+        if self.chat_open:
+            cursor = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
+            surface = font.render("> " + self.chat_input + cursor, True, (255, 255, 255))
+            input_y = self.screen.get_height() - 30
+            backing = pygame.Surface((surface.get_width() + 8, surface.get_height() + 4), pygame.SRCALPHA)
+            backing.fill((0, 0, 0, 180))
+            self.screen.blit(backing, (x - 4, input_y - 2))
+            self.screen.blit(surface, (x, input_y))
 
     def _render_inventory_panels(self, panel_rects):
         """Each open panel renders within its own player's viewport rect
@@ -2007,6 +2256,22 @@ class Explorator:
                     running = False
                     continue
                 if shared_result == "handled":
+                    continue
+
+                if self.multiplayer_panel.is_open:
+                    if event.type == pygame.MOUSEBUTTONDOWN:
+                        result = self.multiplayer_panel.handle_event(event, self)
+                        if result == "connected":
+                            running = False  # let GameManager's dispatch route into run_networked
+                        continue
+                    if event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_m):
+                        self.multiplayer_panel.close()
+                        continue
+                    continue  # swallow everything else (movement, TAB...) while open
+
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_m:
+                    if self._is_home_room():
+                        self.multiplayer_panel.open()
                     continue
 
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_TAB:

@@ -34,9 +34,12 @@ import sys
 import threading
 import time
 
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
-
+# No SDL_VIDEODRIVER/SDL_AUDIODRIVER env-forcing at module scope anymore --
+# this module is now also imported by the normal windowed process (hosting
+# from home, see Explorator.start_hosting), which must keep its real
+# display driver. The standalone dummy-driver setup now lives in whichever
+# caller actually needs a headless display (GameServer.__init__ below,
+# only when constructed without an existing `screen`).
 import pygame
 
 from core.engine.gamestate import GameState
@@ -44,6 +47,9 @@ from core.exploration.explorator import Explorator
 from core.data import progression
 from core.data.profile_manager import ProfileManager
 from core.network import protocol
+
+
+DEFAULT_PORT = 5555
 
 
 class _HeadlessGameManager:
@@ -82,11 +88,21 @@ class GameServer:
     FLOOD_STRIKE_LIMIT = 5
     INVALID_STRIKE_LIMIT = 10
 
-    def __init__(self, port, room=None, donjon=None, max_players=4):
+    def __init__(self, port, room=None, donjon=None, max_players=4, screen=None):
+        """screen: pass the real, already-created display Surface when
+        constructing this from inside a normal windowed process (hosting
+        from home -- see Explorator.start_hosting); pygame is already
+        initialized there and must keep its real video driver. Left None
+        for the standalone headless case (main.py's own dedicated-server
+        path, if kept) -- only then does this force the dummy SDL drivers
+        and create its own throwaway 1x1 display, exactly as before."""
         assert (room is None) != (donjon is None), "exactly one of room/donjon must be given"
 
-        pygame.init()
-        screen = pygame.display.set_mode((1, 1))
+        if screen is None:
+            os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+            os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+            pygame.init()
+            screen = pygame.display.set_mode((1, 1))
 
         self._game_manager = _HeadlessGameManager(screen)
         self.explorator = Explorator(self._game_manager)
@@ -148,17 +164,28 @@ class GameServer:
             self._shutdown()
 
     # ------------------------------------------------------
-    # Admin console (first pass): a daemon thread reads operator commands
-    # from stdin and queues them, mirroring every other external-input thread
-    # here (one accept thread, one reader thread per client) -- only the main
-    # tick thread ever applies one, same "no locking needed around the
-    # simulation" invariant as _drain_incoming.
+    # Admin commands: a shared dispatcher (_dispatch_command) reused by two
+    # sources -- a daemon thread reading trusted operator lines from stdin
+    # (mirroring every other external-input thread here: one accept thread,
+    # one reader thread per client), and a "/..." chat message from a
+    # connected client (see _apply_message's MSG_CHAT branch), which is NOT
+    # trusted the same way and gets an extra host-only check for privileged
+    # verbs first. Only the main tick thread ever applies one, same "no
+    # locking needed around the simulation" invariant as _drain_incoming.
     # ------------------------------------------------------
 
     ADMIN_HELP = (
         "commands: level <player_id> <N|+N|-N> | kick <player_id> [reason] | "
-        "list | stop | help"
+        "list | stop | help -- same commands work as /... in chat, "
+        "level/kick/stop reserved to the host there"
     )
+
+    # Verbs a chat-originated command must be the host to run -- level/kick/
+    # stop change or end someone else's session; list/help are harmless
+    # and stay open to everyone. Stdin (requester_player_id=None) always
+    # skips this check -- an operator with console access is trusted by
+    # definition.
+    PRIVILEGED_COMMANDS = ("level", "kick", "stop", "shutdown", "kill")
 
     def _admin_console_loop(self):
         try:
@@ -175,53 +202,64 @@ class GameServer:
                 line = self._admin_commands.get_nowait()
             except queue.Empty:
                 break
-            self._apply_admin_command(line)
+            reply = self._dispatch_command(line)
+            if reply is not None:
+                print(f"[server] {reply}")
 
-    def _apply_admin_command(self, line):
-        """A malformed/unknown admin command should never crash the shared
-        tick loop -- same defense-in-depth reasoning as _apply_message's own
-        try/except around a client's message."""
+    def _dispatch_command(self, line, requester_player_id=None):
+        """Parses and applies one command line, returning an optional reply
+        string -- the caller decides where it goes (printed for the stdin
+        admin console, sent back privately over chat for a network sender,
+        see _apply_message). requester_player_id is None for the trusted
+        stdin console (every command allowed); a real player_id gates
+        PRIVILEGED_COMMANDS to _host_player_id() only. A malformed/unknown
+        command should never crash the shared tick loop -- same
+        defense-in-depth reasoning as _apply_message's own try/except
+        around a client's message."""
         parts = line.split()
         if not parts:
-            return
+            return None
         command, args = parts[0].lower(), parts[1:]
+
+        if requester_player_id is not None and command in self.PRIVILEGED_COMMANDS:
+            if requester_player_id != self._host_player_id():
+                return "reserve a l'hote."
 
         try:
             if command in ("help", "?"):
-                print(f"[server] {self.ADMIN_HELP}")
+                return self.ADMIN_HELP
             elif command in ("list", "players"):
-                self._cmd_list_players()
+                return self._cmd_list_players()
             elif command == "level" and len(args) >= 2:
-                self._cmd_level(args[0], args[1])
+                return self._cmd_level(args[0], args[1])
             elif command == "kick" and args:
-                self._cmd_kick(args[0], " ".join(args[1:]) or "kicked by admin")
+                return self._cmd_kick(args[0], " ".join(args[1:]) or "kicked by admin")
             elif command in ("stop", "shutdown", "kill"):
-                print("[server] admin requested shutdown")
                 self._running = False
+                return "admin requested shutdown"
             else:
-                print(f"[server] unknown command: {line!r} ({self.ADMIN_HELP})")
+                return f"unknown command: {line!r} ({self.ADMIN_HELP})"
         except Exception as exc:
-            print(f"[server] admin command {line!r} failed: {exc}")
+            return f"command {line!r} failed: {exc}"
 
     def _cmd_list_players(self):
         if not self.explorator.players:
-            print("[server] no players connected")
-            return
+            return "no players connected"
+        lines = []
         for player_id, session in sorted(self.explorator.players.items()):
             if session.profile is not None:
-                print(f"  {player_id}: {session.profile.name} (level {session.profile.level})")
+                lines.append(f"{player_id}: {session.profile.name} (level {session.profile.level})")
             else:
-                print(f"  {player_id}: (no profile)")
+                lines.append(f"{player_id}: (no profile)")
+        return "\n".join(lines)
 
     def _cmd_level(self, player_id_str, value_str):
         player_id = int(player_id_str)
         session = self.explorator.players.get(player_id)
         if session is None:
-            print(f"[server] no player {player_id}")
-            return
+            return f"no player {player_id}"
         if session.profile is None:
-            print(f"[server] player {player_id} has no profile to level")
-            return
+            return f"player {player_id} has no profile to level"
 
         current_level = session.profile.level
         if value_str[0] in "+-":
@@ -232,14 +270,14 @@ class GameServer:
 
         session.profile.xp = progression.xp_for_level(new_level)
         ProfileManager().save(session.profile)
-        print(f"[server] player {player_id} ({session.profile.name}) level {current_level} -> {new_level}")
+        return f"player {player_id} ({session.profile.name}) level {current_level} -> {new_level}"
 
     def _cmd_kick(self, player_id_str, reason):
         player_id = int(player_id_str)
         if player_id not in self.explorator.players:
-            print(f"[server] no player {player_id}")
-            return
+            return f"no player {player_id}"
         self._kick(player_id, reason)
+        return f"kicking player {player_id}: {reason}"
 
     def _accept_loop(self):
         while self._running:
@@ -249,12 +287,45 @@ class GameServer:
                 return
             threading.Thread(target=self._handle_connection, args=(conn, addr), daemon=True).start()
 
+    @staticmethod
+    def _recv_line(conn, buffer_holder):
+        """Reads one newline-terminated line from `conn`'s raw socket.
+        `buffer_holder` is a 1-element list acting as an in/out parameter
+        -- its bytes are updated after *every* individual recv() call, not
+        just once the full line is assembled, so a socket.timeout raised
+        mid-read (conn.settimeout()) never loses bytes already received;
+        the caller just calls this again with the same buffer_holder after
+        reacting to the timeout (e.g. checking for a kick). Returns the
+        line (without its trailing "\\n"), or None on clean EOF.
+
+        Deliberately NOT socket.makefile()'s buffered reader: a raw
+        socket.recv() reliably raises socket.timeout on every call after
+        conn.settimeout() elapses, while a makefile()-wrapped reader's
+        underlying SocketIO permanently taints itself after its FIRST
+        timeout and raises a plain OSError ("cannot read from timed out
+        object") on every read after that -- a real CPython gotcha this
+        server used to hit on any connection idle for longer than
+        READ_POLL_TIMEOUT, found via an ad hoc idle-connection test. Every
+        previous smoke test kept connections busy with constant input
+        traffic (a real player always sends "input" every rendered frame)
+        and so never actually exercised a *second* timeout on the same
+        connection until hosting-from-home made a genuinely idle
+        connection (sitting in a menu/panel, or simply not moving) common."""
+        while b"\n" not in buffer_holder[0]:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return None
+            buffer_holder[0] += chunk
+        line, _, rest = buffer_holder[0].partition(b"\n")
+        buffer_holder[0] = rest
+        return line
+
     def _handle_connection(self, conn, addr):
-        reader = conn.makefile("rb")
         writer = conn.makefile("wb")
         player_id = None
+        recv_buffer = [b""]
         try:
-            first_line = reader.readline()
+            first_line = self._recv_line(conn, recv_buffer)
             if not first_line:
                 return
             try:
@@ -320,11 +391,11 @@ class GameServer:
                     break
 
                 try:
-                    line = reader.readline()
+                    line = self._recv_line(conn, recv_buffer)
                 except socket.timeout:
                     continue  # nothing arrived within READ_POLL_TIMEOUT -- loop back to the kick check above
 
-                if not line:
+                if line is None:
                     break  # EOF -- the client closed its end
 
                 if not line.strip():
@@ -417,8 +488,34 @@ class GameServer:
                     return
                 self.explorator.pvp_enabled = not self.explorator.pvp_enabled
                 print(f"[server] PvP {'ON' if self.explorator.pvp_enabled else 'OFF'} (host: player {player_id})")
+            elif msg_type == protocol.MSG_CHAT:
+                self._apply_chat(player_id, session, payload)
         except (KeyError, ValueError, TypeError) as exc:
             print(f"[server] player {player_id} sent a message that failed to apply ({exc}), ignoring")
+
+    def _apply_chat(self, player_id, session, payload):
+        """A "/..." message is routed to _dispatch_command (host-only for
+        privileged verbs) and replied to privately -- the requester alone,
+        never broadcast, since a command's result/rejection isn't something
+        every other player needs to see. Plain text is broadcast to
+        everyone as an ordinary chat line under the sender's own profile
+        name (or a generic placeholder for a session with none)."""
+        text = payload.get("text", "").strip()
+        if not text:
+            return
+
+        if text.startswith("/"):
+            reply = self._dispatch_command(text[1:], requester_player_id=player_id)
+            if reply is not None:
+                self._send_to(player_id, protocol.encode(
+                    protocol.MSG_CHAT, player_id=player_id, name="serveur", text=reply, system=True,
+                ))
+            return
+
+        name = session.profile.name if session.profile is not None else f"joueur {player_id}"
+        self._broadcast(protocol.encode(
+            protocol.MSG_CHAT, player_id=player_id, name=name, text=text, system=False,
+        ))
 
     def _host_player_id(self):
         """The "host" is whichever currently-connected session has the
@@ -473,6 +570,22 @@ class GameServer:
                     dead.append(player_id)
             for player_id in dead:
                 self._clients.pop(player_id, None)
+
+    def _send_to(self, player_id, raw_bytes):
+        """Same idea as _broadcast, but to exactly one client -- used for a
+        chat command's private reply/rejection (see _apply_chat), which
+        nobody else needs to see. Silently no-ops if that player has
+        already disconnected (a dead-writer race with _broadcast's own
+        cleanup, harmless either way)."""
+        with self._clients_lock:
+            writer = self._clients.get(player_id)
+        if writer is None:
+            return
+        try:
+            writer.write(raw_bytes)
+            writer.flush()
+        except OSError:
+            pass
 
     def _shutdown(self):
         self._running = False

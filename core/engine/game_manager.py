@@ -44,6 +44,16 @@ class GameManager:
         # Menu._redirect_to_home). Irrelevant in headless mode -- Menu is
         # never reached there.
         self.boot_into_home = True
+        # Set by Explorator.start_hosting/join_session (via the home-only
+        # MultiplayerPanelUI, M key) once a connection is live -- makes
+        # run()'s EXPLORATION dispatch below route into run_networked
+        # instead of the normal solo run(). _game_server/_host_announcer
+        # are host-side only (None when just joined, not hosting), kept
+        # here so Explorator.stop_networking can tear both down without
+        # GameManager needing to know anything about how they work.
+        self.network_client = None
+        self._game_server = None
+        self._host_announcer = None
         self.clock = pygame.time.Clock()
         self.menu = Menu(self)
         self.creator = Creator(self)
@@ -104,4 +114,7 @@ class GameManager:
                     if self.pending_zoom_carry is not None:
                         self.explorator.camera.zoom = self.pending_zoom_carry
                         self.pending_zoom_carry = None
-                self.explorator.run()
+                if self.network_client is not None:
+                    self.explorator.run_networked(self.network_client)
+                else:
+                    self.explorator.run()
