@@ -121,6 +121,18 @@ class Explorator:
             y=140,
         )
 
+        # Dungeon-entry sync barrier (see _check_dungeon_entrance): player_
+        # ids who have already crossed home's dungeon_entrance and are now
+        # frozen, waiting for every other CURRENTLY connected player
+        # (self.players.keys(), a live set -- shrinks on its own if someone
+        # disconnects while others wait) to do the same before generation
+        # actually fires. Authoritative only where update() actually runs
+        # (solo-local, or the server's own Explorator) -- mirrored onto a
+        # network client via the snapshot's own "dungeon_entrance_ready"
+        # field (apply_network_snapshot), same pattern self.victory already
+        # uses to reach clients that never simulate it themselves.
+        self.dungeon_entrance_ready = set()
+
         self.grid_offset_x = 0
         self.grid_offset_y = 0
         self.grid_zoom = 1
@@ -235,6 +247,7 @@ class Explorator:
         self.assembly = assembly
         self.current_room = None
         self.victory = False
+        self.dungeon_entrance_ready.clear()
 
         for room in self.assembly.rooms:
             room.dungeon.spawn_animals()
@@ -326,11 +339,72 @@ class Explorator:
         server-authoritative principle every other gameplay fact already
         follows (buttons, combat, pickups)."""
         if self.assembly is None:
+            # Checked unconditionally every frame, not only right after a
+            # fresh crossing -- a player disconnecting while others wait at
+            # the barrier can complete it for whoever's left on its own,
+            # without needing anyone to cross again. See
+            # _maybe_complete_dungeon_entrance_barrier's own docstring for
+            # why this must be the only place that ever actually triggers
+            # generation.
+            if self._maybe_complete_dungeon_entrance_barrier():
+                return
             for session in self.players.values():
                 if self._check_dungeon_entrance(session):
                     return  # world just got replaced -- nothing else this frame is still valid to check
         for session in self.players.values():
             self._check_dungeon_exit(session)
+
+    def _dungeon_entrance_source_profile(self):
+        """Whose saved generation parameters (Profile.generator_room_names/
+        generator_room_count) drive generation once the sync barrier
+        completes -- the host's (lowest player_id, matching GameServer.
+        _host_player_id's own convention), not whichever player's crossing
+        happens to be the one that completes the barrier, so the result
+        never depends on crossing order. Works identically solo (the one
+        session already IS the host) and on a real multiplayer server,
+        where every session's own profile is already loaded
+        (add_network_session) -- deliberately doesn't read self.settings.
+        local_player_name, since a server's own self.settings is always
+        None (see _HeadlessGameManager)."""
+        if not self.players:
+            return None
+        return self.players[min(self.players.keys())].profile
+
+    def _maybe_complete_dungeon_entrance_barrier(self):
+        """True (after actually completing generation) iff
+        self.dungeon_entrance_ready is non-empty and already covers every
+        CURRENTLY connected player (self.players.keys(), a live set).
+        Called every frame from _resolve_dungeon_transitions -- not just
+        reactively from _check_dungeon_entrance the moment someone crosses
+        -- specifically so a player disconnecting while others are still
+        waiting gets noticed too: remove_session only ever discards the
+        departing id from the ready set, it deliberately never calls this
+        itself, since remove_session can run from a connection's own
+        reader thread (server-side) where touching shared world state via
+        generate_assembly/_enter_assembly would be unsafe -- only the main
+        tick thread's own update() -> _resolve_dungeon_transitions call
+        ever reaches here. On a failed attempt (no saved generation
+        selection, or nothing in it has a spawn+exit) the ready set is
+        still cleared rather than left stuck -- everyone frozen un-freezes
+        on their own, at the cost of needing to cross again once the
+        issue's fixed."""
+        if not self.dungeon_entrance_ready or self.dungeon_entrance_ready < set(self.players.keys()):
+            return False
+
+        self.dungeon_entrance_ready.clear()
+
+        profile = self._dungeon_entrance_source_profile()
+        if profile is None or not profile.generator_room_names:
+            print("[dungeon_entrance] Aucune selection de generation enregistree (voir le panneau Generation dans le Creator).")
+            return False
+
+        assembly = generate_assembly(profile.generator_room_names, profile.generator_room_count)
+        if assembly is None:
+            print("[dungeon_entrance] Aucune salle avec spawn + sortie dans la selection.")
+            return False
+
+        self._enter_assembly(assembly)
+        return True
 
     def _check_dungeon_entrance(self, session):
         """Single-room mode only -- a dungeon_entrance-role object can only
@@ -338,14 +412,22 @@ class Explorator:
         RolePanelUI's "Entree de donjon" row), so this never fires in
         assembly mode. Edge-triggered off session's feet grid cell freshly
         matching such an object (session.last_dungeon_entrance_pos, same
-        shape as last_door_obj). On a fresh crossing: loads the local
-        profile's saved generation parameters (Creator._apply_generation
-        persists the same ones there), runs generate_assembly exactly like
-        the "Generer" button does, and on success switches straight into
-        Exploration in the result via _enter_assembly -- without
-        GameManager's pending_room indirection, since this already fires
-        mid-update() inside Exploration. Returns True iff a generation
-        actually happened this frame."""
+        shape as last_door_obj).
+
+        Sync barrier: a fresh crossing marks session.player_id "ready"
+        (self.dungeon_entrance_ready) and freezes it in place (see
+        update()'s per-session loop) rather than generating immediately --
+        generation only actually fires once every CURRENTLY connected
+        player has crossed, via _maybe_complete_dungeon_entrance_barrier
+        (see its own docstring for why that's a separate, unconditionally-
+        checked-every-frame method rather than inlined here). Solo play is
+        unaffected in practice: with exactly one session, that one
+        crossing already satisfies the barrier on the same frame, identical
+        to the old immediate-trigger behavior. Returns True iff a
+        generation actually happened this frame."""
+        if session.player_id in self.dungeon_entrance_ready:
+            return False
+
         hitbox = session.player.get_hitbox()
         grid_x, grid_y = self._feet_grid_cell(hitbox)
         obj = self.dungeon.object_manager.get_object_at(grid_x, grid_y)
@@ -358,20 +440,8 @@ class Explorator:
             return False
         session.last_dungeon_entrance_pos = (grid_x, grid_y)
 
-        if self.settings is None or not self.settings.local_player_name:
-            return False
-        profile = ProfileManager().load(self.settings.local_player_name)
-        if not profile.generator_room_names:
-            print("[dungeon_entrance] Aucune selection de generation enregistree (voir le panneau Generation dans le Creator).")
-            return False
-
-        assembly = generate_assembly(profile.generator_room_names, profile.generator_room_count)
-        if assembly is None:
-            print("[dungeon_entrance] Aucune salle avec spawn + sortie dans la selection.")
-            return False
-
-        self._enter_assembly(assembly)
-        return True
+        self.dungeon_entrance_ready.add(session.player_id)
+        return self._maybe_complete_dungeon_entrance_barrier()
 
     def _check_dungeon_exit(self, session):
         """Edge-triggered off session's feet grid cell freshly matching an
@@ -1252,6 +1322,15 @@ class Explorator:
 
     def remove_session(self, player_id):
         self.players.pop(player_id, None)
+        # Only discards the departing id from the ready set -- deliberately
+        # does NOT check/trigger sync-barrier completion here (this can run
+        # from a connection's own reader thread server-side, where touching
+        # shared world state via generate_assembly would be unsafe). The
+        # main tick thread's own per-frame check
+        # (_maybe_complete_dungeon_entrance_barrier, called unconditionally
+        # from _resolve_dungeon_transitions) is what actually notices the
+        # barrier is now satisfied for whoever's left.
+        self.dungeon_entrance_ready.discard(player_id)
 
     # ------------------------------------------------------
     # Networking (Phase 3) -- client-side: applying a server snapshot onto
@@ -1588,6 +1667,7 @@ class Explorator:
         notes above)."""
         self.pvp_enabled = payload["pvp_enabled"]
         self.victory = payload["victory"]
+        self.dungeon_entrance_ready = set(payload.get("dungeon_entrance_ready", []))
         if payload.get("game_over") and self.game_manager.state == GameState.EXPLORATION:
             self.game_manager.state = GameState.MENU
 
@@ -1817,6 +1897,15 @@ class Explorator:
                 elif payload["type"] == protocol.MSG_CHAT:
                     self._append_chat(payload)
 
+            if not client.is_connected:
+                # Kicked, the server stopped, or a network error -- nothing
+                # left to render (the server has already forgotten this
+                # session), so there's no "one more frame" to fall through
+                # to render, same as every other state-changing branch here.
+                print("[client] Connexion perdue (deconnecte ou hote arrete).")
+                self.game_manager.state = GameState.MENU
+                break
+
             if self.game_manager.state != GameState.EXPLORATION:
                 break
 
@@ -1875,14 +1964,18 @@ class Explorator:
             self._update_world(dt, self._player_refs())
             return
 
-        # Per-player freeze: a session with its own inventory open only
-        # pauses itself (idle animation + its own panel ticking) -- everyone
-        # else (other sessions, animals/enemies/the world) keeps going, so
-        # one player checking their bag doesn't stop the other from playing.
+        # Per-player freeze: a session with its own inventory open, or
+        # already waiting at a dungeon_entrance for the rest of the party
+        # (see _check_dungeon_entrance's sync barrier), only pauses itself
+        # (idle animation ticking) -- everyone else (other sessions,
+        # animals/enemies/the world) keeps going.
         for session in self.players.values():
             if session.inventory_open:
                 session.update_frozen(dt)
                 session.inventory_panel.update(dt)
+                continue
+            if session.player_id in self.dungeon_entrance_ready:
+                session.update_frozen(dt)
                 continue
             self._apply_requested_actions(session)
             self._simulate_movement(session, dt)
@@ -1943,12 +2036,38 @@ class Explorator:
         if self.victory:
             self._draw_victory_banner()
 
+        self._render_dungeon_entrance_barrier()
+
         self._render_chat()
 
         self.multiplayer_panel.update(self.game_manager.network_client is not None)
         self.multiplayer_panel.render(self.screen, self)
 
         pygame.display.flip()
+
+    def _render_dungeon_entrance_barrier(self):
+        """A small top-center banner while the dungeon-entry sync barrier
+        (_check_dungeon_entrance) is active -- at least one player has
+        crossed home's dungeon_entrance but not everyone currently
+        connected has yet. Never shows in solo play: with exactly one
+        session, the barrier always completes the same frame it's first
+        crossed, so self.dungeon_entrance_ready never holds at a
+        partial/nonzero-but-incomplete state long enough to render."""
+        ready_count = len(self.dungeon_entrance_ready)
+        total = len(self.players)
+        if ready_count == 0 or ready_count >= total:
+            return
+
+        if self._chat_font is None:
+            self._chat_font = pygame.font.SysFont("arial", 16)
+        text = f"En attente des autres joueurs : {ready_count}/{total} prets"
+        surface = self._chat_font.render(text, True, (255, 255, 255))
+        x = self.screen.get_width() / 2 - surface.get_width() / 2
+        y = 16
+        backing = pygame.Surface((surface.get_width() + 16, surface.get_height() + 10), pygame.SRCALPHA)
+        backing.fill((0, 0, 0, 160))
+        self.screen.blit(backing, (x - 8, y - 5))
+        self.screen.blit(surface, (x, y))
 
     def _render_chat(self):
         """A simple Minecraft-style scrollback overlay in the bottom-left

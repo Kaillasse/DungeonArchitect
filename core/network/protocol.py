@@ -244,6 +244,14 @@ def build_snapshot(explorator, tick: int, terrain_versions: dict) -> dict:
         "type": MSG_SNAPSHOT, "tick": tick,
         "pvp_enabled": explorator.pvp_enabled, "victory": explorator.victory,
         "game_over": explorator.game_manager.state.name != "EXPLORATION",
+        # Dungeon-entry sync barrier (Explorator._check_dungeon_entrance) --
+        # player_ids currently frozen, waiting for the rest of the party to
+        # also cross home's dungeon_entrance. A client never runs the
+        # barrier logic itself (only the server/solo-local Explorator does,
+        # inside update()), so this is how it learns to show a "waiting for
+        # players" indicator at all -- same reasoning "victory"/
+        # "pvp_enabled" are here instead of being simulated client-side.
+        "dungeon_entrance_ready": sorted(explorator.dungeon_entrance_ready),
         "players": players, "animals": animals, "enemies": enemies,
         "pickups": pickups, "objects": objects,
         "dynamites": dynamites, "explosions": explosions,

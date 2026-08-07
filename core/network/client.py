@@ -55,6 +55,15 @@ class NetworkClient:
                 raise ServerFullError("Server is full")
         raise TimeoutError("No welcome message received from server")
 
+    @property
+    def is_connected(self):
+        """False once the connection is gone for any reason -- kicked, the
+        server stopped, a network error on send/receive -- checked once a
+        frame by Explorator.run_networked so a client whose connection
+        just died actually notices and returns to the menu instead of
+        rendering a now-frozen, server-abandoned world forever."""
+        return self._running
+
     def send(self, msg_type, **fields):
         if not self._running:
             return
