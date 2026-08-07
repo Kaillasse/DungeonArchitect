@@ -126,6 +126,69 @@ OBJECT_TYPES = {
         "frame_size": 32,
         "enemy": True,
     },
+    "stairs": {
+        # Sourced from basictileset.png frame 26, not a dedicated
+        # per-object sheet like every other entry here -- cropped once into
+        # its own small file (Phase 6a) to keep load_object_frames'
+        # one-sheet-per-type convention rather than teaching it to read a
+        # sub-region of a shared tileset. Custom placement (see
+        # ObjectManager._resolve_placement/_stairs_orientation): valid on an
+        # ordinary FLOOR cell, or on an EMPTY cell that has a FLOOR neighbor
+        # (a room's void-facing edge) -- "variant"="flip" mirrors the sprite
+        # horizontally when that floor neighbor is specifically to the west,
+        # so a single asset covers both orientations without a second file.
+        "asset": "tiles/stairs.png",
+        "placement": "stairs",
+        "size": (1, 1),
+        "frames": 1,
+    },
+    "cave_entrance": {
+        # basictileset.png frame 27. Same doorway shape/validity as
+        # gate/wall (ObjectManager.is_valid_doorway) -- see
+        # _resolve_placement -- but always open: no "linkable"/
+        # "blocks_until_open", just "walkable" like a button, since this is
+        # meant as a level-exit marker, not a lockable door. Not yet wired
+        # into core.world.assembly's ENTRY_EXIT_TYPES (Phase 6e).
+        "asset": "tiles/cave_entrance.png",
+        "placement": "doorway",
+        "size": (1, 1),
+        "frames": 1,
+        "walkable": True,
+    },
+    "big_entrance": {
+        # basictileset.png frames 17 (left half) + 23 (right half), composed
+        # side-by-side once into one 32x16 static asset (Phase 6a) -- purely
+        # decorative wall dressing, 2 cells wide, placed on a WALL cell like
+        # the plain (non-L/R) torch variant. "frames": 1 with a non-square
+        # asset is why load_object_frames gained its whole-image branch.
+        "asset": "tiles/big_entrance.png",
+        "placement": "wall",
+        "size": (2, 1),
+        "frames": 1,
+    },
+    "pillar": {
+        # basictileset.png frame 18 (base). Decorative, 1 cell wide x 2
+        # tall, placed on FLOOR like a vase -- but unlike every other entry
+        # here, placing one actually creates TWO object dicts (see
+        # ObjectManager.add_object's "pillar" branch): this base (blocks
+        # movement, the default/no-variant sprite) and a companion "top"
+        # (variant="top", frame 12 via the variants override below) one
+        # cell north, walkable and rendered in front of the player
+        # (ObjectManager.is_foreground_object) -- exactly the same
+        # background/foreground split already used by torch's L/R variants,
+        # just spread across two linked objects instead of one. Not
+        # draggable in Phase 6a (see _resolve_placement's "pillar" branch
+        # and the note on add_object) -- erasing the base prunes the
+        # orphaned top automatically.
+        "asset": "tiles/pillar.png",
+        "placement": "pillar",
+        "size": (1, 1),
+        "frames": 1,
+        "blocks_movement": True,
+        "variants": {
+            "top": "tiles/pillar_top.png",
+        },
+    },
     "lilchest": {
         # 4 columns x 2 rows: row 0 idle/closed, row 1 the opening animation
         # -- "frames" is the TOTAL flat count load_object_frames slices into
@@ -170,6 +233,10 @@ OBJECT_LIST = [
     "skeleton1",
     "skeleton2",
     "lilchest",
+    "stairs",
+    "cave_entrance",
+    "big_entrance",
+    "pillar",
 ]
 
 # Object types backed by a live, wandering entity (core.world.entities.Animal)
@@ -304,6 +371,16 @@ def load_object_frames(object_type, variant=None):
     asset = PROJECT_ROOT / "assets" / asset_path
     sheet = pygame.image.load(asset).convert_alpha()
 
+    if config["frames"] == 1:
+        # A single static frame whose asset is pre-sized exactly to its
+        # final footprint (e.g. "big_entrance", a 2-wide object with a 32x16
+        # asset) -- no frame_size/rows slicing makes sense here, since every
+        # other type assumes SQUARE frame_size x frame_size cells. Every
+        # existing type sets "frames" to its actual per-row column count
+        # (always >= 1 for an animated/static-but-square sprite), so this
+        # only ever affects a type that deliberately opts into it.
+        return [sheet]
+
     frame_size = config.get("frame_size", 24 if object_type == "spawn" else 16)
     rows = config.get("rows", 1)
     columns = config["frames"] // rows
@@ -399,6 +476,24 @@ class ObjectManager:
 
         self.objects.append(placed)
 
+        if object_type == "pillar":
+            # Placing a pillar actually creates two linked objects: this one
+            # (the base, just appended) and a companion "top" one cell north
+            # -- _resolve_placement's "pillar" branch already confirmed both
+            # cells are FLOOR before we got here, so the top is guaranteed
+            # valid too. See OBJECT_TYPES["pillar"]/is_foreground_object for
+            # why it needs to exist as its own object instead of a taller
+            # sprite on the base alone (the top half must be walkable and
+            # drawn in front of the player, the base must block -- two
+            # different per-cell behaviors the current one-object-one-
+            # footprint model can't express by itself).
+            self.objects.append({
+                "type": "pillar",
+                "x": grid_x,
+                "y": grid_y - 1,
+                "variant": "top",
+            })
+
         return True
 
     def get_object_at(self, grid_x, grid_y):
@@ -420,8 +515,17 @@ class ObjectManager:
         return OBJECT_TYPES[object_type].get("linkable", False)
 
     def is_foreground_object(self, obj):
-        """Drawn after (in front of) the player, and walkable despite sitting on a WALL cell -- currently just L/R wall-mounted torches; a straight torch stays a plain blocking wall decoration."""
-        return obj["type"] == "torch" and obj.get("variant") in ("L", "R")
+        """Drawn after (in front of) the player -- an L/R wall-mounted torch
+        (also walkable despite sitting on a WALL cell, unlike a straight
+        torch, a plain blocking wall decoration) or a pillar's "top" half
+        (walkable for a different reason: it just sits on an ordinary FLOOR
+        cell, same as any other empty floor tile -- only its base half
+        blocks, see OBJECT_TYPES["pillar"])."""
+        if obj["type"] == "torch":
+            return obj.get("variant") in ("L", "R")
+        if obj["type"] == "pillar":
+            return obj.get("variant") == "top"
+        return False
 
     def is_cell_walkable(self, grid_x, grid_y):
         if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
@@ -527,8 +631,13 @@ class ObjectManager:
                 if link_target["x"] == old_x and link_target["y"] == old_y:
                     link_target["x"], link_target["y"] = new_x, new_y
 
-    def _resolve_placement(self, object_type, grid_x, grid_y):
-        """Returns (is_valid, variant) for placing/moving object_type at this cell."""
+    def _resolve_placement(self, object_type, grid_x, grid_y, variant=None):
+        """Returns (is_valid, variant) for placing/moving object_type at this
+        cell. `variant` is only meaningful for a type whose validity depends
+        on *which* variant is being checked -- currently just "pillar"'s
+        "top" companion, which can't be inferred from cell contents alone
+        the way torch's L/R can. Every other type ignores the parameter and
+        re-derives its own variant fresh, same as before this was added."""
         if object_type == "torch":
             variant = self._torch_variant(grid_x, grid_y)
             if variant is not None:
@@ -537,11 +646,63 @@ class ObjectManager:
                 return True, None
             return False, None
 
-        if object_type in ("gate", "wall"):
+        if object_type in ("gate", "wall", "cave_entrance"):
             return self.is_valid_doorway(grid_x, grid_y), None
+
+        if object_type == "stairs":
+            return self._stairs_orientation(grid_x, grid_y)
+
+        if object_type == "pillar":
+            return self._pillar_validity(grid_x, grid_y, variant)
 
         is_valid = self.dungeon.logical_grid[grid_y][grid_x] == self._required_cell(object_type)
         return is_valid, None
+
+    def _stairs_orientation(self, grid_x, grid_y):
+        """(is_valid, variant) for stairs: valid directly on a FLOOR cell (no
+        flip -- an ordinary interior placement), or on an EMPTY cell that has
+        at least one FLOOR neighbor (a room's void-facing edge) -- "flip"
+        mirrors the single stairs.png asset horizontally when that floor
+        neighbor is specifically to the west, so it visually faces back
+        toward the room regardless of which side of it the floor is on."""
+        cell = self.dungeon.logical_grid[grid_y][grid_x]
+        if cell == FLOOR:
+            return True, None
+        if cell != EMPTY:
+            return False, None
+
+        if grid_x > 0 and self.dungeon.logical_grid[grid_y][grid_x - 1] == FLOOR:
+            return True, "flip"
+
+        for nx, ny in ((grid_x + 1, grid_y), (grid_x, grid_y - 1), (grid_x, grid_y + 1)):
+            if (
+                0 <= nx < self.dungeon.width and 0 <= ny < self.dungeon.height
+                and self.dungeon.logical_grid[ny][nx] == FLOOR
+            ):
+                return True, None
+
+        return False, None
+
+    def _pillar_validity(self, grid_x, grid_y, variant):
+        """(is_valid, variant) for pillar. variant="top" checks this cell is
+        FLOOR and that a pillar base (variant != "top") sits directly south
+        of it -- an orphaned top (its base erased) fails this and gets
+        dropped by prune_invalid automatically. Anything else checks the
+        base's own requirement: this cell and the one north of it both
+        FLOOR, so there's room for a base here and a top above it."""
+        if variant == "top":
+            if self.dungeon.logical_grid[grid_y][grid_x] != FLOOR:
+                return False, "top"
+            base = self.get_object_at(grid_x, grid_y + 1)
+            if base is None or base["type"] != "pillar" or base.get("variant") == "top":
+                return False, "top"
+            return True, "top"
+
+        if self.dungeon.logical_grid[grid_y][grid_x] != FLOOR:
+            return False, None
+        if grid_y == 0 or self.dungeon.logical_grid[grid_y - 1][grid_x] != FLOOR:
+            return False, None
+        return True, None
 
     def _torch_variant(self, grid_x, grid_y):
         """L/R variant for a torch on a floor cell with an adjacent wall: wall to the right -> R, wall to the left -> L. None if this isn't a valid floor-beside-a-wall spot."""
@@ -591,10 +752,21 @@ class ObjectManager:
         return False
 
     def prune_invalid(self):
-        """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased), and any links left dangling by that."""
+        """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased), and any links left dangling by that.
+
+        Passes each object's own `variant` through to `_resolve_placement` --
+        needed for a pillar's "top" half, whose validity depends on its base
+        sibling still existing (see `_pillar_validity`); every other type
+        ignores the parameter and re-derives its own variant fresh, same as
+        always. Note: since this rebuilds `self.objects` in one pass, an
+        orphaned pillar top whose base becomes invalid in this *same* call
+        still sees that base via `get_object_at` (the old list isn't
+        reassigned until the whole comprehension finishes) and survives one
+        extra edit before the next prune_invalid() call catches it -- a
+        one-cycle lag, not a permanent stuck state."""
         self.objects = [
             obj for obj in self.objects
-            if self._resolve_placement(obj["type"], obj["x"], obj["y"])[0]
+            if self._resolve_placement(obj["type"], obj["x"], obj["y"], obj.get("variant"))[0]
         ]
 
         existing = {(obj["x"], obj["y"]) for obj in self.objects}

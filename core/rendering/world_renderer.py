@@ -23,6 +23,13 @@ class WorldRenderer:
     # patch over.
     BORDER_TILE_INDEX = 25
 
+    # basictileset.png frame 20 -- the decorated floor tile drawn under a
+    # placed "spawn" object instead of whatever the autotiler would
+    # otherwise resolve there (Phase 6a), same "override this cell's tile
+    # index before blitting" pattern _doorway_cells already uses for
+    # gate/wall/cave_entrance.
+    SPAWN_FLOOR_SPRITE = 20
+
     def __init__(self):
         self.tileset = load_tileset()
         self._tile_cache = {}
@@ -65,6 +72,7 @@ class WorldRenderer:
         tile_px = round(tile_size * zoom)
         columns = self.tileset.get_width() // TILE_SIZE
         doorway_cells = self._doorway_cells(dungeon)
+        spawn_cells = self._spawn_cells(dungeon)
 
         origin_x, origin_y = camera.world_to_screen(0, 0)
         origin_x, origin_y = round(origin_x), round(origin_y)
@@ -76,6 +84,8 @@ class WorldRenderer:
 
                 if (x, y) in doorway_cells:
                     tile_index = DEFAULT_FLOOR_SPRITE
+                elif (x, y) in spawn_cells:
+                    tile_index = self.SPAWN_FLOOR_SPRITE
 
                 scaled = self._get_scaled_tile(tile_index, zoom, tile_px, columns)
                 screen.blit(scaled, (origin_x + x * tile_px, origin_y + y * tile_px))
@@ -147,6 +157,22 @@ class WorldRenderer:
                     cells.add((obj["x"] + dx, obj["y"] + dy))
         return cells
 
+    @staticmethod
+    def _spawn_cells(dungeon):
+        """Every cell covered by a placed "spawn" object's footprint --
+        mirrors _doorway_cells' shape, used the same way (override this
+        cell's tile index before blitting instead of whatever the autotiler
+        resolved there)."""
+        cells = set()
+        for obj in dungeon.object_manager.objects:
+            if obj["type"] != "spawn":
+                continue
+            size_x, size_y = OBJECT_TYPES[obj["type"]]["size"]
+            for dx in range(size_x):
+                for dy in range(size_y):
+                    cells.add((obj["x"] + dx, obj["y"] + dy))
+        return cells
+
     def render_foreground_objects(self, screen, dungeon, camera, hide_object_types=None):
         """Objects ObjectManager.is_foreground_object() flags (e.g. an L/R torch) -- call this after drawing the player sprite."""
         self._draw_objects(screen, dungeon, camera, hide_object_types=hide_object_types, foreground_only=True)
@@ -180,6 +206,14 @@ class WorldRenderer:
                     int(size_cells_y * tile_size * zoom),
                 )
                 scaled_sprite = pygame.transform.scale(frames[frame_index], size)
+                if obj.get("variant") == "flip":
+                    # Stairs only (Phase 6a): a single stairs.png asset,
+                    # mirrored horizontally instead of shipping a second
+                    # file, when ObjectManager._stairs_orientation found the
+                    # floor it's facing to the west -- the cache key above
+                    # already varies by variant, so the flipped surface is
+                    # cached separately from the unflipped one for free.
+                    scaled_sprite = pygame.transform.flip(scaled_sprite, True, False)
                 self._object_sprite_cache[cache_key] = scaled_sprite
 
             # Anchored to the footprint's left/bottom edge (not the origin cell's

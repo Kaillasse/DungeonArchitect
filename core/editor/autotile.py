@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -14,6 +15,15 @@ WALL = 2
 
 DEFAULT_FLOOR_SPRITE = 14
 DEFAULT_WALL_SPRITE = 3
+
+# Phase 6a: purely cosmetic alternates for the plain interior floor/wall
+# tile -- basictileset.png frames 15/4, picked instead of 14/3 with fixed
+# probability VARIANT_PROBABILITY. Only ever substituted for these two exact
+# indices (see resolve_sprite_grid) -- every other autotile shape (corners,
+# edges, doorway breaks) is untouched.
+FLOOR_VARIANT_SPRITE = 15
+WALL_VARIANT_SPRITE = 4
+VARIANT_PROBABILITY = 0.3
 
 _CARDINAL_OFFSETS = (
     (0, -1),
@@ -299,9 +309,29 @@ def resolve_sprite_grid(
                 y,
             )
 
-            sprite_grid[y][x] = select_sprite(
+            sprite = select_sprite(
                 logical,
                 neighbors,
             )
 
+            sprite_grid[y][x] = _pick_variant(sprite, x, y)
+
     return sprite_grid
+
+
+def _pick_variant(sprite_index: int, x: int, y: int) -> int:
+    """Cosmetic alternate for the plain interior floor/wall tile (see
+    FLOOR_VARIANT_SPRITE/WALL_VARIANT_SPRITE) -- deterministic per cell
+    position (a fresh Random(seed) instead of the module-level random state)
+    so repainting elsewhere in the room, which re-runs resolve_sprite_grid,
+    never reshuffles a variant already chosen for an untouched cell."""
+    if sprite_index == DEFAULT_FLOOR_SPRITE:
+        alt = FLOOR_VARIANT_SPRITE
+    elif sprite_index == DEFAULT_WALL_SPRITE:
+        alt = WALL_VARIANT_SPRITE
+    else:
+        return sprite_index
+
+    if random.Random((x, y, sprite_index)).random() < VARIANT_PROBABILITY:
+        return alt
+    return sprite_index
