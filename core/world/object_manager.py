@@ -499,19 +499,6 @@ class ObjectManager:
         """Drawn after (in front of) the player, and walkable despite sitting on a WALL cell -- currently just L/R wall-mounted torches; a straight torch stays a plain blocking wall decoration. (A pillar's decorative top half gets the same front-of-player treatment, but it isn't a real object -- see WorldRenderer._draw_pillar_tops -- so it never reaches this method.)"""
         return obj["type"] == "torch" and obj.get("variant") in ("L", "R")
 
-    def is_entry_exit_object(self, object_type):
-        """True for anything that functions as a room-to-room connector
-        marker: gate/wall/cave_entrance (the shared "doorway" placement
-        rule) plus stairs. Derived from existing data rather than a second
-        hardcoded list -- used so a pillar's decorative top (see
-        WorldRenderer._draw_pillar_tops) never renders over one and
-        visually/functionally obscures it. Not the same list as
-        core.world.assembly.ENTRY_EXIT_TYPES, which is about which of these
-        the procedural assembler is actually allowed to connect through
-        (narrower on purpose, see CLAUDE.md's Phase 6a notes)."""
-        config = OBJECT_TYPES[object_type]
-        return config.get("placement") == "doorway" or object_type == "stairs"
-
     def is_cell_walkable(self, grid_x, grid_y):
         if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
             return False

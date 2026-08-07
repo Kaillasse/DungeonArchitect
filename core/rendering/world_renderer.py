@@ -248,11 +248,10 @@ class WorldRenderer:
         that pillar object currently is (Phase 6a polish -- see
         OBJECT_TYPES["pillar"]): purely a rendering detail, not a second
         object, so it always follows its base automatically and can never
-        be independently moved/erased/orphaned. Skipped at any cell an
-        entry-exit object (gate/wall/cave_entrance/stairs) occupies, so it
-        never visually covers a doorway; drawn everywhere else regardless of
-        what's underneath, same "always wins" foreground treatment an L/R
-        torch already gets."""
+        be independently moved/erased/orphaned. Always drawn, regardless of
+        what else occupies that cell -- same "always wins" foreground
+        treatment an L/R torch already gets, with no exception (an earlier
+        version skipped entry-exit cells; the user asked to drop that)."""
         hide_object_types = hide_object_types or ()
         if "pillar" in hide_object_types:
             return
@@ -274,9 +273,6 @@ class WorldRenderer:
 
         for obj in pillars:
             top_x, top_y = obj["x"], obj["y"] - 1
-            blocker = object_manager.get_object_at(top_x, top_y)
-            if blocker is not None and object_manager.is_entry_exit_object(blocker["type"]):
-                continue
             screen.blit(sprite, (origin_x + top_x * tile_px, origin_y + top_y * tile_px))
 
     def _draw_link_indicators(self, screen, dungeon, camera):
