@@ -242,11 +242,21 @@ class Player:
         self._hit_delivered_this_swing = False
 
     def _frames_for(self, animation, direction):
-        """Frame list for (animation, direction), falling back to "front" and
-        then to whatever direction the sheet does have -- not every animation
-        sheet has a row for all 5 DIRECTIONS (jump.png is missing "back")."""
+        """Frame list for (animation, direction), falling back to the
+        sheet's LAST row when that exact direction isn't there -- not every
+        animation sheet has a row for all 5 DIRECTIONS (jump.png is missing
+        "back", cut_sheet only populates up through "back_right"). Falling
+        back to "front" used to make jumping while facing "back" (moving
+        y-negative) render identically to jumping while facing "front"
+        (moving y-positive) -- the same silent-substitution bug would hit
+        any other missing-row animation, not just jump. jump.png is
+        currently the only sheet short a row, and only ever misses "back"
+        (the last of the 5 DIRECTIONS), so falling back to the last row
+        that IS there is the correct fix rather than a coincidence."""
         directions = self.sprites[animation]
-        return directions.get(direction) or directions.get("front") or next(iter(directions.values()))
+        if direction in directions:
+            return directions[direction]
+        return next(reversed(directions.values()))
 
     def update(self, dt):
 
