@@ -12,6 +12,7 @@ from core.engine.gamestate import GameState
 from core.data.ressources import list_rooms, list_donjons, next_new_room_name
 from core.data.settings import ACTIONS, ACTION_KINDS
 from core.ui.widgets import BorderManager, BorderPicker, RoomBrowser
+from core.world.home import ensure_home_room
 
 
 class Menu:
@@ -112,9 +113,20 @@ class Menu:
         if not name:
             return False
         self.game_manager.settings.set_local_player_name(name)
-        self.mode = "main"
-        self.selected = 0
+        self.game_manager.boot_into_home = False  # consumed -- redirecting right now instead
+        self._redirect_to_home()
         return True
+
+    def _redirect_to_home(self):
+        """Skips the main list entirely and sends game_manager straight
+        into the player's home room, in Creator (a brand-new home has no
+        floor/spawn yet -- matches the original pitch's "demarre sur le
+        creator stade"). Camera zoom is left alone: both Creator's and
+        Explorator's cameras already start at zoom=1.0, safely inside
+        core.world.home's Creator band, so no explicit seed is needed."""
+        name = ensure_home_room(self.game_manager.settings.local_player_name)
+        self.game_manager.pending_room = name
+        self.game_manager.state = GameState.CREATOR
 
     # -- "Touches" sub-screen: one compact row per action, plus a back row.
     # Deliberately smaller/tighter than _option_rect's rows -- 8 actions + a
@@ -234,6 +246,10 @@ class Menu:
         if not self.game_manager.settings.local_player_name:
             self.mode = "name_entry"
             self._name_input = ""
+        elif self.game_manager.boot_into_home:
+            self.game_manager.boot_into_home = False
+            self._redirect_to_home()
+            return
 
         running = True
 
@@ -276,7 +292,8 @@ class Menu:
 
                     elif self.mode == "name_entry":
                         if event.key == pygame.K_RETURN:
-                            self._confirm_name()
+                            if self._confirm_name():
+                                running = False
                         elif event.key == pygame.K_BACKSPACE:
                             self._name_input = self._name_input[:-1]
                         elif event.unicode and event.unicode.isprintable():
@@ -316,7 +333,8 @@ class Menu:
                     elif self.mode == "name_entry":
 
                         if self._name_confirm_rect().collidepoint(event.pos):
-                            self._confirm_name()
+                            if self._confirm_name():
+                                running = False
 
                     elif self.mode in ("main", "settings"):
 

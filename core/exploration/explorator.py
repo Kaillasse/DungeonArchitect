@@ -21,6 +21,7 @@ from core.engine.camera import Camera
 from core.data.sound_manager import SoundManager
 from core.data.profile_manager import Profile, ProfileManager
 from core.data.progression import XP_ENEMY_KILL, XP_ANIMAL_KILL, XP_DUNGEON_CLEAR
+from core.world.home import home_room_name, wants_creator
 from core.network import protocol
 
 # Placed objects that are only ever markers during exploration -- a spawn
@@ -152,6 +153,12 @@ class Explorator:
 
         self.camera = Camera(zoom=1.0)
 
+        # Name of the single room currently loaded (open_room), or None in
+        # assembly mode (open_donjon) -- mirrors Creator.current_room's own
+        # convention exactly. Used by _check_home_zoom_switch (core.world.home)
+        # to know whether the active room is the local player's own home.
+        self.current_room = None
+
         self.clock = pygame.time.Clock()
 
         # Networking (Phase 3+4), client-side only -- see
@@ -167,6 +174,7 @@ class Explorator:
         session's player in it."""
         self.assembly = None
         self.current_placed_room = None
+        self.current_room = name
         self.dungeon.load_from_json(name)
         self.dungeon.spawn_animals()
         self.dungeon.spawn_enemies()
@@ -189,6 +197,7 @@ class Explorator:
         """Load a saved procedurally-assembled dungeon and spawn every
         current session's player in its starting room."""
         self.assembly = load_assembly(name)
+        self.current_room = None
         self.victory = False
 
         for room in self.assembly.rooms:
@@ -236,6 +245,25 @@ class Explorator:
         session.player.position.update(
             spawn[0] + self._spawn_offset_x(session, self.dungeon.tile_size), spawn[1]
         )
+
+    def _check_home_zoom_switch(self):
+        """Zoom-driven switch back to Creator, home room only (see
+        core.world.home) -- called from run() only, never run_networked or
+        the headless server's own tick loop, since a network client has no
+        local Creator to swap into. Solo-only (co-op/multiplayer visiting a
+        home room together is out of scope -- Phase 6e, not yet built), and
+        uses self.camera (the merged-view camera, always what a lone local
+        session renders through)."""
+        if len(self.players) != 1 or self.current_room is None:
+            return
+        if self.settings is None or not self.settings.local_player_name:
+            return
+        if self.current_room != home_room_name(self.settings.local_player_name):
+            return
+        if wants_creator(self.camera.zoom):
+            self.game_manager.pending_room = self.current_room
+            self.game_manager.pending_zoom_carry = self.camera.zoom
+            self.game_manager.state = GameState.CREATOR
 
     def _active_floors(self):
         """Every floor at least one session currently occupies, in assembly
@@ -1901,10 +1929,12 @@ class Explorator:
                     self._handle_session_event(session, event)
 
             self.update(dt)
+            self._check_home_zoom_switch()
 
-            # Only _game_over() can change game_manager.state during
-            # update() -- same clean exit TAB/ECHAP already do (no stale
-            # frame rendered into a state we're about to leave).
+            # Only _game_over()/_check_home_zoom_switch() can change
+            # game_manager.state during update() -- same clean exit
+            # TAB/ECHAP already do (no stale frame rendered into a state
+            # we're about to leave).
             if self.game_manager.state != GameState.EXPLORATION:
                 break
 

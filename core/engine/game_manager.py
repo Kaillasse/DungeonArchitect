@@ -21,6 +21,19 @@ class GameManager:
         self.state = GameState.CREATOR if headless else GameState.MENU
         self.running = True
         self.pending_room = None
+        # Zoom value to seed the destination state's camera with right
+        # after applying pending_room -- set by the home-room zoom-switch
+        # (Creator/Explorator) and by Menu's boot-into-home redirect, so
+        # the new state opens already on the correct side of its own
+        # threshold instead of its camera's own stale/default zoom (see
+        # core.world.home).
+        self.pending_zoom_carry = None
+        # One-shot: True until the first time Menu.run() actually executes
+        # with a known player name, at which point it redirects straight
+        # into home instead of showing the main list (see
+        # Menu._redirect_to_home). Irrelevant in headless mode -- Menu is
+        # never reached there.
+        self.boot_into_home = True
         self.clock = pygame.time.Clock()
         self.menu = Menu(self)
         self.creator = Creator(self)
@@ -61,6 +74,9 @@ class GameManager:
                 if self.pending_room is not None:
                     self.creator.open_room(self.pending_room)
                     self.pending_room = None
+                    if self.pending_zoom_carry is not None:
+                        self.creator.camera.zoom = self.pending_zoom_carry
+                        self.pending_zoom_carry = None
                 self.creator.run()
 
             elif self.state == GameState.EXPLORATION:
@@ -71,4 +87,7 @@ class GameManager:
                     else:
                         self.explorator.open_room(name)
                     self.pending_room = None
+                    if self.pending_zoom_carry is not None:
+                        self.explorator.camera.zoom = self.pending_zoom_carry
+                        self.pending_zoom_carry = None
                 self.explorator.run()

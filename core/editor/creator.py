@@ -12,6 +12,7 @@ from core.engine.camera import Camera
 from core.data.ressources import FLOOR, next_new_donjon_name
 from core.data.profile_manager import ProfileManager
 from core.data.progression import unlocked_objects
+from core.world.home import home_room_name, wants_exploration
 from core.editor.ui import GeneratorPanelUI, ObjectPalette, RoomPanelUI, ChestPanelUI
 from core.editor.tools import ObjectTool
 
@@ -106,6 +107,16 @@ class Creator:
         self.assembly_active_floor = 0
         self.current_room = None
         self.chest_panel.close()
+
+    def _is_home_room(self):
+        """True while the currently-open room is the local player's own
+        home -- gates the zoom-driven switch to Exploration in run() below
+        (core.world.home), never true while previewing a generated donjon
+        (current_room is None there) or before a player name exists."""
+        settings = self.game_manager.settings
+        if settings is None or not settings.local_player_name:
+            return False
+        return self.current_room == home_room_name(settings.local_player_name)
 
     def _apply_room_action(self, action):
         mode, selection = action
@@ -428,6 +439,15 @@ class Creator:
                         else:
                             self.game_manager.state = GameState.MENU
                             running = False
+
+            # Zoom-driven Explo/Creator switch, home room only (see
+            # core.world.home) -- everywhere else TAB is still the only
+            # way to switch, unchanged.
+            if running and self._is_home_room() and wants_exploration(self.camera.zoom):
+                self.game_manager.pending_room = ("room", self.current_room)
+                self.game_manager.pending_zoom_carry = self.camera.zoom
+                self.game_manager.state = GameState.EXPLORATION
+                running = False
 
             # -------------------------------------------------
             # Render
