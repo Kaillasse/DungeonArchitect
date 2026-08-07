@@ -101,7 +101,7 @@ class ObjectPalette:
 
     COLUMNS = 5
 
-    def __init__(self):
+    def __init__(self, unlocked_types=None):
 
         self.border = BorderManager()
 
@@ -114,6 +114,20 @@ class ObjectPalette:
         self.icon_size = 32
         self.spacing = 6
 
+        # Which OBJECT_LIST entries this palette actually shows/offers for
+        # placement (level-gated, see Creator._current_level) -- defaults to
+        # everything, for any caller that doesn't care about gating.
+        self.unlocked_types = set(unlocked_types) if unlocked_types is not None else set(OBJECT_LIST)
+
+        # Loaded for every type regardless of unlock status, separately from
+        # self.icons (which load_icons() below filters down to only the
+        # visible/placeable ones) -- get_current_frame is also used to draw
+        # an EXISTING placed object while it's being dragged to a new spot
+        # (Creator.run()'s moving_object branch), which must keep rendering
+        # even if that object's type has since become locked (e.g. after an
+        # admin "level" command lowers the player back down).
+        self._all_frames = {obj_type: load_object_frames(obj_type) for obj_type in OBJECT_LIST}
+
         self.icons = {}
 
         self.load_icons()
@@ -121,7 +135,10 @@ class ObjectPalette:
 
     def get_current_frame(self, object_type, animate=True):
 
-        icon = self.icons[object_type]
+        icon = self.icons.get(object_type)
+
+        if icon is None:
+            return self._all_frames[object_type][0]
 
         if animate:
             return icon["frames"][icon["frame"]]
@@ -134,16 +151,18 @@ class ObjectPalette:
         origin_y = self.y + 30
         step = self.icon_size + self.spacing
 
-        for index, obj_type in enumerate(OBJECT_LIST):
+        visible_types = [obj_type for obj_type in OBJECT_LIST if obj_type in self.unlocked_types]
 
-            frames = load_object_frames(obj_type)
+        self.icons = {}
+
+        for index, obj_type in enumerate(visible_types):
 
             column = index % self.COLUMNS
             row = index // self.COLUMNS
 
             self.icons[obj_type] = {
 
-                "frames": frames,
+                "frames": self._all_frames[obj_type],
                 "frame": 0,
                 "timer": 0,
 
@@ -156,8 +175,19 @@ class ObjectPalette:
 
             }
 
-        rows = -(-len(OBJECT_LIST) // self.COLUMNS)  # ceil division
+        rows = max(1, -(-len(visible_types) // self.COLUMNS))  # ceil division
         self.height = 30 + rows * step + 10
+
+    def set_unlocked_types(self, unlocked_types):
+        """Rebuilds icons/layout only if the unlocked set actually changed.
+        Returns True if a rebuild happened, so a caller positioning another
+        panel below this one (see GeneratorPanelUI.set_y) knows to follow."""
+        new_set = set(unlocked_types)
+        if new_set == self.unlocked_types:
+            return False
+        self.unlocked_types = new_set
+        self.load_icons()
+        return True
 
 
 
@@ -367,6 +397,24 @@ class GeneratorPanelUI:
         self.generate_rect = pygame.Rect(x, stepper_y + self.STEP_BUTTON_SIZE + 10, self.PANEL_WIDTH, 36)
 
         self.status_text = ""
+
+    def set_y(self, new_y):
+        """Repositions this whole panel vertically without losing state
+        (room_count, pool selection) -- used when ObjectPalette's height
+        changes (level-gated icon count, see Creator._refresh_object_palette)
+        and shifts everything below it. pool_browser.y is read fresh by its
+        own _row_rect on every call, so bumping it is enough, but Stepper
+        caches absolute rects at construction time -- those need an explicit
+        move_ip, same for generate_rect."""
+        dy = new_y - self.y
+        if dy == 0:
+            return
+        self.y = new_y
+        self.pool_browser.y += dy
+        self.stepper.minus_rect.move_ip(0, dy)
+        self.stepper.count_rect.move_ip(0, dy)
+        self.stepper.plus_rect.move_ip(0, dy)
+        self.generate_rect.move_ip(0, dy)
 
     def refresh_rooms(self):
         """Call when the room list on disk may have changed (e.g. after a save/delete)."""

@@ -149,6 +149,14 @@ def build_snapshot(explorator, tick: int, terrain_versions: dict) -> dict:
             "frame": player.frame,
             "health": player.health,
             "last_input_seq": session.last_input_seq,
+            "xp": session.profile.xp if session.profile is not None else 0,
+            # PlacedRoom.index (same room-identity convention as terrain's
+            # own "room" field below), or None in single-room mode -- lets
+            # a client learn which room/floor this player is ACTUALLY in
+            # server-side, since room/floor crossings are never predicted
+            # client-side (see Explorator._resolve_movement_step's
+            # predicting=True branch) and so can't be derived locally.
+            "room": session.current_placed_room.index if session.current_placed_room is not None else None,
         })
 
     animals, enemies, pickups, objects, dynamites, explosions, terrain = [], [], [], [], [], [], []

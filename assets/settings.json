@@ -32,17 +32,23 @@
     "interact": {
       "kind": "mouse",
       "button": 3
+    },
+    "inventory": {
+      "kind": "key",
+      "name": "e"
     }
   },
   "display": {
-    "fullscreen": true,
+    "fullscreen": false,
     "resolution": [
       1280,
       720
     ]
   },
   "border_cell": [
-    7,
-    0
-  ]
+    0,
+    1
+  ],
+  "volume": 1.0,
+  "local_player_name": "thib"
 }

@@ -19,7 +19,7 @@ from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DONJONS_DIRECTORY
 from core.data.sound_manager import SoundManager
 
-ENTRY_EXIT_TYPES = ("gate", "wall")
+ENTRY_EXIT_TYPES = ("gate", "wall", "cave_entrance")
 
 OPPOSITE_SIDE = {"north": "south", "south": "north", "east": "west", "west": "east"}
 
@@ -220,6 +220,22 @@ class DungeonAssembly:
         # match and would re-trigger a bounce straight back.
         target_door_obj = target_room.dungeon.object_manager.get_object_at(target_local_x, target_local_y)
 
+        # The player could only physically reach this cell because door_obj
+        # (this room's own copy) read as open -- but the two halves of a
+        # merged doorway are separate object dicts with independent state
+        # (see generate_assembly), and could disagree (an assembly_links
+        # propagation gap, or a stale save carrying a baked-in "open" key).
+        # Force them back into agreement at the moment of crossing so a
+        # crossing that was valid on this side can never stand the player
+        # against a closed copy on the other side -- this is what was
+        # actually producing "stuck inside a wall after taking an open
+        # door" (resolve_room_transition never used to check the
+        # destination at all).
+        if target_door_obj is not None and door_obj.get("open"):
+            target_door_obj["open"] = True
+            target_door_obj["activated"] = door_obj.get("activated", True)
+            target_door_obj["frame"] = door_obj.get("frame", target_door_obj.get("frame", 0))
+
         return target_room, target_door_obj
 
     def is_global_cell_walkable(self, global_x, global_y, floor, prefer_room=None):
@@ -256,7 +272,22 @@ class DungeonAssembly:
             self._open_if_blocking(target)
 
         for link_target in obj.get("assembly_links", []):
-            target_room = self.room_at(link_target["floor"], link_target["x"], link_target["y"])
+            # "room" (a room index, added at generation time -- see
+            # generate_assembly) is the authoritative target when present.
+            # room_at's bounding-box search is ambiguous for a same-floor
+            # doorway merge, where the anchor and candidate rooms' bounds
+            # both legitimately contain the shared door cell -- it always
+            # resolved to whichever room was inserted first (the anchor),
+            # so a button in the anchor room could never actually reach the
+            # candidate's copy through this path. Older saved donjons don't
+            # have "room" on their assembly_links entries yet (additive
+            # field, same as variant/links/open), so room_at is kept as a
+            # best-effort fallback for those rather than breaking them.
+            room_index = link_target.get("room")
+            if room_index is not None:
+                target_room = self.rooms[room_index] if 0 <= room_index < len(self.rooms) else None
+            else:
+                target_room = self.room_at(link_target["floor"], link_target["x"], link_target["y"])
             if target_room is None:
                 continue
             target = target_room.dungeon.object_manager.get_object_at(
@@ -272,29 +303,34 @@ class DungeonAssembly:
             target["frame"] = 0
             target["anim_timer"] = 0.0
 
-    def update(self, dt, player_refs=(), player_floor=None):
-        """player_refs only ever gets passed down to rooms on player_floor --
-        an animal/enemy on another floor has no business colliding (or, for
-        enemies, aggroing) with a player who isn't physically there (mirrors
-        locate_room's per-floor scoping). Each ref's hitbox arrives in global
-        coordinates (that's what Explorator/the player use everywhere), but
-        each room's own Dungeon only ever thinks in that room's local
-        coordinates -- same as is_global_cell_walkable converting before
-        delegating to a room's ObjectManager -- so it's shifted back by that
-        room's offset here before being handed down. Each ref's `player` (the
-        actual object, for take_damage) is forwarded as-is -- no coordinate
+    def update(self, dt, player_refs_by_floor=None):
+        """player_refs_by_floor ({floor: [PlayerRef, ...]}) only ever gets
+        passed down to rooms on a matching floor -- an animal/enemy on
+        another floor has no business colliding (or, for enemies, aggroing)
+        with a player who isn't physically there (mirrors locate_room's
+        per-floor scoping). Grouped by floor rather than one scalar
+        "player_floor" because two sessions can now genuinely be on two
+        different floors at once (see PlayerSession.current_placed_room) --
+        each floor's rooms must only ever see the refs of players actually
+        on that floor. Each ref's hitbox arrives in global coordinates
+        (that's what Explorator/the player use everywhere), but each room's
+        own Dungeon only ever thinks in that room's local coordinates --
+        same as is_global_cell_walkable converting before delegating to a
+        room's ObjectManager -- so it's shifted back by that room's offset
+        here before being handed down. Each ref's `player` (the actual
+        object, for take_damage) is forwarded as-is -- no coordinate
         transform needed since only its identity matters here, never its
         .position (see EnemyManager/Enemy, which only ever read distances
         from the already-shifted hitbox).
         """
+        player_refs_by_floor = player_refs_by_floor or {}
         tile_size = Dungeon.TILE_SIZE
         for room in self.rooms:
-            local_refs = ()
-            if room.floor == player_floor:
-                local_refs = [
-                    PlayerRef(ref.player, ref.hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size))
-                    for ref in player_refs
-                ]
+            refs_on_floor = player_refs_by_floor.get(room.floor, ())
+            local_refs = [
+                PlayerRef(ref.player, ref.hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size))
+                for ref in refs_on_floor
+            ]
             room.dungeon.update(dt, player_refs=local_refs)
 
     # ------------------------------------------------------------------
@@ -888,7 +924,7 @@ def generate_assembly(room_names, room_count, rng=None):
             for link_ref in source_obj.get("links", []):
                 if (link_ref["x"], link_ref["y"]) == (anchor_exit["x"], anchor_exit["y"]):
                     source_obj.setdefault("assembly_links", []).append(
-                        {"floor": floor, "x": anchor_gx, "y": anchor_gy}
+                        {"floor": floor, "x": anchor_gx, "y": anchor_gy, "room": candidate_index}
                     )
                     break
 
@@ -898,7 +934,7 @@ def generate_assembly(room_names, room_count, rng=None):
             for link_ref in source_obj.get("links", []):
                 if (link_ref["x"], link_ref["y"]) == (candidate_exit["x"], candidate_exit["y"]):
                     source_obj.setdefault("assembly_links", []).append(
-                        {"floor": anchor_room.floor, "x": anchor_gx, "y": anchor_gy}
+                        {"floor": anchor_room.floor, "x": anchor_gx, "y": anchor_gy, "room": anchor_room.index}
                     )
                     break
 

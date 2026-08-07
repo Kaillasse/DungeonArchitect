@@ -19,6 +19,8 @@ from core.engine.input import (
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
 from core.data.sound_manager import SoundManager
+from core.data.profile_manager import Profile, ProfileManager
+from core.data.progression import XP_ENEMY_KILL, XP_ANIMAL_KILL, XP_DUNGEON_CLEAR
 from core.network import protocol
 
 # Placed objects that are only ever markers during exploration -- a spawn
@@ -68,8 +70,13 @@ class Explorator:
 
         self.dungeon = Dungeon(width=22, height=18)
         self.assembly = None
+        # Only ever "the room a freshly-joining session should spawn into"
+        # now (set once by open_room/open_donjon, read by
+        # add_network_session) -- every session's own LIVE room/floor is
+        # session.current_placed_room instead (see PlayerSession), so one
+        # player crossing a door no longer drags every other player's
+        # collision/rendering into the new room/floor with them.
         self.current_placed_room = None
-        self._last_door_obj = None
 
         # Debug mode (F3 toggles): shows/hides the logical grid overlay and
         # every live hitbox on screen (red for the player, yellow for
@@ -105,6 +112,16 @@ class Explorator:
         self._local_player_id = 0
         self.players = {self._local_player_id: PlayerSession(self._local_player_id)}
 
+        # self.settings is None on the headless server (_HeadlessGameManager)
+        # -- that id-0 session gets replaced immediately by GameServer's own
+        # network sessions anyway, so there's nothing to load here in that
+        # case. In every local/client mode, Menu's name-entry screen has
+        # already set local_player_name before Explorator is ever built.
+        if self.settings is not None and self.settings.local_player_name:
+            self.players[self._local_player_id].profile = ProfileManager().load(
+                self.settings.local_player_name
+            )
+
         pygame.joystick.init()
         if pygame.joystick.get_count() > 0:
             joystick = pygame.joystick.Joystick(0)
@@ -126,6 +143,12 @@ class Explorator:
         # -----------------------------
         # Camera
         # -----------------------------
+        # self.camera is the MERGED/shared view's camera (solo, or 2+ local
+        # co-op sessions all currently in the same room -- see
+        # _merged_view). Each PlayerSession also owns its own (see
+        # PlayerSession.camera), used instead once real split-screen kicks
+        # in (2+ local sessions in DIFFERENT rooms). See
+        # _viewport_rects/_update_camera/_render_viewport.
 
         self.camera = Camera(zoom=1.0)
 
@@ -144,12 +167,13 @@ class Explorator:
         session's player in it."""
         self.assembly = None
         self.current_placed_room = None
-        self._last_door_obj = None
         self.dungeon.load_from_json(name)
         self.dungeon.spawn_animals()
         self.dungeon.spawn_enemies()
         for session in self.players.values():
             self._position_player_at_spawn(session)
+            session.current_placed_room = None
+            session.last_door_obj = None
             # A session's Player is reused across menu <-> exploration
             # transitions (never recreated), so a death from the last run
             # would otherwise leave health at 0 and trigger _game_over again
@@ -165,7 +189,6 @@ class Explorator:
         """Load a saved procedurally-assembled dungeon and spawn every
         current session's player in its starting room."""
         self.assembly = load_assembly(name)
-        self._last_door_obj = None
         self.victory = False
 
         for room in self.assembly.rooms:
@@ -189,6 +212,8 @@ class Explorator:
                 start_room.offset_x * tile_size + spawn_local[0] + self._spawn_offset_x(session, tile_size),
                 start_room.offset_y * tile_size + spawn_local[1],
             )
+            session.current_placed_room = start_room
+            session.last_door_obj = None
 
     @staticmethod
     def _spawn_offset_x(session, tile_size):
@@ -212,20 +237,43 @@ class Explorator:
             spawn[0] + self._spawn_offset_x(session, self.dungeon.tile_size), spawn[1]
         )
 
-    def _rooms_with_offset(self):
-        """(dungeon, offset_x, offset_y) -- pixel offset -- for every room
-        relevant to a global query right now: every room on the active
-        floor in assembly mode (DungeonAssembly.update already hands every
-        player's hitbox to all of them regardless of which specific room
-        each player is registered as standing in, so combat/pickups/etc.
-        need to look at all of them too), or just self.dungeon (offset
-        (0, 0)) in single-room mode. Shared by _visible_animals_global/
-        _visible_enemies_global/_collect_pickups, which otherwise each
-        re-derive this identically."""
+    def _active_floors(self):
+        """Every floor at least one session currently occupies, in assembly
+        mode -- {None} in single-room mode (no floor concept there, ignored
+        by _rooms_with_offset). Two sessions in two different rooms of the
+        same assembly now genuinely happens (see PlayerSession.
+        current_placed_room), so anything scoped "to the active floor" needs
+        to consider all of them, not just one.
+
+        Skips any session with current_placed_room still None -- a network
+        client's mirrored PlayerSessions for REMOTE players (see
+        apply_network_snapshot) never get one set at all (the client has no
+        idea which room/floor another player is actually on), and this used
+        to crash outright the instant a second player connected and either
+        client tried to move (_predict_local_movement -> _is_walkable ->
+        _visible_animals_global -> here)."""
+        if self.assembly is None:
+            return {None}
+        return {
+            session.current_placed_room.floor for session in self.players.values()
+            if session.current_placed_room is not None
+        }
+
+    def _rooms_with_offset(self, floors):
+        """(dungeon, offset_x, offset_y) -- pixel offset -- for every room on
+        any of `floors` (a set, see _active_floors) in assembly mode
+        (DungeonAssembly.update already hands every player's hitbox to all
+        rooms on their own floor regardless of which specific room each
+        player is registered as standing in, so combat/pickups/etc. need to
+        look at all of them too), or just self.dungeon (offset (0, 0), one
+        yield regardless of `floors`) in single-room mode. Shared by
+        _visible_animals_global/_visible_enemies_global/_collect_pickups,
+        which otherwise each re-derive this identically."""
         if self.assembly is not None:
             tile_size = Dungeon.TILE_SIZE
-            for room in self.assembly.rooms_on_floor(self.current_placed_room.floor):
-                yield room.dungeon, room.offset_x * tile_size, room.offset_y * tile_size
+            for floor in floors:
+                for room in self.assembly.rooms_on_floor(floor):
+                    yield room.dungeon, room.offset_x * tile_size, room.offset_y * tile_size
         else:
             yield self.dungeon, 0, 0
 
@@ -234,7 +282,7 @@ class Explorator:
         collide with a player right now, hitbox already in global/world
         coordinates."""
         pairs = []
-        for dungeon, offset_x, offset_y in self._rooms_with_offset():
+        for dungeon, offset_x, offset_y in self._rooms_with_offset(self._active_floors()):
             for animal in dungeon.animal_manager.animals:
                 pairs.append((animal, animal.get_hitbox().move(offset_x, offset_y)))
         return pairs
@@ -247,9 +295,10 @@ class Explorator:
         the third element is whichever room's own Dungeon actually owns this
         enemy, needed by the combat code below to drop loot into the right
         room's PickupManager rather than always self.dungeon (wrong in
-        assembly mode whenever the enemy isn't in current_placed_room)."""
+        assembly mode for any enemy outside whichever room the attacking
+        session itself is currently in)."""
         triples = []
-        for dungeon, offset_x, offset_y in self._rooms_with_offset():
+        for dungeon, offset_x, offset_y in self._rooms_with_offset(self._active_floors()):
             for enemy in dungeon.enemy_manager.enemies:
                 if enemy.alive:
                     triples.append((enemy, enemy.get_hitbox().move(offset_x, offset_y), dungeon))
@@ -289,7 +338,7 @@ class Explorator:
         same per-floor scope as _visible_animals_global. `inventory` is the
         calling session's own Inventory (see _resolve_pickups), not a shared
         singleton."""
-        for dungeon, offset_x, offset_y in self._rooms_with_offset():
+        for dungeon, offset_x, offset_y in self._rooms_with_offset(self._active_floors()):
             local_hitbox = player_hitbox.move(-offset_x, -offset_y)
             dungeon.pickup_manager.collect(local_hitbox, inventory)
 
@@ -306,15 +355,15 @@ class Explorator:
             return
         session.player.play_action(action_id)
 
-    def _current_room_and_offset(self):
-        """(dungeon, offset_x, offset_y) for whichever room is currently
-        active -- offset is (0, 0) in single-room mode. Shared by anything
-        that needs to convert a player's (always-global) position/hitbox
-        into that room's own local coordinates, the same way every other
-        per-room live entity's position already works (see
+    def _current_room_and_offset(self, session):
+        """(dungeon, offset_x, offset_y) for session's own current room --
+        offset is (0, 0) in single-room mode. Shared by anything that needs
+        to convert a player's (always-global) position/hitbox into that
+        room's own local coordinates, the same way every other per-room live
+        entity's position already works (see
         _throw_interact_item/_interact_with_chest)."""
         if self.assembly is not None:
-            room = self.current_placed_room
+            room = session.current_placed_room
             return room.dungeon, room.offset_x, room.offset_y
         return self.dungeon, 0, 0
 
@@ -337,7 +386,7 @@ class Explorator:
         dx, dy = Player.DIRECTION_VECTORS.get(session.player.direction, (0, 1))
         direction = pygame.Vector2(dx, dy)
 
-        dungeon, offset_x, offset_y = self._current_room_and_offset()
+        dungeon, offset_x, offset_y = self._current_room_and_offset(session)
         tile_size = dungeon.tile_size
         local_x = session.player.position.x - offset_x * tile_size
         local_y = session.player.position.y - offset_y * tile_size
@@ -363,7 +412,7 @@ class Explorator:
         Returns False (no-op) if there's no such chest in reach or it's
         already open, leaving _trigger_action to fall back to throwing/the
         plain interact animation."""
-        dungeon, offset_x, offset_y = self._current_room_and_offset()
+        dungeon, offset_x, offset_y = self._current_room_and_offset(session)
         tile_size = dungeon.tile_size
 
         reach_hitbox = session.player.get_attack_hitbox()
@@ -397,6 +446,7 @@ class Explorator:
 
         session.player.play_action("interact")
         self.victory = True
+        self._grant_xp(session, XP_DUNGEON_CLEAR)
         return True
 
     def _is_walkable(self, rect, moving_session, debug_label=None):
@@ -422,8 +472,9 @@ class Explorator:
 
         `moving_session` is excluded from the player-vs-player check below --
         a player's own hitbox obviously always overlaps itself."""
+        room = moving_session.current_placed_room
         for grid_x, grid_y in corner_cells(rect, Dungeon.TILE_SIZE):
-            if self._is_void_at(grid_x, grid_y) or self._is_cell_walkable(grid_x, grid_y):
+            if self._is_void_at(grid_x, grid_y, room) or self._is_cell_walkable(grid_x, grid_y, room):
                 continue
             self._debug_log(debug_label, "wall")
             return False
@@ -464,21 +515,20 @@ class Explorator:
         checks this helper deliberately leaves out (not meaningful while
         input is frozen)."""
         if self.assembly is not None:
-            self.assembly.update(
-                dt, player_refs=player_refs, player_floor=self.current_placed_room.floor
-            )
+            self.assembly.update(dt, player_refs_by_floor=self._player_refs_by_floor())
         else:
             self.dungeon.update(dt, player_refs=player_refs)
 
-    def _is_cell_walkable(self, grid_x, grid_y):
-        """Real wall/closed-door/etc. walkability for a single global cell on
-        the active floor -- ignores void (see _is_void_at, checked
+    def _is_cell_walkable(self, grid_x, grid_y, room):
+        """Real wall/closed-door/etc. walkability for a single global cell,
+        on `room`'s floor (the calling session's own current_placed_room --
+        see _is_walkable) -- ignores void (see _is_void_at, checked
         separately by _is_walkable's caller) and other entities (also
         checked separately), so it's exactly the "is there a real obstacle
         here" half of the corner check."""
         if self.assembly is not None:
             return self.assembly.is_global_cell_walkable(
-                grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
+                grid_x, grid_y, room.floor, prefer_room=room
             )
         return self.dungeon.object_manager.is_cell_walkable(grid_x, grid_y)
 
@@ -490,21 +540,21 @@ class Explorator:
             print(message)
             self._last_debug_message = message
 
-    def _is_void(self, rect):
-        """True if no room claims the cell under a player's feet on the
-        active floor -- distinct from being blocked by an actual wall/closed
-        door/animal/enemy, which _is_walkable already covers. Single point
-        (feet anchor), same convention as _update_current_room/
-        check_button_trigger, not the 4-corner check is_rect_walkable uses --
-        falling is about where a player's feet are, not a strict hitbox
-        overlap test."""
+    def _is_void(self, rect, room):
+        """True if no room claims the cell under a player's feet on `room`'s
+        floor (the calling session's own current_placed_room) -- distinct
+        from being blocked by an actual wall/closed door/animal/enemy, which
+        _is_walkable already covers. Single point (feet anchor), same
+        convention as _update_current_room/check_button_trigger, not the
+        4-corner check is_rect_walkable uses -- falling is about where a
+        player's feet are, not a strict hitbox overlap test."""
         grid_x, grid_y = self._feet_grid_cell(rect)
-        return self._is_void_at(grid_x, grid_y)
+        return self._is_void_at(grid_x, grid_y, room)
 
-    def _is_void_at(self, grid_x, grid_y):
+    def _is_void_at(self, grid_x, grid_y, room):
         if self.assembly is not None:
             return self.assembly.locate_room(
-                grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
+                grid_x, grid_y, room.floor, prefer_room=room
             ) is None
 
         return self.dungeon.is_void_at(grid_x, grid_y)
@@ -513,25 +563,25 @@ class Explorator:
         """Called once session's player's feet actually end up over void (see
         _is_void): looks for the nearest floor below (within the same
         assembly) that owns this exact global cell and lands there --
-        current_placed_room changes, the player's position doesn't need to
-        (it's already global, so "same tile, different floor" falls out for
-        free). No assembly (single-room mode) or nothing below at all: falls
-        out of the map entirely (see the "flagged, not decided" note on
-        _game_over -- this ends the whole session today, not just this
-        player)."""
+        session.current_placed_room changes, the player's position doesn't
+        need to (it's already global, so "same tile, different floor" falls
+        out for free). No assembly (single-room mode) or nothing below at
+        all: falls out of the map entirely (see the "flagged, not decided"
+        note on _game_over -- this ends the whole session today, not just
+        this player)."""
         if self.assembly is None:
             self._game_over("Chute hors de la carte")
             return
 
         hitbox = session.player.get_hitbox()
         grid_x, grid_y = self._feet_grid_cell(hitbox)
-        current_floor = self.current_placed_room.floor
+        current_floor = session.current_placed_room.floor
 
         for floor in sorted((f for f in self.assembly.floors() if f < current_floor), reverse=True):
             room = self.assembly.locate_room(grid_x, grid_y, floor)
             if room is not None:
-                self.current_placed_room = room
-                self._last_door_obj = None  # new room/floor -- re-arm the door edge-trigger
+                session.current_placed_room = room
+                session.last_door_obj = None  # new room/floor -- re-arm the door edge-trigger
                 session.player.play_fall()
                 return
 
@@ -551,15 +601,16 @@ class Explorator:
         """Edge-triggered room switch: session's player stepping onto a
         gate/wall entry-exit that connects to another room
         (door_target_room, stamped at generation time -- see
-        DungeonAssembly.resolve_room_transition) flips current_placed_room
-        exactly once, on entry, whether that door happens to lead to a room
-        on the same floor or a different one. Standing on the door doesn't
-        re-trigger, and going back requires fully leaving the door cell and
-        stepping onto it again from the other side.
+        DungeonAssembly.resolve_room_transition) flips session's own
+        current_placed_room exactly once, on entry, whether that door
+        happens to lead to a room on the same floor or a different one.
+        Standing on the door doesn't re-trigger, and going back requires
+        fully leaving the door cell and stepping onto it again from the
+        other side.
 
-        current_placed_room/the active floor stay singular/Explorator-level
-        (see PlayerSession/Phase 1 notes) -- with a real second player in a
-        different room/floor, this has no representation yet.
+        Per-session (not Explorator-level) precisely so that one player
+        crossing a door doesn't affect any other session's own room/floor --
+        see PlayerSession.current_placed_room.
 
         A border-floor seam (two rooms glued edge-to-edge with continuous
         floor and no gate/wall object at all -- see assembly._border_edges)
@@ -575,15 +626,15 @@ class Explorator:
         hitbox = session.player.get_hitbox()
         grid_x, grid_y = self._feet_grid_cell(hitbox)
 
-        self.current_placed_room, self._last_door_obj = self.assembly.resolve_room_transition(
-            self.current_placed_room, self._last_door_obj, grid_x, grid_y
+        session.current_placed_room, session.last_door_obj = self.assembly.resolve_room_transition(
+            session.current_placed_room, session.last_door_obj, grid_x, grid_y
         )
 
         same_floor_room = self.assembly.locate_room(
-            grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
+            grid_x, grid_y, session.current_placed_room.floor, prefer_room=session.current_placed_room
         )
         if same_floor_room is not None:
-            self.current_placed_room = same_floor_room
+            session.current_placed_room = same_floor_room
 
     def load_spawn_room(self):
 
@@ -638,6 +689,25 @@ class Explorator:
 
     def _player_refs(self):
         return [PlayerRef(session.player, session.player.get_hitbox()) for session in self.players.values()]
+
+    def _player_refs_by_floor(self):
+        """Every session's PlayerRef, grouped by session.current_placed_room.
+        floor -- assembly mode only (see _update_world/DungeonAssembly.update),
+        since floor has no meaning in single-room mode. Two sessions on two
+        different floors now genuinely happens (see PlayerSession.
+        current_placed_room), so a room's animals/enemies must only ever see
+        the players actually on that room's own floor, not every player
+        regardless of where they are. Skips a session with no
+        current_placed_room yet (shouldn't happen here -- only ever called
+        from _update_world, never on a network client -- but matches
+        _active_floors' own defensiveness rather than assuming it)."""
+        grouped = {}
+        for session in self.players.values():
+            if session.current_placed_room is None:
+                continue
+            floor = session.current_placed_room.floor
+            grouped.setdefault(floor, []).append(PlayerRef(session.player, session.player.get_hitbox()))
+        return grouped
 
     def _apply_requested_actions(self, session):
         for action_id in session.input.requested_actions:
@@ -743,7 +813,7 @@ class Explorator:
                 # the very next frame the one-shot jump animation ends
                 # (Player.action reverts to None on its own), so landing on
                 # void still falls normally.
-                if player.action != "jump" and self._is_void(player.get_hitbox()):
+                if player.action != "jump" and self._is_void(player.get_hitbox(), session.current_placed_room):
                     self._attempt_fall(session)
 
             player.direction = self._direction_from_vector(direction)
@@ -767,6 +837,19 @@ class Explorator:
 
     def _simulate_movement(self, session, dt):
         self._resolve_movement_step(session, session.input.move_direction, session.input.running, dt)
+
+    def _grant_xp(self, session, amount):
+        """Awards XP earned from an already-authoritative event (enemy/animal
+        kill, dungeon clear -- see call sites) and persists immediately. A
+        no-op for a session with no profile (local co-op's secondary device,
+        or a network session that joined without a usable name). Saving right
+        away rather than deferring to disconnect is deliberate: these are
+        rare, discrete events, not a per-frame hot path, so there's no real
+        cost to keeping the profile file always up to date."""
+        if session.profile is None:
+            return
+        session.profile.add_xp(amount)
+        ProfileManager().save(session.profile)
 
     def _resolve_player_attacks(self):
         """Every session's attack, checked against the same one
@@ -796,11 +879,15 @@ class Explorator:
                     hit_landed = True
                     if was_alive and not enemy.alive:
                         self._spawn_loot(enemy, enemy_dungeon)
+                        self._grant_xp(session, XP_ENEMY_KILL)
 
             for animal, animal_rect in animals:
                 if attack_hitbox.colliderect(animal_rect):
+                    was_alive = animal.alive
                     animal.take_damage(1)
                     hit_landed = True
+                    if was_alive and not animal.alive:
+                        self._grant_xp(session, XP_ANIMAL_KILL)
 
             if self.pvp_enabled:
                 for other_session in self.players.values():
@@ -829,7 +916,7 @@ class Explorator:
             grid_x, grid_y = self._feet_grid_cell(session.player.get_hitbox())
             if self.assembly is not None:
                 self.assembly.check_button_trigger(
-                    grid_x, grid_y, self.current_placed_room.floor, prefer_room=self.current_placed_room
+                    grid_x, grid_y, session.current_placed_room.floor, prefer_room=session.current_placed_room
                 )
             else:
                 self.dungeon.object_manager.check_button_trigger(grid_x, grid_y)
@@ -839,34 +926,81 @@ class Explorator:
                 return True
         return False
 
-    CAMERA_FIT_PADDING_TILES = 4  # margin kept around every player's bounding box when zoom-to-fit is active
+    def _local_sessions(self):
+        """Sessions this machine actually drives (input_source_kind !=
+        "network"), sorted by player_id so player 1/_local_player_id is
+        always first -- and therefore always the left/first viewport in
+        _viewport_rects, deterministic and consistent with the existing
+        _spawn_offset_x convention. A networked client's self.players also
+        holds one mirrored PlayerSession per REMOTE player (see
+        apply_network_snapshot) -- those never get a viewport or a camera of
+        their own; they're drawn (if in view) as ordinary entities inside
+        whichever local viewport currently shows their room/floor, exactly
+        like solo play already draws other live entities."""
+        return sorted(
+            (session for session in self.players.values() if session.input_source_kind != "network"),
+            key=lambda session: session.player_id,
+        )
 
-    def _camera_frame(self):
-        """(center_x, center_y, zoom) the camera should use this frame.
+    def _viewport_rects(self):
+        """{player_id: pygame.Rect} for every local session, splitting
+        self.screen into equal vertical (left-right) slices -- what each
+        local session's viewport WOULD be under real split-screen. Only
+        actually used to render/position things that way when _merged_view
+        is False (see render()) -- callers that need "the rect(s) sessions
+        are currently viewing" while merge could be active should go
+        through render()'s own panel_rects instead of this directly."""
+        sessions = self._local_sessions()
+        width = self.screen.get_width()
+        height = self.screen.get_height()
+        count = max(1, len(sessions))
+        slice_width = width // count
 
-        With a single active player: today's simple follow, self.camera.zoom
-        untouched -- manual mouse-wheel zoom is fully respected, exactly as
-        before Phase 2. With 2+ players (Phase 2's local co-op): centers on
-        the midpoint of every player's position and computes a zoom level
-        from their bounding box (+ padding) so nobody goes off-screen,
-        clamped to the camera's own configured min_zoom/max_zoom. This
-        *overrides* manual zoom for as long as 2+ players are active --
-        blending auto-fit with the existing zoom_at() input was the riskier
-        option and was deliberately not attempted (see Phase 2 notes);
-        mouse-wheel zoom simply has no effect while this is in control."""
-        positions = [session.player.position for session in self.players.values()]
+        rects = {}
+        for index, session in enumerate(sessions):
+            left = index * slice_width
+            # Last slice absorbs the rounding remainder so the rects always
+            # exactly tile the full screen width.
+            this_width = width - left if index == count - 1 else slice_width
+            rects[session.player_id] = pygame.Rect(left, 0, this_width, height)
+        return rects
 
-        if len(positions) == 0:
-            # A headless server (Phase 3) keeps ticking the world even
-            # before any client has joined, unlike every local mode, which
-            # always has at least the local player -- there's nothing to
-            # center on yet, so this frame is simply unused (the server
-            # never renders).
-            return 0.0, 0.0, self.camera.zoom
+    def _merged_view(self):
+        """True when every local session should share ONE camera/viewport
+        (self.camera) instead of real split-screen: solo, single-room mode
+        (only one room ever exists there, so "same room" is trivially
+        always true), or 2+ local co-op sessions all currently in the exact
+        same room of an assembly. Flips to real split-screen the instant one
+        of them crosses into a different room -- a "merge screen" that
+        cancels the per-player camera and falls back to the shared one
+        whenever they're back together, per the user's explicit request
+        (real split-screen alone, unconditionally, was judged too
+        disorienting to stay on permanently once players regroup)."""
+        local_sessions = self._local_sessions()
+        if len(local_sessions) <= 1 or self.assembly is None:
+            return True
+        rooms = {session.current_placed_room for session in local_sessions}
+        return len(rooms) == 1
 
-        if len(positions) <= 1:
+    CAMERA_FIT_PADDING_TILES = 4  # margin kept around every player's bounding box when the merged camera is zoomed to fit
+
+    def _update_shared_camera(self, positions):
+        """Zoom-to-fit self.camera across `positions` (1 or more world
+        points) -- the merged view's camera. A single position is a plain
+        follow (zoom untouched, manual mouse-wheel zoom fully respected,
+        byte-for-byte solo behavior); 2+ positions center on their midpoint
+        and derive zoom from their bounding box (+ padding) so nobody goes
+        off-screen, clamped to the camera's own min/max -- this *overrides*
+        manual zoom for as long as the merge is active. This is the
+        original Phase 2 zoom-to-fit camera, now used only while
+        _merged_view is True instead of unconditionally."""
+        if not positions:
+            return
+
+        if len(positions) == 1:
             pos = positions[0]
-            return pos.x, pos.y, self.camera.zoom
+            self.camera.center_on(pos.x, pos.y, self.screen.get_width(), self.screen.get_height())
+            return
 
         min_x = min(pos.x for pos in positions)
         max_x = max(pos.x for pos in positions)
@@ -881,14 +1015,23 @@ class Explorator:
 
         zoom_x = self.screen.get_width() / span_x
         zoom_y = self.screen.get_height() / span_y
-        zoom = max(self.camera.min_zoom, min(self.camera.max_zoom, min(zoom_x, zoom_y)))
-
-        return center_x, center_y, zoom
+        self.camera.zoom = max(self.camera.min_zoom, min(self.camera.max_zoom, min(zoom_x, zoom_y)))
+        self.camera.center_on(center_x, center_y, self.screen.get_width(), self.screen.get_height())
 
     def _update_camera(self):
-        target_x, target_y, zoom = self._camera_frame()
-        self.camera.zoom = zoom
-        self.camera.center_on(target_x, target_y, self.screen.get_width(), self.screen.get_height())
+        """Merged (self.camera, zoom-to-fit) or real split-screen (each
+        local session's own camera, simple follow) depending on
+        _merged_view -- see both for details."""
+        local_sessions = self._local_sessions()
+
+        if self._merged_view():
+            self._update_shared_camera([session.player.position for session in local_sessions])
+            return
+
+        viewport_rects = self._viewport_rects()
+        for session in local_sessions:
+            rect = viewport_rects[session.player_id]
+            session.camera.center_on(session.player.position.x, session.player.position.y, rect.width, rect.height)
 
     # ------------------------------------------------------
     # Networking (Phase 3) -- server-side: bringing a connected client's
@@ -896,16 +1039,15 @@ class Explorator:
     # Explorator exactly like this one, minus rendering).
     # ------------------------------------------------------
 
-    def add_network_session(self, player_id):
-        """A client just connected -- create its PlayerSession, add it to
-        self.players (simulated/rendered exactly like any local session, see
-        Phase 1/2's players dict), and spawn it the same way every other
-        session gets spawned. Mirrors open_room/open_donjon's own per-session
-        spawn loop, just for a single session joining after the fact rather
-        than every session at room-load time."""
-        session = PlayerSession(player_id, "network")
-        self.players[player_id] = session
-
+    def _spawn_new_session_at_start(self, session):
+        """Positions a brand-new session (not yet part of the world) at the
+        world's own spawn point/room -- shared by add_network_session (a
+        client just connected) and _maybe_join_secondary_keyboard_player (a
+        second local device just started being used), which both need
+        exactly this "place a session that's joining after the fact, not at
+        open_room/open_donjon load time" treatment, including setting
+        session.current_placed_room (without it, this session's own render
+        viewport would have no floor to render -- see render/_render_viewport)."""
         if self.assembly is not None:
             room = self.current_placed_room
             spawn_local = room.dungeon.get_spawn_world_position() or (
@@ -916,9 +1058,24 @@ class Explorator:
                 room.offset_x * tile_size + spawn_local[0] + self._spawn_offset_x(session, tile_size),
                 room.offset_y * tile_size + spawn_local[1],
             )
+            session.current_placed_room = room
         else:
             self._position_player_at_spawn(session)
 
+    def add_network_session(self, player_id, profile_name=None):
+        """A client just connected -- create its PlayerSession, add it to
+        self.players (simulated/rendered exactly like any local session, see
+        Phase 1/2's players dict), and spawn it the same way every other
+        session gets spawned. profile_name (the client's own `join` "name"
+        field, see GameServer._handle_connection) loads/creates its Profile
+        server-side -- this is the one place multiplayer XP actually gets
+        tracked from, same authoritative-server reasoning as every other
+        simulation fact."""
+        session = PlayerSession(player_id, "network")
+        if profile_name is not None:
+            session.profile = ProfileManager().load(profile_name)
+        self.players[player_id] = session
+        self._spawn_new_session_at_start(session)
         return session
 
     def remove_session(self, player_id):
@@ -951,6 +1108,18 @@ class Explorator:
         if room_ref is None:
             return self.dungeon
         return next((room.dungeon for room in self.assembly.rooms if room.index == room_ref), None)
+
+    def _room_for_ref(self, room_ref):
+        """Same room_ref convention as _dungeon_for_room, but returns the
+        actual PlacedRoom (not just its Dungeon) -- used to set a session's
+        current_placed_room from a snapshot player entry's own "room" field
+        (see apply_network_snapshot/_reconcile_local_player). None in
+        single-room mode (self.assembly is None) or if room_ref itself is
+        None (a player entry from before this room got set, or a
+        single-room-mode server)."""
+        if room_ref is None or self.assembly is None:
+            return None
+        return next((room for room in self.assembly.rooms if room.index == room_ref), None)
 
     @staticmethod
     def _sync_mirror_list(mirror_map, live_list, entries, factory, updater):
@@ -1082,6 +1251,31 @@ class Explorator:
         player.position.update(entry["x"], entry["y"])
         player.health = entry["health"]
 
+        # Room/floor crossings are never predicted client-side (see
+        # _resolve_movement_step's predicting=True branch) -- this is the
+        # ONLY place the local session's own current_placed_room ever
+        # changes on a client, driven by the server's own authoritative
+        # room for this player. Without this, current_placed_room stayed
+        # frozen at whatever open_room/open_donjon set it to at connect
+        # time, forever -- rendering (active_floor) and even local
+        # prediction's own collision (_is_walkable reads
+        # moving_session.current_placed_room) silently kept using the
+        # spawn room no matter how far the player actually walked, which
+        # is exactly the "first room stays active forever" bug this fixes.
+        session.current_placed_room = self._room_for_ref(entry.get("room"))
+
+        # XP/level is another server-authoritative fact, same as health --
+        # this client never grants XP itself (_grant_xp is only ever called
+        # from the full simulation, which run_networked never runs). Creates
+        # a display-only Profile on first sight if this session somehow
+        # reached here without one (e.g. --connect used without ever going
+        # through Menu's name-entry screen, so no local_player_name existed
+        # at Explorator.__init__ time).
+        if session.profile is None:
+            session.profile = Profile(self.settings.local_player_name if self.settings else None, xp=entry.get("xp", 0))
+        else:
+            session.profile.xp = entry.get("xp", session.profile.xp)
+
         if entry["action"] is not None or player.action is not None:
             player.action = entry["action"]
             player.animation = entry["animation"]
@@ -1126,6 +1320,11 @@ class Explorator:
             if session is None:
                 session = PlayerSession(entry["id"], "network")
                 session.player.position.update(entry["x"], entry["y"])  # avoid lerping in from Player()'s default spawn
+                # Display-only mirror -- no name travels over the wire for a
+                # remote player, and this Profile is never saved (only the
+                # server's own session, loaded in add_network_session, is
+                # authoritative/persisted for this player).
+                session.profile = Profile(None, xp=entry.get("xp", 0))
                 self.players[entry["id"]] = session
 
             if entry["id"] == self._local_player_id:
@@ -1138,6 +1337,15 @@ class Explorator:
             player.action = entry["action"]
             player.frame = entry["frame"]
             player.health = entry["health"]
+            session.profile.xp = entry.get("xp", session.profile.xp)
+            # Same reasoning as _reconcile_local_player -- a remote mirror's
+            # own current_placed_room now comes straight from the server's
+            # authoritative snapshot too, instead of staying None forever
+            # (the old "drawn in every local viewport regardless of floor"
+            # fallback in render()/_draw_debug_hitboxes still applies for as
+            # long as this is None, e.g. one frame before a mirror's first
+            # snapshot with a "room" field arrives).
+            session.current_placed_room = self._room_for_ref(entry.get("room"))
             self._register_network_target(player, entry["x"], entry["y"])
         for stale_id in [pid for pid in self.players if pid not in seen_players and pid != self._local_player_id]:
             del self.players[stale_id]
@@ -1218,8 +1426,24 @@ class Explorator:
             return "stop"
 
         if event.type == pygame.MOUSEWHEEL:
+            # The mouse is only ever used by the primary local player
+            # (attack/interact bindings, the secondary local co-op scheme
+            # has no mouse). Which camera that actually zooms depends on
+            # which one render() is currently using for the view the mouse
+            # is over: self.camera (merged -- solo, or 2+ local co-op still
+            # in the same room) or that session's own camera (real
+            # split-screen, once merge is off) -- converting the
+            # window-space mouse position into that view's own local
+            # coordinates either way (matters once split-screen puts a
+            # viewport somewhere other than the screen's own top-left).
             mouse_x, mouse_y = pygame.mouse.get_pos()
-            self.camera.zoom_at(mouse_x, mouse_y, event.y, self.screen.get_width(), self.screen.get_height())
+            if self._merged_view():
+                self.camera.zoom_at(mouse_x, mouse_y, event.y, self.screen.get_width(), self.screen.get_height())
+            else:
+                local_session = self.players.get(self._local_player_id)
+                rect = self._viewport_rects().get(self._local_player_id) if local_session is not None else None
+                if rect is not None:
+                    local_session.camera.zoom_at(mouse_x - rect.x, mouse_y - rect.y, event.y, rect.width, rect.height)
             return "handled"
 
         if event.type == pygame.KEYDOWN and event.key == pygame.K_F3:
@@ -1352,13 +1576,94 @@ class Explorator:
 
         self.screen.fill((20, 20, 20))
 
+        local_sessions = self._local_sessions()
+        merged = self._merged_view()
+
+        if merged:
+            room = local_sessions[0].current_placed_room if local_sessions and self.assembly is not None else None
+            self._render_viewport(self.screen, self.camera, room)
+            panel_rects = {session.player_id: self.screen.get_rect() for session in local_sessions}
+        else:
+            viewport_rects = self._viewport_rects()
+            for session in local_sessions:
+                rect = viewport_rects[session.player_id]
+                self._render_viewport(self.screen.subsurface(rect), session.camera, session.current_placed_room)
+            panel_rects = viewport_rects
+
+        if self.debug_mode:
+            self._draw_debug_hitboxes()
+
+        self._render_inventory_panels(panel_rects)
+
+        if self.victory:
+            self._draw_victory_banner()
+
+        pygame.display.flip()
+
+    def _render_inventory_panels(self, panel_rects):
+        """Each open panel renders within its own player's viewport rect
+        (panel_rects, from render() -- the whole screen when merged, that
+        session's own split-screen viewport otherwise). Panels that happen
+        to share the exact same rect (any number of players sharing one
+        merged view) subdivide it between themselves instead of exactly
+        overlapping -- the same "N panels open at once" case Phase 2
+        already had to handle, just keyed off whichever rect a session's
+        viewport actually is this frame instead of always the whole screen."""
+        open_sessions = [session for session in self.players.values() if session.inventory_open]
+        groups = {}
+        for session in open_sessions:
+            rect = panel_rects.get(session.player_id)
+            key = (rect.x, rect.y, rect.width, rect.height) if rect is not None else None
+            groups.setdefault(key, []).append(session)
+
+        for key, sessions_in_group in groups.items():
+            if key is None:
+                # No viewport of its own (a "network"-kind session -- can't
+                # happen locally, only relevant if this were ever a server,
+                # which never renders at all).
+                for session in sessions_in_group:
+                    session.inventory_panel.render(self.screen, session.player, region=None)
+                continue
+
+            rect = panel_rects[sessions_in_group[0].player_id]
+            count = len(sessions_in_group)
+            slice_width = rect.width / count
+            for index, session in enumerate(sessions_in_group):
+                region = (rect.left + index * slice_width, slice_width)
+                session.inventory_panel.render(self.screen, session.player, region=region)
+
+    def _render_viewport(self, target, camera, room):
+        """Draws the world into `target` (either the whole screen, when
+        merged, or one local session's own split-screen subsurface) using
+        `camera`, scoped to `room`'s floor (None in single-room mode).
+        Shared by both the merged path (one call: target=self.screen,
+        camera=self.camera, room=whichever room the merged sessions all
+        share) and the real split-screen path (one call per local session:
+        target=that session's own subsurface, camera/room=that session's
+        own) -- neither needs to know which specific session is "looking,"
+        only which room/floor and camera to render with. Any player whose
+        own current_placed_room is on this same floor is drawn too, same as
+        normal co-presence in a shared room already worked before real
+        split-screen existed -- a network mirror with no current_placed_room
+        of its own (the client never tracks which room/floor a remote
+        player is actually on, see apply_network_snapshot) is drawn
+        regardless of floor, same simplification as before this phase."""
         if self.assembly is not None:
+            floor = room.floor
+            players_on_floor = [
+                other.player for other in self.players.values()
+                if other.current_placed_room is None or other.current_placed_room.floor == floor
+            ]
+            # Wherever the camera is actually centered, in world space --
+            # the vision-hole punch-out on floors above should always be
+            # centered on what's actually in view, whether that's a single
+            # player's own follow or the merged view's zoom-to-fit midpoint.
+            center_world = camera.screen_to_world(target.get_width() / 2, target.get_height() / 2)
 
             self.assembly.render(
-                self.screen,
-                self.camera,
-                active_floor=self.current_placed_room.floor,
-                player_world_pos=self._camera_frame()[:2],
+                target, camera,
+                active_floor=floor,
+                player_world_pos=center_world,
                 hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_active_floor_foreground=True,
                 skip_active_floor_animals=True,
@@ -1366,25 +1671,16 @@ class Explorator:
                 show_grid=self.debug_mode,
             )
 
-            self.assembly.render_active_floor_entities(
-                self.screen,
-                self.camera,
-                self.current_placed_room.floor,
-                [session.player for session in self.players.values()],
-            )
+            self.assembly.render_active_floor_entities(target, camera, floor, players_on_floor)
 
             self.assembly.render_active_floor_foreground(
-                self.screen,
-                self.camera,
-                self.current_placed_room.floor,
-                hide_object_types=HIDDEN_OBJECT_TYPES,
+                target, camera, floor, hide_object_types=HIDDEN_OBJECT_TYPES,
             )
 
         else:
 
             self.dungeon.render(
-                self.screen,
-                self.camera,
+                target, camera,
                 hide_object_types=HIDDEN_OBJECT_TYPES,
                 skip_foreground_objects=True,
                 skip_animals=True,
@@ -1395,38 +1691,13 @@ class Explorator:
             entities = (
                 list(self.dungeon.animal_manager.animals)
                 + list(self.dungeon.enemy_manager.enemies)
-                + [session.player for session in self.players.values()]
+                + [other.player for other in self.players.values()]
             )
             entities.sort(key=lambda entity: entity.position.y)
             for entity in entities:
-                entity.draw(self.screen, self.camera)
+                entity.draw(target, camera)
 
-            self.dungeon.render_foreground(
-                self.screen,
-                self.camera,
-                hide_object_types=HIDDEN_OBJECT_TYPES,
-            )
-
-        if self.debug_mode:
-            self._draw_debug_hitboxes()
-
-        open_sessions = [session for session in self.players.values() if session.inventory_open]
-        if len(open_sessions) == 1:
-            session = open_sessions[0]
-            session.inventory_panel.render(self.screen, session.player)
-        elif len(open_sessions) > 1:
-            # More than one panel open at once (per-player freeze lets this
-            # happen) -- side by side instead of exactly overlapping.
-            region_width = self.screen.get_width() / len(open_sessions)
-            for index, session in enumerate(open_sessions):
-                session.inventory_panel.render(
-                    self.screen, session.player, region=(index * region_width, region_width)
-                )
-
-        if self.victory:
-            self._draw_victory_banner()
-
-        pygame.display.flip()
+            self.dungeon.render_foreground(target, camera, hide_object_types=HIDDEN_OBJECT_TYPES)
 
     def _draw_victory_banner(self):
         """The only win condition that exists right now (see
@@ -1445,59 +1716,95 @@ class Explorator:
     DEBUG_VOID_RADIUS_TILES = 3
 
     def _draw_debug_hitboxes(self):
-        """F3 overlay: every player's hitbox in red (plus its attack reach in
-        orange while actually active), animals in yellow, enemies in purple
-        (plus each attacking enemy's own melee reach in magenta, same idea as
-        a player's orange one) -- all already in the exact world coordinates
-        _is_walkable/combat compare, so any gap between "what looks like it's
-        touching" and "what's actually colliding" is directly visible
+        """F3 overlay, once per view (see render()'s own merged/split
+        branching -- one shared view when merged, one per local session's
+        own viewport otherwise): every hitbox in red (plus its attack reach
+        in orange while actually active) for every player on THAT view's
+        own floor, animals in yellow, enemies in purple (plus each
+        attacking enemy's own melee reach in magenta, same idea as a
+        player's orange one) -- all already in the exact world coordinates
+        _is_walkable/combat compare, so any gap between "what looks like
+        it's touching" and "what's actually colliding" is directly visible
         instead of guessed. Also outlines every cell _is_void_at considers
-        void (cyan) within a few tiles of the local player -- to diagnose
-        exactly which cells near a gate/wall entry-exit read as void vs not,
-        rather than guessing."""
-        self._draw_debug_void_grid()
-        for session in self.players.values():
-            player = session.player
-            self._draw_debug_rect(player.get_hitbox(), (255, 60, 60))
-            if player.is_attack_active():
-                self._draw_debug_rect(player.get_attack_hitbox(), (255, 150, 30))
-        for _animal, animal_rect in self._visible_animals_global():
-            self._draw_debug_rect(animal_rect, (255, 220, 60))
-        for enemy, enemy_rect, _dungeon in self._visible_enemies_global():
-            self._draw_debug_rect(enemy_rect, (200, 60, 255))
-            if enemy.state == "attack":
-                # get_attack_hitbox() is local to the enemy's own room's
-                # Dungeon (same convention as get_hitbox()) -- enemy_rect is
-                # that same body hitbox already shifted to global/world
-                # coordinates, so re-using the delta between the two gets the
-                # attack hitbox into global coordinates too, without needing
-                # this method to know the room's offset directly.
-                local_hitbox = enemy.get_hitbox()
-                offset = (enemy_rect.x - local_hitbox.x, enemy_rect.y - local_hitbox.y)
-                self._draw_debug_rect(enemy.get_attack_hitbox().move(offset), (255, 60, 220))
+        void (cyan) within a few tiles of each viewing session's own player."""
+        local_sessions = self._local_sessions()
 
-    def _draw_debug_void_grid(self):
-        """Centered on the local player only -- not extended to show every
-        player's own local void-grid (see Phase 1 notes)."""
-        hitbox = self.players[self._local_player_id].player.get_hitbox()
+        if self._merged_view():
+            room = local_sessions[0].current_placed_room if local_sessions and self.assembly is not None else None
+            self._draw_debug_hitboxes_for_view(self.screen, self.camera, room, local_sessions)
+            return
+
+        viewport_rects = self._viewport_rects()
+        for session in local_sessions:
+            rect = viewport_rects[session.player_id]
+            target = self.screen.subsurface(rect)
+            self._draw_debug_hitboxes_for_view(target, session.camera, session.current_placed_room, [session])
+
+    def _draw_debug_hitboxes_for_view(self, target, camera, room, viewer_sessions):
+        floor = room.floor if self.assembly is not None else None
+
+        for viewer in viewer_sessions:
+            self._draw_debug_void_grid(target, camera, viewer)
+
+        for other_session in self.players.values():
+            other_floor = (
+                other_session.current_placed_room.floor
+                if self.assembly is not None and other_session.current_placed_room is not None
+                else floor
+            )
+            if other_floor != floor:
+                continue
+            player = other_session.player
+            self._draw_debug_rect(target, camera, player.get_hitbox(), (255, 60, 60))
+            if player.is_attack_active():
+                self._draw_debug_rect(target, camera, player.get_attack_hitbox(), (255, 150, 30))
+
+        floors = {floor}
+        for dungeon, offset_x, offset_y in self._rooms_with_offset(floors):
+            for animal in dungeon.animal_manager.animals:
+                animal_rect = animal.get_hitbox().move(offset_x, offset_y)
+                self._draw_debug_rect(target, camera, animal_rect, (255, 220, 60))
+            for enemy in dungeon.enemy_manager.enemies:
+                if not enemy.alive:
+                    continue
+                enemy_rect = enemy.get_hitbox().move(offset_x, offset_y)
+                self._draw_debug_rect(target, camera, enemy_rect, (200, 60, 255))
+                if enemy.state == "attack":
+                    # get_attack_hitbox() is local to the enemy's own
+                    # room's Dungeon (same convention as get_hitbox()) --
+                    # enemy_rect is that same body hitbox already
+                    # shifted to global/world coordinates, so re-using
+                    # the delta between the two gets the attack hitbox
+                    # into global coordinates too, without needing this
+                    # method to know the room's offset directly.
+                    local_hitbox = enemy.get_hitbox()
+                    offset = (enemy_rect.x - local_hitbox.x, enemy_rect.y - local_hitbox.y)
+                    self._draw_debug_rect(target, camera, enemy.get_attack_hitbox().move(offset), (255, 60, 220))
+
+    def _draw_debug_void_grid(self, target, camera, session):
+        """Centered on `session`'s own player -- called once per local
+        viewport now (see _draw_debug_hitboxes), each showing its own
+        player's local void-grid instead of only ever the primary local
+        player's (Phase 1 notes, superseded by real split-screen)."""
+        hitbox = session.player.get_hitbox()
         center_grid_x, center_grid_y = self._feet_grid_cell(hitbox)
         tile_size = Dungeon.TILE_SIZE
         radius = self.DEBUG_VOID_RADIUS_TILES
 
         for grid_y in range(center_grid_y - radius, center_grid_y + radius + 1):
             for grid_x in range(center_grid_x - radius, center_grid_x + radius + 1):
-                if self._is_void_at(grid_x, grid_y):
+                if self._is_void_at(grid_x, grid_y, session.current_placed_room):
                     world_rect = pygame.Rect(grid_x * tile_size, grid_y * tile_size, tile_size, tile_size)
-                    self._draw_debug_rect(world_rect, (60, 220, 220))
+                    self._draw_debug_rect(target, camera, world_rect, (60, 220, 220))
 
-    def _draw_debug_rect(self, world_rect, color):
-        top_left = self.camera.world_to_screen(world_rect.left, world_rect.top)
-        bottom_right = self.camera.world_to_screen(world_rect.right, world_rect.bottom)
+    def _draw_debug_rect(self, target, camera, world_rect, color):
+        top_left = camera.world_to_screen(world_rect.left, world_rect.top)
+        bottom_right = camera.world_to_screen(world_rect.right, world_rect.bottom)
         screen_rect = pygame.Rect(
             int(top_left[0]), int(top_left[1]),
             int(bottom_right[0] - top_left[0]), int(bottom_right[1] - top_left[1]),
         )
-        pygame.draw.rect(self.screen, color, screen_rect, 2)
+        pygame.draw.rect(target, color, screen_rect, 2)
 
     # ------------------------------------------------------
 
@@ -1520,7 +1827,9 @@ class Explorator:
         if 1 in self.players or event.type != pygame.KEYDOWN:
             return
         if event.key in SECONDARY_KEYBOARD_BINDINGS.values():
-            self.players[1] = PlayerSession(1, "secondary_keyboard")
+            session = PlayerSession(1, "secondary_keyboard")
+            self.players[1] = session
+            self._spawn_new_session_at_start(session)
 
     def _handle_session_event(self, session, event):
         """Per-session one-shot action handling: this session's own

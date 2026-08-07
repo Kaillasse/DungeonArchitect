@@ -74,6 +74,11 @@ class Settings:
         self.display = {"fullscreen": False, "resolution": list(DEFAULT_RESOLUTION)}
         self.border_cell = [0, 0]
         self.volume = DEFAULT_VOLUME
+        # Local device identity, used to key this machine's Profile (see
+        # core.data.profile_manager) -- None until Menu's name-entry screen
+        # sets it once, the same "ask once, persist forever" shape as any
+        # other setting here.
+        self.local_player_name = None
 
     # ------------------------------------------------------------------
     # Reading bindings during gameplay
@@ -131,6 +136,13 @@ class Settings:
     def adjust_volume(self, delta):
         self.set_volume(self.volume + delta)
 
+    def set_local_player_name(self, name):
+        """Trim/cap and save immediately -- empty stays None so Menu's
+        name-entry screen keeps showing until a real name is set."""
+        cleaned = str(name or "").strip()[:32]
+        self.local_player_name = cleaned or None
+        self.save()
+
     def _apply_volume(self):
         """Push self.volume onto the live SoundManager singleton without
         saving -- used by set_volume (which also saves) and once right after
@@ -149,6 +161,7 @@ class Settings:
             "display": dict(self.display),
             "border_cell": list(self.border_cell),
             "volume": self.volume,
+            "local_player_name": self.local_player_name,
         }
 
     @classmethod
@@ -176,6 +189,10 @@ class Settings:
         if isinstance(volume, (int, float)):
             settings.volume = max(0.0, min(1.0, float(volume)))
         settings._apply_volume()
+
+        local_player_name = payload.get("local_player_name")
+        if isinstance(local_player_name, str) and local_player_name.strip():
+            settings.local_player_name = local_player_name.strip()[:32]
 
         return settings
 

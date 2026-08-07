@@ -8,6 +8,7 @@ generic state-machine plumbing)."""
 
 from __future__ import annotations
 
+from core.engine.camera import Camera
 from core.engine.input import InputState
 from core.exploration.inventory_ui import InventoryPanel
 from core.world.entities import Player
@@ -61,6 +62,35 @@ class PlayerSession:
         self.inventory_open = False
         self.footstep_timer = 0.0
         self.footstep_alt = 0
+        # This session's progression (core.data.profile_manager.Profile), or
+        # None if it has no identity to track XP against -- a local co-op
+        # secondary device (gamepad/2nd keyboard, see Phase 2) never gets one
+        # today, and Explorator._grant_xp is a no-op for a None profile.
+        self.profile = None
+        # This session's own room/floor in a procedurally-assembled dungeon
+        # (a PlacedRoom, see core.world.assembly), or None in single-room
+        # mode. Used to be a single Explorator-level attribute shared by
+        # every session -- one player crossing a door used to silently drag
+        # every OTHER player's collision/rendering into the new room/floor
+        # with them. Set by Explorator.open_room/open_donjon/
+        # add_network_session at spawn time, then kept current per-frame by
+        # Explorator._update_current_room/_attempt_fall.
+        self.current_placed_room = None
+        # The door object (a plain dict from some room's object list) this
+        # session was last resolved to be standing on, or None -- the
+        # edge-trigger state _update_current_room needs to tell "just
+        # stepped onto this door" apart from "still standing on the door
+        # from last frame." Also per-session now, for the same reason as
+        # current_placed_room above.
+        self.last_door_obj = None
+        # This session's own camera -- real split-screen (one independent
+        # viewport per LOCAL session, see Explorator._viewport_rects) means
+        # each local player follows their own position at their own zoom,
+        # instead of the old single shared Explorator.camera trying to
+        # zoom-to-fit everyone into one view. A "network"-kind session's
+        # camera is simply never used for rendering (only the local
+        # session(s) ever get a viewport), but costs nothing to have.
+        self.camera = Camera(zoom=1.0)
 
     def update_frozen(self, dt):
         """Ticks idle animation only -- shared by Explorator.update()'s

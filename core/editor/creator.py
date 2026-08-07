@@ -10,6 +10,8 @@ from core.engine.gamestate import GameState
 from core.engine.room_manager import RoomManager
 from core.engine.camera import Camera
 from core.data.ressources import FLOOR, next_new_donjon_name
+from core.data.profile_manager import ProfileManager
+from core.data.progression import unlocked_objects
 from core.editor.ui import GeneratorPanelUI, ObjectPalette, RoomPanelUI, ChestPanelUI
 from core.editor.tools import ObjectTool
 
@@ -33,7 +35,7 @@ class Creator:
         self.assembly_active_floor = 0
 
         self.object_type = "spawn" # Type d'objet par défaut
-        self.object_palette = ObjectPalette()
+        self.object_palette = ObjectPalette(unlocked_types=unlocked_objects(self._current_level()))
         self.object_tool = ObjectTool(self.object_palette)
         self.object_palette.tool = self.object_tool
 
@@ -55,6 +57,9 @@ class Creator:
 
         self.moving_object = None
         self.move_drag_pos = None
+
+        self.panning = False
+        self.pan_last_pos = None
 
         self.camera = Camera(zoom=1.0)
         self.grid_zoom = self.camera.zoom
@@ -181,9 +186,33 @@ class Creator:
             grid_y
         )
 
+    def _current_level(self):
+        """The local player's progression level, driving which object types
+        ObjectPalette offers (see _refresh_object_palette). Falls back to
+        level 1 (the most restrictive) if there's no local identity yet --
+        never "everything unlocked" by default -- which covers the headless
+        smoke test (DUNGEONARCHITECT_HEADLESS, no Menu name-entry ever ran)."""
+        settings = self.game_manager.settings
+        name = settings.local_player_name if settings is not None else None
+        if not name:
+            return 1
+        return ProfileManager().load(name).level
+
+    def _refresh_object_palette(self):
+        """Re-derives the unlocked object set from the current level and
+        rebuilds the palette if it changed -- called once per entry into
+        this state (see run()) rather than every frame, since the level only
+        ever changes while playing Exploration, not while the Creator loop
+        itself is running."""
+        unlocked = unlocked_objects(self._current_level())
+        if self.object_palette.set_unlocked_types(unlocked):
+            self.generator_panel.set_y(self.object_palette.y + self.object_palette.height + 20)
+
     def run(self):
 
         pygame.display.set_caption("DungeonArchitect - Dungeon Editor")
+
+        self._refresh_object_palette()
 
         clock = pygame.time.Clock()
 
@@ -311,6 +340,11 @@ class Creator:
 
                             self._paint_at_mouse(event.pos, erase=True)
 
+                    elif event.button == 2:
+
+                        self.panning = True
+                        self.pan_last_pos = event.pos
+
 
                 elif event.type == pygame.MOUSEBUTTONUP:
 
@@ -346,9 +380,22 @@ class Creator:
 
                         self.erasing = False
 
+                    elif event.button == 2:
+
+                        self.panning = False
+                        self.pan_last_pos = None
+
                 elif event.type == pygame.MOUSEMOTION:
 
-                    if self.link_source is not None:
+                    if self.panning and self.pan_last_pos is not None:
+
+                        dx = event.pos[0] - self.pan_last_pos[0]
+                        dy = event.pos[1] - self.pan_last_pos[1]
+                        self.camera.x -= dx / self.camera.zoom
+                        self.camera.y -= dy / self.camera.zoom
+                        self.pan_last_pos = event.pos
+
+                    elif self.link_source is not None:
 
                         self.link_drag_pos = event.pos
 
