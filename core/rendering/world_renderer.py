@@ -95,6 +95,12 @@ class WorldRenderer:
             hide_object_types=hide_object_types,
             skip_foreground=skip_foreground_objects,
         )
+        if not skip_foreground_objects:
+            # Creator's single-pass preview (no player to interleave) --
+            # Explorator instead defers this to render_foreground_objects(),
+            # called after it draws the player, so a pillar's decorative top
+            # ends up in front of them too.
+            self._draw_pillar_tops(screen, dungeon, camera, hide_object_types=hide_object_types)
 
         if show_grid:
             hide_border_cells = hide_border_cells or ()
@@ -174,13 +180,29 @@ class WorldRenderer:
         return cells
 
     def render_foreground_objects(self, screen, dungeon, camera, hide_object_types=None):
-        """Objects ObjectManager.is_foreground_object() flags (e.g. an L/R torch) -- call this after drawing the player sprite."""
+        """Objects ObjectManager.is_foreground_object() flags (e.g. an L/R torch), plus every pillar's decorative top -- call this after drawing the player sprite."""
         self._draw_objects(screen, dungeon, camera, hide_object_types=hide_object_types, foreground_only=True)
+        self._draw_pillar_tops(screen, dungeon, camera, hide_object_types=hide_object_types)
+
+    @staticmethod
+    def _tile_grid_origin(dungeon, camera):
+        """(tile_px, origin_x, origin_y) shared by every tile/object blit in
+        a render pass -- see render()'s own comment on tile_px for why this
+        matters: positioning each object independently via camera.world_to_
+        screen's raw float (as this used to do) let an object drift up to a
+        pixel off the floor grid beneath it at non-integer zoom, since the
+        tile grid itself is already snapped to this same origin+tile_px
+        scheme but a lone per-object call wasn't. Deriving every position
+        from one shared, already-rounded origin plus an integer multiple of
+        the same tile_px keeps objects glued to the grid at any zoom."""
+        tile_px = round(dungeon.tile_size * camera.zoom)
+        origin_x, origin_y = camera.world_to_screen(0, 0)
+        return tile_px, round(origin_x), round(origin_y)
 
     def _draw_objects(self, screen, dungeon, camera, hide_object_types=None, foreground_only=False, skip_foreground=False):
         hide_object_types = hide_object_types or ()
         zoom = camera.zoom
-        tile_size = dungeon.tile_size
+        tile_px, origin_x, origin_y = self._tile_grid_origin(dungeon, camera)
 
         for obj in dungeon.object_manager.objects:
             if obj["type"] in hide_object_types:
@@ -201,10 +223,7 @@ class WorldRenderer:
             cache_key = (obj["type"], obj.get("variant"), frame_index, zoom)
             scaled_sprite = self._object_sprite_cache.get(cache_key)
             if scaled_sprite is None:
-                size = (
-                    int(size_cells_x * tile_size * zoom),
-                    int(size_cells_y * tile_size * zoom),
-                )
+                size = (size_cells_x * tile_px, size_cells_y * tile_px)
                 scaled_sprite = pygame.transform.scale(frames[frame_index], size)
                 if obj.get("variant") == "flip":
                     # Stairs only (Phase 6a): a single stairs.png asset,
@@ -219,17 +238,46 @@ class WorldRenderer:
             # Anchored to the footprint's left/bottom edge (not the origin cell's
             # center) so a multi-cell object like "wall" fills exactly the cells
             # it occupies instead of straddling half a tile into its neighbors.
-            left_world_x = obj["x"] * tile_size
-            bottom_world_y = (obj["y"] + size_cells_y) * tile_size
-            sx, sy = camera.world_to_screen(left_world_x, bottom_world_y)
+            left_x = origin_x + obj["x"] * tile_px
+            bottom_y = origin_y + (obj["y"] + size_cells_y) * tile_px
 
-            screen.blit(
-                scaled_sprite,
-                (
-                    sx,
-                    sy - scaled_sprite.get_height(),
-                ),
-            )
+            screen.blit(scaled_sprite, (left_x, bottom_y - scaled_sprite.get_height()))
+
+    def _draw_pillar_tops(self, screen, dungeon, camera, hide_object_types=None):
+        """Every pillar's decorative top half, one cell north of wherever
+        that pillar object currently is (Phase 6a polish -- see
+        OBJECT_TYPES["pillar"]): purely a rendering detail, not a second
+        object, so it always follows its base automatically and can never
+        be independently moved/erased/orphaned. Skipped at any cell an
+        entry-exit object (gate/wall/cave_entrance/stairs) occupies, so it
+        never visually covers a doorway; drawn everywhere else regardless of
+        what's underneath, same "always wins" foreground treatment an L/R
+        torch already gets."""
+        hide_object_types = hide_object_types or ()
+        if "pillar" in hide_object_types:
+            return
+
+        object_manager = dungeon.object_manager
+        pillars = [obj for obj in object_manager.objects if obj["type"] == "pillar"]
+        if not pillars:
+            return
+
+        zoom = camera.zoom
+        tile_px, origin_x, origin_y = self._tile_grid_origin(dungeon, camera)
+
+        cache_key = ("pillar", "top", 0, zoom)
+        sprite = self._object_sprite_cache.get(cache_key)
+        if sprite is None:
+            frames = self._get_object_frames("pillar", "top")
+            sprite = pygame.transform.scale(frames[0], (tile_px, tile_px))
+            self._object_sprite_cache[cache_key] = sprite
+
+        for obj in pillars:
+            top_x, top_y = obj["x"], obj["y"] - 1
+            blocker = object_manager.get_object_at(top_x, top_y)
+            if blocker is not None and object_manager.is_entry_exit_object(blocker["type"]):
+                continue
+            screen.blit(sprite, (origin_x + top_x * tile_px, origin_y + top_y * tile_px))
 
     def _draw_link_indicators(self, screen, dungeon, camera):
         for obj in dungeon.object_manager.objects:

@@ -167,21 +167,20 @@ OBJECT_TYPES = {
         "frames": 1,
     },
     "pillar": {
-        # basictileset.png frame 18 (base). Decorative, 1 cell wide x 2
-        # tall, placed on FLOOR like a vase -- but unlike every other entry
-        # here, placing one actually creates TWO object dicts (see
-        # ObjectManager.add_object's "pillar" branch): this base (blocks
-        # movement, the default/no-variant sprite) and a companion "top"
-        # (variant="top", frame 12 via the variants override below) one
-        # cell north, walkable and rendered in front of the player
-        # (ObjectManager.is_foreground_object) -- exactly the same
-        # background/foreground split already used by torch's L/R variants,
-        # just spread across two linked objects instead of one. Not
-        # draggable in Phase 6a (see _resolve_placement's "pillar" branch
-        # and the note on add_object) -- erasing the base prunes the
-        # orphaned top automatically.
+        # basictileset.png frame 18 (base). A single ordinary object, placed
+        # on FLOOR exactly like "vase" -- move/erase/click-drag all reuse the
+        # generic single-cell machinery unchanged, so a pillar is always
+        # destroyed/moved as one block, never split. Its "top" half (frame
+        # 12, via the "variants" override below) is *not* a second object at
+        # all: WorldRenderer._draw_pillar_tops draws it purely decoratively,
+        # one cell north of wherever this object currently is, every frame
+        # -- no placement rule, no independent existence, so it can never be
+        # individually selected, moved, or orphaned. It's skipped only where
+        # an entry-exit object (gate/wall/cave_entrance/stairs) sits, so it
+        # never visually covers a doorway; it renders in front of anything
+        # else (including the player), same z-order slot an L/R torch uses.
         "asset": "tiles/pillar.png",
-        "placement": "pillar",
+        "placement": "floor",
         "size": (1, 1),
         "frames": 1,
         "blocks_movement": True,
@@ -476,24 +475,6 @@ class ObjectManager:
 
         self.objects.append(placed)
 
-        if object_type == "pillar":
-            # Placing a pillar actually creates two linked objects: this one
-            # (the base, just appended) and a companion "top" one cell north
-            # -- _resolve_placement's "pillar" branch already confirmed both
-            # cells are FLOOR before we got here, so the top is guaranteed
-            # valid too. See OBJECT_TYPES["pillar"]/is_foreground_object for
-            # why it needs to exist as its own object instead of a taller
-            # sprite on the base alone (the top half must be walkable and
-            # drawn in front of the player, the base must block -- two
-            # different per-cell behaviors the current one-object-one-
-            # footprint model can't express by itself).
-            self.objects.append({
-                "type": "pillar",
-                "x": grid_x,
-                "y": grid_y - 1,
-                "variant": "top",
-            })
-
         return True
 
     def get_object_at(self, grid_x, grid_y):
@@ -515,17 +496,21 @@ class ObjectManager:
         return OBJECT_TYPES[object_type].get("linkable", False)
 
     def is_foreground_object(self, obj):
-        """Drawn after (in front of) the player -- an L/R wall-mounted torch
-        (also walkable despite sitting on a WALL cell, unlike a straight
-        torch, a plain blocking wall decoration) or a pillar's "top" half
-        (walkable for a different reason: it just sits on an ordinary FLOOR
-        cell, same as any other empty floor tile -- only its base half
-        blocks, see OBJECT_TYPES["pillar"])."""
-        if obj["type"] == "torch":
-            return obj.get("variant") in ("L", "R")
-        if obj["type"] == "pillar":
-            return obj.get("variant") == "top"
-        return False
+        """Drawn after (in front of) the player, and walkable despite sitting on a WALL cell -- currently just L/R wall-mounted torches; a straight torch stays a plain blocking wall decoration. (A pillar's decorative top half gets the same front-of-player treatment, but it isn't a real object -- see WorldRenderer._draw_pillar_tops -- so it never reaches this method.)"""
+        return obj["type"] == "torch" and obj.get("variant") in ("L", "R")
+
+    def is_entry_exit_object(self, object_type):
+        """True for anything that functions as a room-to-room connector
+        marker: gate/wall/cave_entrance (the shared "doorway" placement
+        rule) plus stairs. Derived from existing data rather than a second
+        hardcoded list -- used so a pillar's decorative top (see
+        WorldRenderer._draw_pillar_tops) never renders over one and
+        visually/functionally obscures it. Not the same list as
+        core.world.assembly.ENTRY_EXIT_TYPES, which is about which of these
+        the procedural assembler is actually allowed to connect through
+        (narrower on purpose, see CLAUDE.md's Phase 6a notes)."""
+        config = OBJECT_TYPES[object_type]
+        return config.get("placement") == "doorway" or object_type == "stairs"
 
     def is_cell_walkable(self, grid_x, grid_y):
         if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
@@ -631,13 +616,8 @@ class ObjectManager:
                 if link_target["x"] == old_x and link_target["y"] == old_y:
                     link_target["x"], link_target["y"] = new_x, new_y
 
-    def _resolve_placement(self, object_type, grid_x, grid_y, variant=None):
-        """Returns (is_valid, variant) for placing/moving object_type at this
-        cell. `variant` is only meaningful for a type whose validity depends
-        on *which* variant is being checked -- currently just "pillar"'s
-        "top" companion, which can't be inferred from cell contents alone
-        the way torch's L/R can. Every other type ignores the parameter and
-        re-derives its own variant fresh, same as before this was added."""
+    def _resolve_placement(self, object_type, grid_x, grid_y):
+        """Returns (is_valid, variant) for placing/moving object_type at this cell."""
         if object_type == "torch":
             variant = self._torch_variant(grid_x, grid_y)
             if variant is not None:
@@ -651,9 +631,6 @@ class ObjectManager:
 
         if object_type == "stairs":
             return self._stairs_orientation(grid_x, grid_y)
-
-        if object_type == "pillar":
-            return self._pillar_validity(grid_x, grid_y, variant)
 
         is_valid = self.dungeon.logical_grid[grid_y][grid_x] == self._required_cell(object_type)
         return is_valid, None
@@ -682,27 +659,6 @@ class ObjectManager:
                 return True, None
 
         return False, None
-
-    def _pillar_validity(self, grid_x, grid_y, variant):
-        """(is_valid, variant) for pillar. variant="top" checks this cell is
-        FLOOR and that a pillar base (variant != "top") sits directly south
-        of it -- an orphaned top (its base erased) fails this and gets
-        dropped by prune_invalid automatically. Anything else checks the
-        base's own requirement: this cell and the one north of it both
-        FLOOR, so there's room for a base here and a top above it."""
-        if variant == "top":
-            if self.dungeon.logical_grid[grid_y][grid_x] != FLOOR:
-                return False, "top"
-            base = self.get_object_at(grid_x, grid_y + 1)
-            if base is None or base["type"] != "pillar" or base.get("variant") == "top":
-                return False, "top"
-            return True, "top"
-
-        if self.dungeon.logical_grid[grid_y][grid_x] != FLOOR:
-            return False, None
-        if grid_y == 0 or self.dungeon.logical_grid[grid_y - 1][grid_x] != FLOOR:
-            return False, None
-        return True, None
 
     def _torch_variant(self, grid_x, grid_y):
         """L/R variant for a torch on a floor cell with an adjacent wall: wall to the right -> R, wall to the left -> L. None if this isn't a valid floor-beside-a-wall spot."""
@@ -752,21 +708,10 @@ class ObjectManager:
         return False
 
     def prune_invalid(self):
-        """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased), and any links left dangling by that.
-
-        Passes each object's own `variant` through to `_resolve_placement` --
-        needed for a pillar's "top" half, whose validity depends on its base
-        sibling still existing (see `_pillar_validity`); every other type
-        ignores the parameter and re-derives its own variant fresh, same as
-        always. Note: since this rebuilds `self.objects` in one pass, an
-        orphaned pillar top whose base becomes invalid in this *same* call
-        still sees that base via `get_object_at` (the old list isn't
-        reassigned until the whole comprehension finishes) and survives one
-        extra edit before the next prune_invalid() call catches it -- a
-        one-cycle lag, not a permanent stuck state."""
+        """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased), and any links left dangling by that."""
         self.objects = [
             obj for obj in self.objects
-            if self._resolve_placement(obj["type"], obj["x"], obj["y"], obj.get("variant"))[0]
+            if self._resolve_placement(obj["type"], obj["x"], obj["y"])[0]
         ]
 
         existing = {(obj["x"], obj["y"]) for obj in self.objects}
