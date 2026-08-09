@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 from core.data import progression
+from core.data.cards import STARTING_CARD_COLLECTION
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROFILES_DIRECTORY = PROJECT_ROOT / "assets" / "profiles"
@@ -30,7 +31,7 @@ def _sanitize_name(name) -> str:
 
 class Profile:
     def __init__(self, name: str, xp: int = 0, generator_room_names=None, generator_room_count: int = 3,
-                 panel_layout=None):
+                 panel_layout=None, card_collection=None):
         self.name = name
         self.xp = xp
         # Creator's GeneratorPanelUI room-pool selection + room-count
@@ -50,6 +51,13 @@ class Profile:
         # (a profile that's never moved a panel) leaves every panel at its
         # default constructor position.
         self.panel_layout = dict(panel_layout) if panel_layout else {}
+        # {card_id -> count owned} -- see core.data.cards. Additive, same
+        # convention as panel_layout above: starts empty, since no card-
+        # granting mechanic (drop, PNJ trade) exists yet -- CardPanelUI
+        # shows every *known* card (core.data.cards.CardManager.
+        # list_known_card_ids()) regardless of this being empty, so the
+        # panel stays useful before any gain mechanic exists.
+        self.card_collection = dict(card_collection) if card_collection else {}
 
     @property
     def level(self) -> int:
@@ -71,16 +79,23 @@ class ProfileManager:
         return PROFILES_DIRECTORY / f"{_sanitize_name(name)}.json"
 
     def load(self, name: str) -> Profile:
+        """A genuinely fresh profile (no file yet, or one too corrupt to
+        read at all -- both cases construct a brand-new Profile with no
+        recoverable data) starts with STARTING_CARD_COLLECTION. An existing,
+        readable file is never re-seeded here even if its own
+        card_collection is empty (e.g. every starting card has since been
+        spent) -- only payload.get("card_collection") below applies then,
+        same additive-field convention as every other field."""
         safe_name = _sanitize_name(name)
         path = self.get_profile_path(safe_name)
         if not path.exists() or path.stat().st_size == 0:
-            return Profile(safe_name)
+            return Profile(safe_name, card_collection=dict(STARTING_CARD_COLLECTION))
 
         try:
             with path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
         except (OSError, ValueError, json.JSONDecodeError):
-            return Profile(safe_name)
+            return Profile(safe_name, card_collection=dict(STARTING_CARD_COLLECTION))
 
         return Profile(
             safe_name,
@@ -88,6 +103,7 @@ class ProfileManager:
             generator_room_names=payload.get("generator_room_names"),
             generator_room_count=int(payload.get("generator_room_count", 3)),
             panel_layout=payload.get("panel_layout"),
+            card_collection=payload.get("card_collection"),
         )
 
     def save(self, profile: Profile) -> Path:
@@ -102,6 +118,7 @@ class ProfileManager:
                     "generator_room_names": profile.generator_room_names,
                     "generator_room_count": profile.generator_room_count,
                     "panel_layout": profile.panel_layout,
+                    "card_collection": profile.card_collection,
                 },
                 handle, indent=2, ensure_ascii=False,
             )

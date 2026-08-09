@@ -22,11 +22,30 @@ class ServerFullError(Exception):
 
 
 class NetworkClient:
+    # Without an explicit timeout, socket.connect() blocks for however long
+    # the OS's own TCP connect-retry takes on an unreachable (not merely
+    # refused -- a refused connection errors back almost immediately) host,
+    # which can be tens of seconds and freezes the whole game (this runs on
+    # the main thread, from Explorator.start_hosting/join_session). A
+    # connect-refused or connect-timeout both still surface as OSError, so
+    # existing callers' `except OSError` handling needs no changes.
+    CONNECT_TIMEOUT = 5.0
+
     def __init__(self, host, port, name="player"):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((host, port))
-        self._reader_file = self.sock.makefile("rb")
-        self._writer_file = self.sock.makefile("wb")
+        try:
+            self.sock.settimeout(self.CONNECT_TIMEOUT)
+            self.sock.connect((host, port))
+            # Back to blocking mode -- _read_loop's makefile()-based
+            # readline() expects a blocking socket, only the initial
+            # connect() itself needs the bounded timeout above.
+            self.sock.settimeout(None)
+            self._reader_file = self.sock.makefile("rb")
+            self._writer_file = self.sock.makefile("wb")
+        except OSError:
+            self.sock.close()
+            raise
+
         self._incoming = queue.Queue()
         self._running = True
 

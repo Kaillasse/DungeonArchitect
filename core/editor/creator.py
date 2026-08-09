@@ -11,10 +11,11 @@ from core.engine.gamestate import GameState
 from core.engine.room_manager import RoomManager
 from core.engine.camera import Camera
 from core.data.ressources import FLOOR, next_new_donjon_name
+from core.editor.autotile import WALL
 from core.data.profile_manager import ProfileManager
-from core.data.progression import unlocked_objects
+from core.data.cards import CardManager, room_name_from_card_id, room_card_manifest
 from core.world.home import home_room_name, wants_exploration
-from core.editor.ui import GeneratorPanelUI, ObjectPalette, RoomPanelUI, ChestPanelUI, RolePanelUI
+from core.editor.ui import GeneratorPanelUI, RoomPanelUI, ChestPanelUI, RolePanelUI, CardPanelUI, CardRenderer
 from core.editor.tools import ObjectTool
 
 class Creator:
@@ -46,16 +47,28 @@ class Creator:
         self.assembly_active_floor = 0
 
         self.object_type = "spawn" # Type d'objet par défaut
-        self.object_palette = ObjectPalette(unlocked_types=unlocked_objects(self._current_level()))
-        self.object_palette.move(0, 30)
-        self.object_tool = ObjectTool(self.object_palette)
-        self.object_palette.tool = self.object_tool
+        self.object_tool = ObjectTool()
+
+        # Vision produit v0.05 -- the card collection is now also the
+        # object-placement tool (ObjectPalette retired, see CardPanelUI's
+        # own docstring) -- shared CardRenderer so Creator's own drag-follow
+        # sprite (see run()'s render section), CardPanelUI's grid/list
+        # rendering, and GeneratorPanelUI's own room-card grid (rooms as
+        # cards) all read from the exact same composited-card cache instead
+        # of each loading assets/cards/card.png separately. Constructed
+        # before generator_panel below so it can be passed in.
+        self.card_renderer = CardRenderer()
 
         self.generator_panel = GeneratorPanelUI(
             self.room_manager,
             x=10,
-            y=self.object_palette.y + self.object_palette.height + 20,
+            # ToolPaletteUI ("Tuile de base") has a fixed height (unlike the
+            # now-retired ObjectPalette, whose dynamic height this used to
+            # chain off of) -- a static anchor is enough, never needs
+            # re-deriving when the card collection's contents change.
+            y=self.palette.y + self.palette.height + 20,
             on_rename=self._rename_room, on_delete=self._delete_room, can_rename=self._can_rename_room,
+            renderer=self.card_renderer,
         )
         self.chest_panel = ChestPanelUI(
             x=self.screen.get_width() / 2 - 130,
@@ -65,25 +78,30 @@ class Creator:
             x=self.screen.get_width() / 2 - 130,
             y=180,
         )
+        self.card_panel = CardPanelUI(x=460, y=340, renderer=self.card_renderer)
+        # Small preview size for the sprite that follows the mouse while
+        # dragging a card to place it or relocating an already-placed
+        # object -- see run()'s render section.
+        self.DRAG_CARD_HEIGHT = 64
 
-        # Draggable/collapsible title-bar wrappers around the 4 docked
-        # panels (not the modal chest/role popups, which open centered on
-        # demand and auto-close -- dragging them wouldn't make sense).
+        # Draggable/collapsible title-bar wrappers around the docked panels
+        # (not the modal chest/role popups, which open centered on demand
+        # and auto-close -- dragging them wouldn't make sense).
         # panel_frames' order is z-order for rendering/hit-testing (last =
         # topmost) -- a click on any frame brings it to the end of this
         # list, see run()'s event loop.
-        self.tools_frame = PanelFrame(self.palette, "Outils", on_change=self._on_panel_frame_change)
-        self.object_frame = PanelFrame(self.object_palette, "Palette d'objets", on_change=self._on_panel_frame_change)
+        self.tools_frame = PanelFrame(self.palette, "Tuile de base", on_change=self._on_panel_frame_change)
         self.room_frame = PanelFrame(self.room_panel, "Sauvegarder / Charger", on_change=self._on_panel_frame_change)
         self.generator_frame = PanelFrame(self.generator_panel, "Generation procedurale", on_change=self._on_panel_frame_change)
-        self.panel_frames = [self.tools_frame, self.object_frame, self.room_frame, self.generator_frame]
+        self.card_frame = PanelFrame(self.card_panel, "Cartes", on_change=self._on_panel_frame_change)
+        self.panel_frames = [self.tools_frame, self.room_frame, self.generator_frame, self.card_frame]
         # name -> frame, purely for _refresh_panel_layout/_on_panel_frame_change's
         # own round-trip through Profile.panel_layout (see those methods).
         self._panel_frames_by_name = {
             "tools": self.tools_frame,
-            "object_palette": self.object_frame,
             "room": self.room_frame,
             "generator": self.generator_frame,
+            "card": self.card_frame,
         }
 
         # See _refresh_generator_panel/_refresh_panel_layout -- seeded
@@ -95,6 +113,21 @@ class Creator:
 
         self.painting = False
         self.erasing = False
+
+        # Vision produit v0.05 -- Sol/Mur tools connected to the card
+        # collection (core.data.cards "tile_floor"/"tile_wall"). Both True
+        # by default, same as today's implicit always-floor-with-autotile
+        # behavior -- Creator.dungeon.autotile_enabled is derived from these
+        # two (see the ToolPaletteUI toggle handling below), never set
+        # directly anymore. self._active_profile is the local player's
+        # Profile, cached for the whole Creator session and mutated in
+        # place by painting/placing (see _refresh_active_profile,
+        # _paint_at_mouse, _try_place_object) -- reloading it from disk on
+        # every single paint click would be wasteful and would also lose
+        # in-memory decrements made earlier in the same drag stroke.
+        self.floor_tool_active = True
+        self.wall_tool_active = True
+        self._active_profile = None
 
         self.link_source = None
         self.link_drag_pos = None
@@ -245,7 +278,21 @@ class Creator:
         right-click menu as well. Also drops `name` from the current
         profile's generation pool if it was selected there, for the same
         reason a rename updates it -- a deleted room has no business
-        staying in a saved pool."""
+        staying in a saved pool.
+
+        Vision produit v0.05 -- rooms as cards: a room "stores" the tile/
+        object cards spent building it, so deleting one must refund them
+        (room_card_manifest) before the file disappears -- via
+        self._active_profile/_flush_active_profile, not a separately loaded
+        profile, to avoid the exact "stale profile clobbers a concurrent
+        change" class of bug fixed earlier in Explorator._grant_xp."""
+        if self._active_profile is not None:
+            for card_id, count in room_card_manifest(name).items():
+                self._active_profile.card_collection[card_id] = (
+                    self._active_profile.card_collection.get(card_id, 0) + count
+                )
+            self._flush_active_profile()
+
         self.room_manager.delete(name)
         if self.current_room == name:
             self.current_room = None
@@ -257,6 +304,22 @@ class Creator:
 
         self.room_panel.refresh_rooms()
         self.generator_panel.refresh_rooms()
+        self._refresh_card_panel()
+
+    def _toggle_room_in_pool(self, room_name):
+        """Drop target for dragging a room-card onto the Generator (see
+        run()'s MOUSEBUTTONUP handling) -- simple add/retire toggle of pool
+        membership, confirmed with the user over a weighted/duplicate-adding
+        mechanic. Silent no-op if room_name isn't (or is no longer) in the
+        pool browser's own room list."""
+        browser = self.generator_panel.pool_browser
+        if room_name not in browser.rooms:
+            return
+        index = browser.rooms.index(room_name)
+        if index in browser.selected_set:
+            browser.selected_set.discard(index)
+        else:
+            browser.selected_set.add(index)
 
     def _apply_generation(self, request):
         room_names, room_count = request
@@ -305,66 +368,206 @@ class Creator:
 
         return None
 
-    def _paint_at_mouse(self, mouse_pos, erase=False):
+    def _consume_card(self, card_id):
+        """True (and decrements) if the cached local profile has >=1 of
+        card_id in stock; False (nothing changed) if there's no profile or
+        none left -- the single gate every terrain-paint path goes through
+        (see _paint_at_mouse). Object placement (_try_place_object) checks/
+        decrements inline instead, since it needs to peek the stock BEFORE
+        attempting a placement that can itself still fail validation."""
+        if self._active_profile is None:
+            return False
+        if self._active_profile.card_collection.get(card_id, 0) <= 0:
+            return False
+        self._active_profile.card_collection[card_id] -= 1
+        return True
 
+    def _refund_card(self, card_id):
+        """Credits one card back -- erasing terrain/removing an object is
+        the symmetric inverse of _consume_card, and is never blocked
+        (unlike consuming, there's no "can't refund" case). card_id=None
+        (nothing to refund, e.g. erasing an already-EMPTY cell) is a
+        no-op."""
+        if self._active_profile is None or card_id is None:
+            return
+        self._active_profile.card_collection[card_id] = self._active_profile.card_collection.get(card_id, 0) + 1
+
+    def _flush_active_profile(self):
+        """Persists the cached profile's card_collection to disk -- called
+        at the END of a paint/erase stroke (MOUSEBUTTONUP) or right after a
+        successful object placement, never per-cell/per-frame during a
+        drag (which can call _paint_at_mouse dozens of times a second)."""
+        if self._active_profile is not None:
+            ProfileManager().save(self._active_profile)
+
+    def _paint_at_mouse(self, mouse_pos, erase=False):
+        """Thin dispatcher -- see ToolPaletteUI for what Sol/Mur mean.
+
+        Erasing is always a single, raw cell removal, independent of
+        floor_tool_active/wall_tool_active (simplified at the user's
+        request: the eraser used to inherit floor_tool_active-and-
+        wall_tool_active's derived autotile_enabled, so what erase reached
+        -- a lone cell or a whole wall-halo cascade -- depended on
+        whatever happened to be selected for *placing*, two genuinely
+        unrelated concerns that "delete this" shouldn't have to think
+        about). Painting still derives autotile_enabled from the two
+        Sol/Mur flags exactly as before -- only erase changed."""
         grid_x, grid_y = self._mouse_to_grid(mouse_pos)
 
+        if erase:
+            self.dungeon.autotile_enabled = False
+            self._erase_and_refund(grid_x, grid_y)
+            return
+
+        self.dungeon.autotile_enabled = self.floor_tool_active and self.wall_tool_active
+        if self.floor_tool_active and self.wall_tool_active:
+            self._paint_autotile_and_charge(grid_x, grid_y)
+        elif self.floor_tool_active:
+            self._paint_raw_and_charge(grid_x, grid_y, FLOOR, "tile_floor")
+        elif self.wall_tool_active:
+            self._paint_raw_and_charge(grid_x, grid_y, WALL, "tile_wall")
+        # else: neither tool active -- nothing to paint.
+
+    def _refund_pruned_objects(self, objects_before):
+        """Refunds the card of any placed object that vanished from
+        object_manager.objects between objects_before (a snapshot taken
+        before a terrain edit) and now -- prune_invalid() (run at the end
+        of every Dungeon.paint_cell call, pose or erase) drops any object
+        whose placement rule no longer holds, e.g. a vase whose FLOOR cell
+        just got painted over with a WALL. An object's validity can depend
+        on a NEIGHBORING cell too (a doorway's opposite-EMPTY/FLOOR shape,
+        an L/R torch's adjacent wall), so this is a full before/after list
+        diff (by identity) rather than a single-cell lookup -- shared by
+        every terrain-editing method below (pose and erase alike) so a
+        card is never silently lost to a side effect of any kind of
+        editing, not just erasing."""
+        after_ids = {id(obj) for obj in self.dungeon.object_manager.objects}
+        for obj in objects_before:
+            if id(obj) not in after_ids:
+                self._refund_card(obj["type"])
+
+    def _paint_raw_and_charge(self, grid_x, grid_y, cell_type, card_id):
+        """Sol-only or Mur-only: paints cell_type directly, no autotile.
+        A no-op if the cell is already cell_type (avoids re-charging a
+        redundant repaint of an unchanged cell during a drag stroke).
+        Converting the cell FROM the opposite terrain type (FLOOR<->WALL --
+        a cell can only ever hold one) refunds THAT type's own card first:
+        the wall tile visually replaces the floor tile there (or vice
+        versa), so the card that was "covering" that cell is freed the
+        moment a different one takes its place. Also refunds any placed
+        object this conversion prunes (e.g. painting a wall over a vase's
+        floor cell) -- a real bug reported by the user, previously only
+        handled on the erase side (_erase_and_refund)."""
+        previous = self.dungeon.logical_grid[grid_y][grid_x]
+        if previous == cell_type:
+            return
+        if not self._consume_card(card_id):
+            return
+        previous_card = {FLOOR: "tile_floor", WALL: "tile_wall"}.get(previous)
+        if previous_card is not None:
+            self._refund_card(previous_card)
+        objects_before = list(self.dungeon.object_manager.objects)
+        self.dungeon.paint_cell(grid_x, grid_y, erase=False, cell_type=cell_type)
+        self._refund_pruned_objects(objects_before)
+
+    def _paint_autotile_and_charge(self, grid_x, grid_y):
+        """Sol+Mur both active: today's full-autotile placement, but now
+        charging exactly what actually gets placed -- 1 tile_floor for the
+        clicked cell, plus 1 tile_wall for each empty neighbor
+        build_walls_around actually walls. wall_gate is called once per
+        candidate halo cell, live, as build_walls_around iterates them --
+        _consume_card only returns True while stock remains, so running out
+        of tile_wall partway through leaves the rest of the halo empty
+        (a partial fill) instead of overspending or blocking the floor
+        placement itself (confirmed with the user). Same conversion-refund
+        rule as _paint_raw_and_charge if the clicked cell was previously a
+        WALL, and the same pruned-object refund (a vase under the clicked
+        cell, or under a neighbor the halo walls over)."""
+        previous = self.dungeon.logical_grid[grid_y][grid_x]
+        if previous == FLOOR:
+            return
+        if not self._consume_card("tile_floor"):
+            return
+        if previous == WALL:
+            self._refund_card("tile_wall")
+        objects_before = list(self.dungeon.object_manager.objects)
         self.dungeon.paint_cell(
-            grid_x,
-            grid_y,
-            erase=erase,
+            grid_x, grid_y, erase=False,
+            wall_gate=lambda nx, ny: self._consume_card("tile_wall"),
         )
+        self._refund_pruned_objects(objects_before)
+
+    def _erase_and_refund(self, grid_x, grid_y):
+        """Erasing is now always the raw single-cell branch (see
+        _paint_at_mouse -- autotile_enabled is forced False before this is
+        ever called), so the clicked cell is the only terrain cell that
+        can possibly change -- refunds its prior type directly, no
+        before/after grid diff needed for the terrain itself. Object
+        pruning still needs the full diff -- see _refund_pruned_objects."""
+        cell_before = self.dungeon.logical_grid[grid_y][grid_x]
+        objects_before = list(self.dungeon.object_manager.objects)
+
+        self.dungeon.paint_cell(grid_x, grid_y, erase=True)
+
+        self._refund_card({FLOOR: "tile_floor", WALL: "tile_wall"}.get(cell_before))
+        self._refund_pruned_objects(objects_before)
+
+    def _drag_sprite(self, object_type):
+        """The small card image that follows the mouse while dragging a
+        card to place it (from the collection, see the MOUSEBUTTONDOWN
+        handling in run()) or relocating an already-placed object
+        (self.moving_object) -- replaces the old ObjectPalette.
+        get_current_frame(type), now that the card collection is the
+        object-placement tool. Uses the same shared CardRenderer/cache the
+        Cards panel itself renders from."""
+        card = CardManager().load(object_type)
+        return self.card_renderer.get_surface(card, self.DRAG_CARD_HEIGHT)
 
     def _try_place_object(self):
+        """Checks the object type's card stock BEFORE attempting placement
+        (unlike terrain painting, add_object can still fail its own
+        placement-rule validation, so the stock is only ever actually
+        decremented once placement has genuinely succeeded -- never
+        consume-then-refund)."""
+        object_type = self.object_tool.object_type
+        if self._active_profile is None or self._active_profile.card_collection.get(object_type, 0) <= 0:
+            return False
 
-        world = self.camera.screen_to_world(
-            *self.object_tool.position
-        )
+        world = self.camera.screen_to_world(*self.object_tool.position)
+        grid_x, grid_y = self.dungeon.world_to_grid(*world)
 
-        grid_x, grid_y = self.dungeon.world_to_grid(
-            *world
-        )
+        if not self.dungeon.object_manager.add_object(object_type, grid_x, grid_y):
+            return False
 
-        return self.dungeon.object_manager.add_object(
-            self.object_tool.object_type,
-            grid_x,
-            grid_y
-        )
+        self._active_profile.card_collection[object_type] -= 1
+        self._flush_active_profile()
+        # A type that just hit 0 stock must disappear from the collection
+        # panel's grid/list right away, not wait for the next entry into
+        # Creator -- CardPanelUI itself is the single source of truth for
+        # "what's placeable" now (ObjectPalette retired), so refreshing it
+        # is the only bookkeeping needed here.
+        self._refresh_card_panel()
+        return True
 
-    def _current_level(self):
-        """The local player's progression level, driving which object types
-        ObjectPalette offers (see _refresh_object_palette). Falls back to
-        level 1 (the most restrictive) if there's no local identity yet --
-        never "everything unlocked" by default -- which covers the headless
-        smoke test (DUNGEONARCHITECT_HEADLESS, no Menu name-entry ever ran)."""
-        settings = self.game_manager.settings
-        name = settings.local_player_name if settings is not None else None
-        if not name:
-            return 1
-        return ProfileManager().load(name).level
-
-    def _refresh_object_palette(self):
-        """Re-derives the unlocked object set from the current level and
-        rebuilds the palette if it changed -- called once per entry into
-        this state (see run()) rather than every frame, since the level only
-        ever changes while playing Exploration, not while the Creator loop
-        itself is running. Only auto-follows the generator panel under the
-        object palette while the player has never actually dragged it
-        (generator_frame.user_moved) -- once they've placed it themselves,
-        a level-up's palette height change must not silently yank it back
-        out from under their chosen layout."""
-        unlocked = unlocked_objects(self._current_level())
-        if self.object_palette.set_unlocked_types(unlocked) and not self.generator_frame.user_moved:
-            target_y = self.object_palette.y + self.object_palette.height + 20
-            self.generator_panel.move(0, target_y - self.generator_panel.y)
+    def _refresh_active_profile(self):
+        """Loads (or reloads) the local player's Profile once per entry
+        into Creator (see run()) -- _refresh_card_panel/_paint_at_mouse/
+        _try_place_object all read and mutate this same cached instance for
+        the rest of the session instead of each reloading their own copy
+        from disk, which would be wasteful (a paint stroke can call
+        _paint_at_mouse dozens of times a second) and would lose in-memory
+        decrements made earlier in the same stroke."""
+        self._active_profile = self._load_profile()
 
     def _load_profile(self):
         """The local player's Profile, or None if there's no identity yet
         (headless smoke test, or -- Creator itself is constructed before
         Menu's name-entry screen has necessarily run -- the very first
-        frame of a fresh install). Reloaded on demand rather than cached,
-        same as _current_level, since XP/level can change during
-        Exploration between visits to Creator."""
+        frame of a fresh install). A fresh disk read every call -- callers
+        that need a stable, mutate-in-place instance across a whole Creator
+        session (card consumption/refund) go through
+        self._active_profile/_refresh_active_profile instead of calling
+        this directly."""
         settings = self.game_manager.settings
         name = settings.local_player_name if settings is not None else None
         if not name:
@@ -385,6 +588,18 @@ class Creator:
         self.generator_panel.apply_profile(profile)
         self._generator_panel_seeded = True
 
+    def _refresh_card_panel(self):
+        """Reloads the Card panel's list/owned-counts from the cached
+        local profile (self._active_profile, see _refresh_active_profile)
+        -- called once per entry into Creator, and again after any card-
+        consuming action (_try_place_object) so the panel's counts stay
+        live instead of waiting for the next entry. A no-op with no local
+        identity yet (headless smoke test, or the very first frame before
+        Menu's name-entry has run) -- the panel just stays on whatever it
+        last showed, empty at the very start."""
+        if self._active_profile is not None:
+            self.card_panel.refresh(self._active_profile)
+
     def _refresh_panel_layout(self):
         """Restores each PanelFrame's saved position/collapsed state from
         the local profile's Profile.panel_layout, exactly once (same lazy,
@@ -394,8 +609,9 @@ class Creator:
         __init__). A missing/empty entry (a fresh profile, or a frame added
         after the profile was last saved) leaves that panel at whatever its
         constructor already placed it at. user_moved is set True for every
-        restored frame so _refresh_object_palette's auto-follow (see above)
-        never fights a layout the player explicitly saved."""
+        restored frame (a leftover-but-still-correct precaution from when
+        the generator panel used to auto-follow the now-retired
+        ObjectPalette's dynamic height -- harmless to keep setting)."""
         if self._panel_layout_seeded:
             return
         profile = self._load_profile()
@@ -433,13 +649,12 @@ class Creator:
 
         pygame.display.set_caption("DungeonArchitect - Dungeon Editor")
 
-        # Layout restore must happen before _refresh_object_palette -- it
-        # sets generator_frame.user_moved, which _refresh_object_palette's
-        # auto-follow-under-the-palette logic checks to avoid immediately
-        # overwriting a just-restored position.
+        # _refresh_active_profile must happen before _refresh_card_panel,
+        # which reads self._active_profile instead of loading its own copy.
         self._refresh_panel_layout()
-        self._refresh_object_palette()
+        self._refresh_active_profile()
         self._refresh_generator_panel()
+        self._refresh_card_panel()
 
         clock = pygame.time.Clock()
 
@@ -501,24 +716,12 @@ class Creator:
 
                 self.object_tool.handle_event(event)
 
-                if event.type == pygame.MOUSEBUTTONDOWN and not self.object_frame.collapsed:
-
-                    selected = self.object_palette.handle_click(event.pos)
-
-                    if selected is not None:
-
-                        self.object_tool.start_drag(
-                            selected,
-                            event.pos
-                        )
-
-                        continue
-
                 if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP):
 
                     panel_click = event.type == pygame.MOUSEBUTTONDOWN and (
                         self.room_frame.contains(event.pos)
                         or self.generator_frame.contains(event.pos)
+                        or self.card_frame.contains(event.pos)
                     )
 
                     if not self.room_frame.collapsed:
@@ -532,6 +735,16 @@ class Creator:
 
                         if generation_request is not None:
                             self._apply_generation(generation_request)
+
+                    if not self.card_frame.collapsed:
+                        # The card collection is now also the object-
+                        # placement tool (ObjectPalette retired) -- a
+                        # non-None return means this event just grabbed a
+                        # placeable, owned card to start dragging it, from
+                        # either display mode (see CardPanelUI.handle_event).
+                        drag_card_id = self.card_panel.handle_event(event)
+                        if drag_card_id is not None:
+                            self.object_tool.start_drag(drag_card_id, event.pos)
 
                     if panel_click:
                         continue
@@ -564,8 +777,12 @@ class Creator:
 
                     if event.button == 1:
 
-                        if not self.tools_frame.collapsed and self.palette.hit_autotile_toggle(event.pos):
-                            self.dungeon.autotile_enabled = not self.dungeon.autotile_enabled
+                        if not self.tools_frame.collapsed and self.palette.hit_floor_toggle(event.pos):
+                            self.floor_tool_active = not self.floor_tool_active
+                            continue
+
+                        if not self.tools_frame.collapsed and self.palette.hit_wall_toggle(event.pos):
+                            self.wall_tool_active = not self.wall_tool_active
                             continue
 
                         if not self.tools_frame.collapsed and self.palette.handle_click(event.pos):
@@ -627,6 +844,14 @@ class Creator:
                     if event.button == 1:
 
                         self.painting = False
+                        # Persists whatever this stroke consumed -- see
+                        # _flush_active_profile's own docstring for why this
+                        # only happens here, not per-cell during the drag.
+                        # _try_place_object also flushes internally on a
+                        # successful placement -- a second, cheap no-op-ish
+                        # save here for that case is harmless.
+                        self._flush_active_profile()
+                        self._refresh_card_panel()
 
                         if self.link_source is not None:
 
@@ -648,13 +873,30 @@ class Creator:
 
                         elif self.object_tool.dragging:
 
-                            self._try_place_object()
+                            room_name = room_name_from_card_id(self.object_tool.object_type)
+                            if room_name is not None:
+                                # A room-card is never placeable in the world
+                                # grid (_try_place_object assumes
+                                # OBJECT_LIST/add_object semantics) -- the
+                                # only meaningful drop target is the
+                                # Generator, which toggles pool membership.
+                                # Dropping anywhere else just cancels, same
+                                # as any other drag that misses its target.
+                                if self.generator_frame.contains(event.pos):
+                                    self._toggle_room_in_pool(room_name)
+                            else:
+                                self._try_place_object()
 
                             self.object_tool.dragging = False
 
                     elif event.button == 3:
 
                         self.erasing = False
+                        # Erasing can refund an object's card back above 0
+                        # stock (see _paint_at_mouse's erase branch), so the
+                        # collection panel needs a chance to show it again.
+                        self._flush_active_profile()
+                        self._refresh_card_panel()
 
                     elif event.button == 2:
 
@@ -718,10 +960,6 @@ class Creator:
             # Render
             # -------------------------------------------------
             dt = clock.tick(60) / 1000
-            self.object_palette.update(
-                dt,
-                pygame.mouse.get_pos()
-            )
             if self.object_tool.dragging:
 
                 grid_x, grid_y = self._mouse_to_grid(
@@ -798,9 +1036,7 @@ class Creator:
 
                 if self.moving_object is not None and self.move_drag_pos is not None:
 
-                    sprite = self.object_palette.get_current_frame(
-                        self.moving_object["type"]
-                    )
+                    sprite = self._drag_sprite(self.moving_object["type"])
 
                     rect = sprite.get_rect(
                         center=self.move_drag_pos
@@ -810,9 +1046,7 @@ class Creator:
 
                 if self.object_tool.dragging:
 
-                    sprite = self.object_palette.get_current_frame(
-                        self.object_tool.object_type
-                    )
+                    sprite = self._drag_sprite(self.object_tool.object_type)
 
                     rect = sprite.get_rect(
                         center=self.object_tool.position
@@ -825,7 +1059,14 @@ class Creator:
             # top of another actually draws on top of it.
             for frame in self.panel_frames:
                 if frame is self.tools_frame:
-                    frame.render(self.screen, autotile_enabled=self.dungeon.autotile_enabled)
+                    stock = self._active_profile.card_collection if self._active_profile is not None else {}
+                    frame.render(
+                        self.screen,
+                        floor_active=self.floor_tool_active,
+                        wall_active=self.wall_tool_active,
+                        floor_stock=stock.get("tile_floor", 0),
+                        wall_stock=stock.get("tile_wall", 0),
+                    )
                 else:
                     frame.render(self.screen)
             self.chest_panel.render(self.screen)

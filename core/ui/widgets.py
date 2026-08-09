@@ -231,7 +231,7 @@ class Stepper:
 
 
 class PanelFrame:
-    """Wraps one of Creator's docked panels (ToolPaletteUI, ObjectPalette,
+    """Wraps one of Creator's docked panels (ToolPaletteUI, CardPanelUI,
     RoomPanelUI, GeneratorPanelUI -- anything exposing x/y/width/
     render(screen)/contains(pos) plus a move(dx, dy) it implements itself,
     since each one caches its own child rects differently) with a
@@ -638,6 +638,20 @@ class RoomBrowser:
             self.width - self.SLIDER_WIDTH - 4,
             self.ROW_HEIGHT,
         )
+
+    def row_at(self, pos):
+        """The real index into self.rooms (i.e. self.scroll + visible slot)
+        that pos falls on, or None if pos misses every currently visible
+        row. Public, pure query -- unlike _row_rect (indexed by on-screen
+        slot, not by an actual room/entry), this is what a caller needs to
+        go from "the mouse is here" to "which entry is that" without
+        knowing this class's row-geometry/scroll internals (see
+        core.editor.ui.CardPanelUI's standard-mode drag-start, the first
+        caller)."""
+        for slot_index in range(self._visible_count()):
+            if self._row_rect(slot_index).collidepoint(pos):
+                return self.scroll + slot_index
+        return None
 
     def _slider_track_rect(self):
         return pygame.Rect(self.x + self.width - self.SLIDER_WIDTH, self.y, self.SLIDER_WIDTH, self.height)

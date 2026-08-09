@@ -48,11 +48,13 @@ class Dungeon:
         # without needing to be told explicitly by every caller.
         self.terrain_version = 0
 
-        # Only ever toggled in Creator (see core.editor.ui.ToolPaletteUI) --
-        # Explorator never paints, so this is moot on its own dungeons. When
-        # False, painting/erasing touch only the clicked cell, no automatic
-        # wall halo -- a prerequisite for a destructible world, where a wall
-        # broken at runtime must never get "healed" by a later rebuild.
+        # Only ever toggled in Creator (see core.editor.ui.ToolPaletteUI --
+        # derived there as floor_tool_active and wall_tool_active, True only
+        # when both the Sol and Mur buttons are active) -- Explorator never
+        # paints, so this is moot on its own dungeons. When False, painting/
+        # erasing touch only the clicked cell, no automatic wall halo -- a
+        # prerequisite for a destructible world, where a wall broken at
+        # runtime must never get "healed" by a later rebuild.
         self.autotile_enabled = True
 
         self.object_manager = ObjectManager(self)
@@ -74,13 +76,25 @@ class Dungeon:
         being re-derived from its floor cells every time a room opens."""
         self.sprite_grid = resolve_sprite_grid(self.logical_grid)
 
-    def paint_cell(self, grid_x: int, grid_y: int, erase: bool = False) -> None:
+    def paint_cell(self, grid_x: int, grid_y: int, erase: bool = False, cell_type: int = FLOOR, wall_gate=None) -> None:
         """Autotile (when enabled) is purely incremental -- only the clicked
         cell's own immediate neighborhood is ever touched (build_walls_around/
         unbuild_walls_around), never a full-grid rescan. That full rescan
         (the old build_walls()) is exactly what made re-enabling autotile
         after painting a lot of floor with it off wall everything at once on
-        the very next click, instead of just that one cell."""
+        the very next click, instead of just that one cell.
+
+        cell_type only ever matters in the non-autotile paint branch --
+        autotile ON always paints FLOOR (a WALL only ever appears there as
+        build_walls_around's own side effect). It's what lets Creator's
+        Sol/Mur tools (core.editor.ui.ToolPaletteUI) paint a raw WALL cell
+        directly when only "Mur" is active, something no caller could do
+        before this parameter existed.
+
+        wall_gate is forwarded as-is to build_walls_around's own `gate`
+        (autotile ON only) -- lets a caller meter/limit each individual
+        halo cell (e.g. Creator gating on card stock for a partial fill)
+        without this method or build_walls_around needing to know why."""
         if not (0 <= grid_x < self.width and 0 <= grid_y < self.height):
             return
 
@@ -95,9 +109,11 @@ class Dungeon:
             else:
                 self.logical_grid[grid_y][grid_x] = EMPTY
         else:
-            self.logical_grid[grid_y][grid_x] = FLOOR
             if self.autotile_enabled:
-                build_walls_around(self.logical_grid, grid_x, grid_y)
+                self.logical_grid[grid_y][grid_x] = FLOOR
+                build_walls_around(self.logical_grid, grid_x, grid_y, gate=wall_gate)
+            else:
+                self.logical_grid[grid_y][grid_x] = cell_type
 
         self.sprite_grid = resolve_sprite_grid(self.logical_grid)
         self.object_manager.prune_invalid()

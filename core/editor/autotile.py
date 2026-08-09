@@ -108,9 +108,17 @@ def build_walls(logical_grid: List[List[int]]) -> None:
 # sans mur pendant que l'autotile était désactivé puis qu'on le réactive).
 # --------------------------------------------------------------------
 
-def build_walls_around(logical_grid: List[List[int]], x: int, y: int) -> None:
+def build_walls_around(logical_grid: List[List[int]], x: int, y: int, gate=None) -> None:
     """Mure les voisins EMPTY (8 directions) de la case (x, y) qui vient
-    d'être peinte en FLOOR. Ne touche à aucune autre case de la grille."""
+    d'être peinte en FLOOR. Ne touche à aucune autre case de la grille.
+
+    gate: callable optionnel (nx, ny) -> bool, consulté juste avant de murer
+    chaque voisin candidat -- False laisse cette case telle quelle (vide) au
+    lieu de la murer, True/gate=None (comportement d'origine, inchangé) la
+    mure normalement. Ce module reste volontairement ignorant de tout ce
+    qui motive un refus (ex: core.editor.creator.Creator branche ici une
+    verification de stock de cartes) -- gate est un simple predicat
+    generique, pas une notion propre a autotile.py."""
 
     h = len(logical_grid)
     if h == 0:
@@ -127,7 +135,8 @@ def build_walls_around(logical_grid: List[List[int]], x: int, y: int) -> None:
             ny = y + dy
 
             if 0 <= nx < w and 0 <= ny < h and logical_grid[ny][nx] == EMPTY:
-                logical_grid[ny][nx] = WALL
+                if gate is None or gate(nx, ny):
+                    logical_grid[ny][nx] = WALL
 
 
 def unbuild_walls_around(logical_grid: List[List[int]], x: int, y: int) -> None:

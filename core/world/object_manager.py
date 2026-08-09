@@ -3,6 +3,7 @@ from pathlib import Path
 import pygame
 
 from core.editor.autotile import EMPTY, FLOOR, WALL
+from core.data.ressources import DEFAULT_ANIM_SPEED
 from core.data.sound_manager import SoundManager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -463,14 +464,17 @@ def load_enemy_frames(enemy_type):
 class ObjectManager:
     """Owns the placed-object list and the rules for placing them. The grid/size data it needs belongs to the Dungeon it's attached to."""
 
-    ANIM_SPEED = 0.12  # seconds per frame, matches the editor palette's hover animation
+    ANIM_SPEED = DEFAULT_ANIM_SPEED  # seconds per frame -- see ressources.DEFAULT_ANIM_SPEED's own docstring
 
     def __init__(self, dungeon):
         self.dungeon = dungeon
         self.objects = []
 
+    def _in_bounds(self, grid_x, grid_y):
+        return 0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height
+
     def add_object(self, object_type, grid_x, grid_y):
-        if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
+        if not self._in_bounds(grid_x, grid_y):
             return False
 
         valid, variant = self._resolve_placement(object_type, grid_x, grid_y)
@@ -563,7 +567,7 @@ class ObjectManager:
         return obj["type"] == "torch" and obj.get("variant") in ("L", "R")
 
     def is_cell_walkable(self, grid_x, grid_y):
-        if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
+        if not self._in_bounds(grid_x, grid_y):
             return False
 
         obj = self.get_object_at(grid_x, grid_y)
@@ -641,7 +645,7 @@ class ObjectManager:
 
     def move_object(self, obj, grid_x, grid_y):
         """Reposition an already-placed object. Returns True if the new cell was valid."""
-        if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
+        if not self._in_bounds(grid_x, grid_y):
             return False
 
         valid, variant = self._resolve_placement(obj["type"], grid_x, grid_y)
@@ -702,10 +706,7 @@ class ObjectManager:
             return True, "flip"
 
         for nx, ny in ((grid_x + 1, grid_y), (grid_x, grid_y - 1), (grid_x, grid_y + 1)):
-            if (
-                0 <= nx < self.dungeon.width and 0 <= ny < self.dungeon.height
-                and self.dungeon.logical_grid[ny][nx] == FLOOR
-            ):
+            if self._in_bounds(nx, ny) and self.dungeon.logical_grid[ny][nx] == FLOOR:
                 return True, None
 
         return False, None
@@ -721,7 +722,7 @@ class ObjectManager:
         return None
 
     def _cell_or_empty(self, grid_x, grid_y):
-        if 0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height:
+        if self._in_bounds(grid_x, grid_y):
             return self.dungeon.logical_grid[grid_y][grid_x]
         return EMPTY
 
@@ -741,7 +742,7 @@ class ObjectManager:
         gating a side room) is simply never picked as a room-to-room
         connection -- it still works as an ordinary in-room obstacle.
         """
-        if not (0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height):
+        if not self._in_bounds(grid_x, grid_y):
             return False
         if self.dungeon.logical_grid[grid_y][grid_x] != WALL:
             return False

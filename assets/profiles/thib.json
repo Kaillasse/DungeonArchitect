@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "thib",
-  "xp": 525,
+  "xp": 1150,
   "generator_room_names": [
     "room_001",
     "room_002",
@@ -30,6 +30,16 @@
       "x": 20,
       "y": 205,
       "collapsed": false
+    },
+    "card": {
+      "x": 846,
+      "y": 316,
+      "collapsed": false
     }
+  },
+  "card_collection": {
+    "tile_floor": 21,
+    "tile_wall": 2,
+    "vase": 1
   }
 }

@@ -12,6 +12,17 @@ from core.editor.autotile import FLOOR
 
 TILE_SIZE = 16
 WORLD_SCALE = 2  # world grid cells render source art at 2x (16px art -> 32px cells)
+
+# Shared default frame-advance speed (seconds/frame) for small looping UI/
+# object animations -- ObjectManager's activated/open object animation
+# (button/gate/wall), ObjectPalette's hovered-icon animation, and ObjectTool's
+# dragged-icon animation all use this same default. They're conceptually
+# independent systems that simply happened to hardcode the identical literal
+# three times each; this constant exists so that coincidence doesn't quietly
+# rot into drift (one call site retuned without the others) -- not because
+# they're required to move in lockstep. A caller that genuinely needs a
+# different speed should just use its own local value instead of this one.
+DEFAULT_ANIM_SPEED = 0.12
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TILESET_PATH = PROJECT_ROOT / "assets" / "tiles" / "tileset.png"
 DEFAULT_TILE_METADATA_PATH = PROJECT_ROOT / "assets" / "tiles" / "tile_categories.json"

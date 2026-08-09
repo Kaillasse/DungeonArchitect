@@ -42,8 +42,14 @@ class WorldRenderer:
             self._object_sprites[cache_key] = load_object_frames(object_type, variant)
         return self._object_sprites[cache_key]
 
-    def _get_scaled_tile(self, tile_index, zoom, tile_px, columns):
-        cache_key = (tile_index, zoom)
+    def _get_scaled_tile(self, tile_index, tile_px, columns):
+        # Keyed on tile_px (already the rounded pixel size that fully
+        # determines the scaled output), not the raw zoom float -- Camera.
+        # zoom_at's *1.2/0.8 steps rarely land on the exact same float twice,
+        # so keying on zoom made this cache grow unboundedly across a
+        # zoom-in/zoom-out session instead of being reused. tile_px collapses
+        # every zoom that rounds to the same pixel size onto one entry.
+        cache_key = (tile_index, tile_px)
         if cache_key not in self._tile_cache:
             tile_surface = get_tile_surface(self.tileset, tile_index, tile_size=TILE_SIZE, columns=columns)
             self._tile_cache[cache_key] = pygame.transform.scale(tile_surface, (tile_px, tile_px))
@@ -87,7 +93,7 @@ class WorldRenderer:
                 elif (x, y) in spawn_cells:
                     tile_index = self.SPAWN_FLOOR_SPRITE
 
-                scaled = self._get_scaled_tile(tile_index, zoom, tile_px, columns)
+                scaled = self._get_scaled_tile(tile_index, tile_px, columns)
                 screen.blit(scaled, (origin_x + x * tile_px, origin_y + y * tile_px))
 
         self._draw_objects(
@@ -110,7 +116,7 @@ class WorldRenderer:
                         continue
                     south_y = y + 1
                     if south_y >= dungeon.height or dungeon.logical_grid[south_y][x] == EMPTY:
-                        scaled = self._get_scaled_tile(self.BORDER_TILE_INDEX, zoom, tile_px, columns)
+                        scaled = self._get_scaled_tile(self.BORDER_TILE_INDEX, tile_px, columns)
                         screen.blit(scaled, (origin_x + x * tile_px, origin_y + south_y * tile_px))
 
             for gy in range(dungeon.height + 1):
@@ -142,20 +148,24 @@ class WorldRenderer:
             self._draw_link_indicators(screen, dungeon, camera)
 
     @staticmethod
-    def _doorway_cells(dungeon):
-        """Every cell covered by a gate/wall entry-exit's footprint. A gate/wall
-        can only ever be placed on a WALL cell that already reads as a clean
-        doorway (ObjectManager.is_valid_doorway), so its mere presence is
-        enough -- no need to re-validate the shape here. Drawing FLOOR under
-        it instead of the underlying WALL sprite is purely cosmetic (the
-        logical_grid cell stays WALL, so autotiling/doorway-validity/the
-        procedural assembler are untouched) -- it just stops the player from
-        feeling like they're walking into solid wall texture when the
-        gate/wall itself is open (or even closed, since the door sprite is
-        what visually reads as blocking, not a wall texture peeking through)."""
+    def _footprint_cells(dungeon, predicate):
+        """Every cell covered by the footprint of each placed object matching
+        `predicate(obj)` -- shared by _doorway_cells (gate/wall/cave_entrance/
+        big_entrance) and _spawn_cells ("spawn"), both used the same way:
+        override this cell's tile index before blitting instead of whatever
+        the autotiler resolved there. A gate/wall can only ever be placed on
+        a WALL cell that already reads as a clean doorway
+        (ObjectManager.is_valid_doorway), so its mere presence is enough --
+        no need to re-validate the shape here. Drawing FLOOR under it instead
+        of the underlying WALL sprite is purely cosmetic (the logical_grid
+        cell stays WALL, so autotiling/doorway-validity/the procedural
+        assembler are untouched) -- it just stops the player from feeling
+        like they're walking into solid wall texture when the gate/wall
+        itself is open (or even closed, since the door sprite is what
+        visually reads as blocking, not a wall texture peeking through)."""
         cells = set()
         for obj in dungeon.object_manager.objects:
-            if OBJECT_TYPES[obj["type"]]["placement"] != "doorway":
+            if not predicate(obj):
                 continue
             size_x, size_y = OBJECT_TYPES[obj["type"]]["size"]
             for dx in range(size_x):
@@ -163,21 +173,13 @@ class WorldRenderer:
                     cells.add((obj["x"] + dx, obj["y"] + dy))
         return cells
 
-    @staticmethod
-    def _spawn_cells(dungeon):
-        """Every cell covered by a placed "spawn" object's footprint --
-        mirrors _doorway_cells' shape, used the same way (override this
-        cell's tile index before blitting instead of whatever the autotiler
-        resolved there)."""
-        cells = set()
-        for obj in dungeon.object_manager.objects:
-            if obj["type"] != "spawn":
-                continue
-            size_x, size_y = OBJECT_TYPES[obj["type"]]["size"]
-            for dx in range(size_x):
-                for dy in range(size_y):
-                    cells.add((obj["x"] + dx, obj["y"] + dy))
-        return cells
+    @classmethod
+    def _doorway_cells(cls, dungeon):
+        return cls._footprint_cells(dungeon, lambda obj: OBJECT_TYPES[obj["type"]]["placement"] == "doorway")
+
+    @classmethod
+    def _spawn_cells(cls, dungeon):
+        return cls._footprint_cells(dungeon, lambda obj: obj["type"] == "spawn")
 
     def render_foreground_objects(self, screen, dungeon, camera, hide_object_types=None):
         """Objects ObjectManager.is_foreground_object() flags (e.g. an L/R torch), plus every pillar's decorative top -- call this after drawing the player sprite."""
@@ -201,7 +203,6 @@ class WorldRenderer:
 
     def _draw_objects(self, screen, dungeon, camera, hide_object_types=None, foreground_only=False, skip_foreground=False):
         hide_object_types = hide_object_types or ()
-        zoom = camera.zoom
         tile_px, origin_x, origin_y = self._tile_grid_origin(dungeon, camera)
 
         for obj in dungeon.object_manager.objects:
@@ -220,7 +221,7 @@ class WorldRenderer:
             frame_index = min(obj.get("frame", 0), len(frames) - 1)
 
             size_cells_x, size_cells_y = OBJECT_TYPES[obj["type"]]["size"]
-            cache_key = (obj["type"], obj.get("variant"), frame_index, zoom)
+            cache_key = (obj["type"], obj.get("variant"), frame_index, tile_px)
             scaled_sprite = self._object_sprite_cache.get(cache_key)
             if scaled_sprite is None:
                 size = (size_cells_x * tile_px, size_cells_y * tile_px)
@@ -261,10 +262,9 @@ class WorldRenderer:
         if not pillars:
             return
 
-        zoom = camera.zoom
         tile_px, origin_x, origin_y = self._tile_grid_origin(dungeon, camera)
 
-        cache_key = ("pillar", "top", 0, zoom)
+        cache_key = ("pillar", "top", 0, tile_px)
         sprite = self._object_sprite_cache.get(cache_key)
         if sprite is None:
             frames = self._get_object_frames("pillar", "top")
