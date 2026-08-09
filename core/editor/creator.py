@@ -6,6 +6,7 @@ import pygame
 from core.world.dungeon import DEFAULT_GRID_SAVE_PATH, Dungeon
 from core.world.assembly import generate_assembly, load_assembly, save_assembly
 from core.editor.ui import ToolPaletteUI
+from core.ui.widgets import PanelFrame
 from core.engine.gamestate import GameState
 from core.engine.room_manager import RoomManager
 from core.engine.camera import Camera
@@ -31,12 +32,22 @@ class Creator:
         self.current_room = "room_001"
         self.dungeon.load_from_json(self.current_room)
         self.palette = ToolPaletteUI()
-        self.room_panel = RoomPanelUI(self.room_manager)
+        # Every docked panel's own default y leaves no room for a PanelFrame
+        # title bar (drawn just ABOVE panel.y, see PanelFrame.title_rect) --
+        # nudged down here once, at construction, rather than baking the
+        # offset into each panel's own class default (which Explorator/other
+        # non-Creator callers of these same widgets don't need).
+        self.palette.move(0, 30)
+        self.room_panel = RoomPanelUI(
+            self.room_manager, y=40,
+            on_rename=self._rename_room, on_delete=self._delete_room, can_rename=self._can_rename_room,
+        )
         self.last_assembly = None
         self.assembly_active_floor = 0
 
         self.object_type = "spawn" # Type d'objet par défaut
         self.object_palette = ObjectPalette(unlocked_types=unlocked_objects(self._current_level()))
+        self.object_palette.move(0, 30)
         self.object_tool = ObjectTool(self.object_palette)
         self.object_palette.tool = self.object_tool
 
@@ -44,6 +55,7 @@ class Creator:
             self.room_manager,
             x=10,
             y=self.object_palette.y + self.object_palette.height + 20,
+            on_rename=self._rename_room, on_delete=self._delete_room, can_rename=self._can_rename_room,
         )
         self.chest_panel = ChestPanelUI(
             x=self.screen.get_width() / 2 - 130,
@@ -53,11 +65,33 @@ class Creator:
             x=self.screen.get_width() / 2 - 130,
             y=180,
         )
-        # See _refresh_generator_panel -- seeded lazily from the local
-        # profile once a player identity actually exists, not here
-        # (Creator is constructed before Menu's name-entry screen has
-        # necessarily run).
+
+        # Draggable/collapsible title-bar wrappers around the 4 docked
+        # panels (not the modal chest/role popups, which open centered on
+        # demand and auto-close -- dragging them wouldn't make sense).
+        # panel_frames' order is z-order for rendering/hit-testing (last =
+        # topmost) -- a click on any frame brings it to the end of this
+        # list, see run()'s event loop.
+        self.tools_frame = PanelFrame(self.palette, "Outils", on_change=self._on_panel_frame_change)
+        self.object_frame = PanelFrame(self.object_palette, "Palette d'objets", on_change=self._on_panel_frame_change)
+        self.room_frame = PanelFrame(self.room_panel, "Sauvegarder / Charger", on_change=self._on_panel_frame_change)
+        self.generator_frame = PanelFrame(self.generator_panel, "Generation procedurale", on_change=self._on_panel_frame_change)
+        self.panel_frames = [self.tools_frame, self.object_frame, self.room_frame, self.generator_frame]
+        # name -> frame, purely for _refresh_panel_layout/_on_panel_frame_change's
+        # own round-trip through Profile.panel_layout (see those methods).
+        self._panel_frames_by_name = {
+            "tools": self.tools_frame,
+            "object_palette": self.object_frame,
+            "room": self.room_frame,
+            "generator": self.generator_frame,
+        }
+
+        # See _refresh_generator_panel/_refresh_panel_layout -- seeded
+        # lazily from the local profile once a player identity actually
+        # exists, not here (Creator is constructed before Menu's name-entry
+        # screen has necessarily run).
         self._generator_panel_seeded = False
+        self._panel_layout_seeded = False
 
         self.painting = False
         self.erasing = False
@@ -144,10 +178,84 @@ class Creator:
                 self.open_room(name)
 
         elif mode == "delete":
-            self.room_manager.delete(selection)
-            if self.current_room == selection:
-                self.current_room = None
+            self._delete_room(selection)
 
+        self.generator_panel.refresh_rooms()
+
+    def _can_rename_room(self, name):
+        """RoomBrowser's can_rename predicate (see RoomPanelUI/
+        GeneratorPanelUI wiring in __init__) -- False for a name matching
+        home_room_name(...) for the local player, so "Renommer" simply
+        never appears in that row's right-click menu. home_room_name() is
+        always recomputed from the player's own name, never stored --
+        renaming the file out from under it would silently orphan the
+        player's home (the next home_room_name() check would find nothing
+        there and ensure_home_room would recreate a brand-new blank one)."""
+        settings = self.game_manager.settings
+        if settings is None or not settings.local_player_name:
+            return True
+        return name != home_room_name(settings.local_player_name)
+
+    def _rename_room(self, old_name, new_name):
+        """RoomBrowser's on_rename callback, wired into both RoomPanelUI's
+        and GeneratorPanelUI's room lists (see __init__) -- a single
+        implementation reachable from either. _can_rename_room already
+        keeps a home_<player> room from ever reaching here through the
+        normal right-click flow; re-checked here too as cheap defense in
+        depth."""
+        if not self._can_rename_room(old_name):
+            return
+
+        actual_new_name = self.room_manager.rename(old_name, new_name)
+        if actual_new_name is None:
+            return  # refused (bad/colliding name) -- RoomManager already validated, silent no-op
+
+        if self.current_room == old_name:
+            self.current_room = actual_new_name
+
+        profile = self._load_profile()
+        if profile is not None and old_name in profile.generator_room_names:
+            profile.generator_room_names = [
+                actual_new_name if name == old_name else name
+                for name in profile.generator_room_names
+            ]
+            ProfileManager().save(profile)
+
+        # Preserve the generation pool's checkbox through the rename --
+        # GeneratorPanelUI.refresh_rooms() below re-derives selection from
+        # name equality against whatever was selected *before* the
+        # refresh, which still says the OLD name at that point; without
+        # this, a room checked in the pool would silently uncheck itself
+        # the moment it's renamed.
+        was_selected = old_name in self.generator_panel.pool_browser.selected_names
+
+        self.room_panel.refresh_rooms()
+        self.generator_panel.refresh_rooms()
+
+        if was_selected:
+            for index, name in enumerate(self.generator_panel.pool_browser.rooms):
+                if name == actual_new_name:
+                    self.generator_panel.pool_browser.selected_set.add(index)
+                    break
+
+    def _delete_room(self, name):
+        """RoomBrowser's on_delete callback -- same mechanics as
+        RoomPanelUI's own "Supprimer" button flow (_apply_room_action now
+        just calls this too, see above), reachable from either room list's
+        right-click menu as well. Also drops `name` from the current
+        profile's generation pool if it was selected there, for the same
+        reason a rename updates it -- a deleted room has no business
+        staying in a saved pool."""
+        self.room_manager.delete(name)
+        if self.current_room == name:
+            self.current_room = None
+
+        profile = self._load_profile()
+        if profile is not None and name in profile.generator_room_names:
+            profile.generator_room_names = [n for n in profile.generator_room_names if n != name]
+            ProfileManager().save(profile)
+
+        self.room_panel.refresh_rooms()
         self.generator_panel.refresh_rooms()
 
     def _apply_generation(self, request):
@@ -240,10 +348,15 @@ class Creator:
         rebuilds the palette if it changed -- called once per entry into
         this state (see run()) rather than every frame, since the level only
         ever changes while playing Exploration, not while the Creator loop
-        itself is running."""
+        itself is running. Only auto-follows the generator panel under the
+        object palette while the player has never actually dragged it
+        (generator_frame.user_moved) -- once they've placed it themselves,
+        a level-up's palette height change must not silently yank it back
+        out from under their chosen layout."""
         unlocked = unlocked_objects(self._current_level())
-        if self.object_palette.set_unlocked_types(unlocked):
-            self.generator_panel.set_y(self.object_palette.y + self.object_palette.height + 20)
+        if self.object_palette.set_unlocked_types(unlocked) and not self.generator_frame.user_moved:
+            target_y = self.object_palette.y + self.object_palette.height + 20
+            self.generator_panel.move(0, target_y - self.generator_panel.y)
 
     def _load_profile(self):
         """The local player's Profile, or None if there's no identity yet
@@ -272,10 +385,59 @@ class Creator:
         self.generator_panel.apply_profile(profile)
         self._generator_panel_seeded = True
 
+    def _refresh_panel_layout(self):
+        """Restores each PanelFrame's saved position/collapsed state from
+        the local profile's Profile.panel_layout, exactly once (same lazy,
+        seeded-only-when-a-real-identity-exists shape as
+        _refresh_generator_panel -- Creator is constructed before Menu's
+        name-entry screen has necessarily run, so this can't happen in
+        __init__). A missing/empty entry (a fresh profile, or a frame added
+        after the profile was last saved) leaves that panel at whatever its
+        constructor already placed it at. user_moved is set True for every
+        restored frame so _refresh_object_palette's auto-follow (see above)
+        never fights a layout the player explicitly saved."""
+        if self._panel_layout_seeded:
+            return
+        profile = self._load_profile()
+        if profile is None:
+            return
+        for name, frame in self._panel_frames_by_name.items():
+            saved = profile.panel_layout.get(name)
+            if saved is None:
+                continue
+            frame.move_to(saved["x"], saved["y"])
+            frame.collapsed = saved.get("collapsed", False)
+            frame.user_moved = True
+        self._panel_layout_seeded = True
+
+    def _on_panel_frame_change(self, _frame):
+        """PanelFrame's on_change callback (a drag ended, or the collapse
+        toggle was clicked) -- saves every frame's current position/
+        collapsed state to the local profile right away, same
+        save-immediately-after-the-action principle as
+        _apply_generation saving generator_room_names/count. `_frame`
+        itself is unused (every frame is re-saved together, simplest
+        correct thing for 4 small dicts) -- named with a leading
+        underscore to say so without the linter flagging an unused
+        parameter as a real one."""
+        profile = self._load_profile()
+        if profile is None:
+            return
+        profile.panel_layout = {
+            name: {"x": frame.panel.x, "y": frame.panel.y, "collapsed": frame.collapsed}
+            for name, frame in self._panel_frames_by_name.items()
+        }
+        ProfileManager().save(profile)
+
     def run(self):
 
         pygame.display.set_caption("DungeonArchitect - Dungeon Editor")
 
+        # Layout restore must happen before _refresh_object_palette -- it
+        # sets generator_frame.user_moved, which _refresh_object_palette's
+        # auto-follow-under-the-palette logic checks to avoid immediately
+        # overwriting a just-restored position.
+        self._refresh_panel_layout()
         self._refresh_object_palette()
         self._refresh_generator_panel()
 
@@ -316,9 +478,30 @@ class Creator:
                                 self.dungeon.object_manager.set_role(self.role_panel.obj, role)
                     continue
 
+                # Draggable/collapsible panel title bars -- topmost frame
+                # first (see panel_frames' own z-order docstring), checked
+                # and fully consumed (continue) before anything else here
+                # gets a look at the event, so a title-bar click/drag can
+                # never also start painting, an object-palette drag, etc.
+                # underneath it. handle_title_event only ever returns True
+                # for an in-progress drag's own MOUSEMOTION/MOUSEBUTTONUP
+                # (at most one frame is ever mid-drag at once), so iteration
+                # order only actually matters for MOUSEBUTTONDOWN.
+                if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
+                    frame_claimed = False
+                    for frame in reversed(self.panel_frames):
+                        if frame.handle_title_event(event):
+                            if event.type == pygame.MOUSEBUTTONDOWN:
+                                self.panel_frames.remove(frame)
+                                self.panel_frames.append(frame)
+                            frame_claimed = True
+                            break
+                    if frame_claimed:
+                        continue
+
                 self.object_tool.handle_event(event)
 
-                if event.type == pygame.MOUSEBUTTONDOWN:
+                if event.type == pygame.MOUSEBUTTONDOWN and not self.object_frame.collapsed:
 
                     selected = self.object_palette.handle_click(event.pos)
 
@@ -334,19 +517,21 @@ class Creator:
                 if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP):
 
                     panel_click = event.type == pygame.MOUSEBUTTONDOWN and (
-                        self.room_panel.contains(event.pos)
-                        or self.generator_panel.contains(event.pos)
+                        self.room_frame.contains(event.pos)
+                        or self.generator_frame.contains(event.pos)
                     )
 
-                    room_action = self.room_panel.handle_event(event)
+                    if not self.room_frame.collapsed:
+                        room_action = self.room_panel.handle_event(event)
 
-                    if room_action is not None:
-                        self._apply_room_action(room_action)
+                        if room_action is not None:
+                            self._apply_room_action(room_action)
 
-                    generation_request = self.generator_panel.handle_event(event)
+                    if not self.generator_frame.collapsed:
+                        generation_request = self.generator_panel.handle_event(event)
 
-                    if generation_request is not None:
-                        self._apply_generation(generation_request)
+                        if generation_request is not None:
+                            self._apply_generation(generation_request)
 
                     if panel_click:
                         continue
@@ -356,7 +541,18 @@ class Creator:
                 ):
                     # Previewing a generated assembly -- painting/object tools all act
                     # on self.dungeon, which isn't what's on screen right now.
-                    continue
+                    # Middle-click pan is the one exception let through below:
+                    # it only ever moves self.camera, never touches
+                    # self.dungeon, so it's just as harmless (and just as
+                    # useful for looking around a multi-room layout) here as
+                    # it is on the normal single-room edit view.
+                    is_middle_click = (
+                        event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP)
+                        and event.button == 2
+                    )
+                    is_pan_motion = event.type == pygame.MOUSEMOTION and self.panning
+                    if not (is_middle_click or is_pan_motion):
+                        continue
 
                 if event.type == pygame.QUIT:
 
@@ -368,11 +564,11 @@ class Creator:
 
                     if event.button == 1:
 
-                        if self.palette.hit_autotile_toggle(event.pos):
+                        if not self.tools_frame.collapsed and self.palette.hit_autotile_toggle(event.pos):
                             self.dungeon.autotile_enabled = not self.dungeon.autotile_enabled
                             continue
 
-                        if self.palette.handle_click(event.pos):
+                        if not self.tools_frame.collapsed and self.palette.handle_click(event.pos):
                             continue
 
                         indicator_obj = self._find_indicator_at(event.pos)
@@ -624,10 +820,14 @@ class Creator:
 
                     self.screen.blit(sprite, rect)
 
-            self.palette.render(self.screen, autotile_enabled=self.dungeon.autotile_enabled)
-            self.object_palette.render(self.screen)
-            self.room_panel.render(self.screen)
-            self.generator_panel.render(self.screen)
+            # Rendered in panel_frames' own z-order (last = topmost, see its
+            # docstring) rather than a fixed sequence, so a frame dragged on
+            # top of another actually draws on top of it.
+            for frame in self.panel_frames:
+                if frame is self.tools_frame:
+                    frame.render(self.screen, autotile_enabled=self.dungeon.autotile_enabled)
+                else:
+                    frame.render(self.screen)
             self.chest_panel.render(self.screen)
             self.role_panel.render(self.screen)
 

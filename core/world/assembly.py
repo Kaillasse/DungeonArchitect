@@ -717,16 +717,26 @@ def _collides(existing_cells, new_cells, ignore=None):
     return False
 
 
-def _find_start_room(room_names):
-    """First room (in the given order) with both a spawn and a valid way out
+def _find_start_room(room_names, rng=None):
+    """A random room among room_names with both a spawn and a valid way out
     -- a gate/wall entry-exit or a border-floor edge (see _border_edges),
-    either is enough to start growing the assembly from."""
+    either is enough to start growing the assembly from. Previously always
+    the FIRST such room in room_names order, which meant every generation
+    from a given pool started from the same room every time (whichever the
+    multi-select pool happened to list first) -- rng.choice over every
+    qualifying candidate instead, same rng generate_assembly already
+    threads through every other random pick here."""
+    if rng is None:
+        rng = random
+    candidates = []
     for room_name in room_names:
         dungeon = _load_room(room_name)
         has_spawn = any(obj["type"] == "spawn" for obj in dungeon.object_manager.objects)
         if has_spawn and (_valid_entry_exits(dungeon) or _border_edges(dungeon)):
-            return room_name, dungeon
-    return None, None
+            candidates.append((room_name, dungeon))
+    if not candidates:
+        return None, None
+    return rng.choice(candidates)
 
 
 def _border_offset(anchor_room, anchor_edge, candidate_dungeon, candidate_edge):
@@ -817,7 +827,7 @@ def generate_assembly(room_names, room_count, rng=None):
     if rng is None:
         rng = random
 
-    start_name, start_dungeon = _find_start_room(room_names)
+    start_name, start_dungeon = _find_start_room(room_names, rng)
     if start_name is None:
         return None
 

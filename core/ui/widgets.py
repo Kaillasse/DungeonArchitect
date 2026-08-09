@@ -226,6 +226,137 @@ class Stepper:
 
 
 # ---------------------------------------------------------------------
+# Panel frame (draggable/collapsible title bar wrapper)
+# ---------------------------------------------------------------------
+
+
+class PanelFrame:
+    """Wraps one of Creator's docked panels (ToolPaletteUI, ObjectPalette,
+    RoomPanelUI, GeneratorPanelUI -- anything exposing x/y/width/
+    render(screen)/contains(pos) plus a move(dx, dy) it implements itself,
+    since each one caches its own child rects differently) with a
+    draggable title bar and a collapse toggle, so Creator's docked panels
+    can be repositioned/hidden instead of sitting at fixed coordinates
+    forever.
+
+    Deliberately NOT an event-dispatch layer over the wrapped panel's own
+    handle_event -- Creator keeps calling each panel's existing
+    click-routing exactly as before (hit_autotile_toggle, object palette
+    drag-start, room/generator panel confirm actions), just gated by
+    `not frame.collapsed` now. This frame only ever owns the title-bar
+    strip drawn just ABOVE the wrapped panel's own bounds (panel.y itself
+    never changes meaning, so none of the wrapped panels' internal
+    y-relative layouts needed touching) -- title-bar clicks either toggle
+    `collapsed` or start a drag, both handled entirely inside
+    handle_title_event, never falling through to the panel body.
+    """
+
+    TITLE_HEIGHT = 24
+    TOGGLE_SIZE = 18
+
+    def __init__(self, panel, title, on_change=None):
+        self.panel = panel
+        self.title = title
+        self.on_change = on_change
+        self.collapsed = False
+        # True once the player has actually dragged this frame (or a saved
+        # layout was restored onto it) -- lets a caller (Creator's level-
+        # driven auto-repositioning of the generation panel below the
+        # object palette) know to stop overriding a placement the player
+        # actually chose. Never set by this class on its own besides an
+        # actual drag -- Creator sets it directly when restoring a saved
+        # layout (see profile_manager.Profile.panel_layout).
+        self.user_moved = False
+
+        self._dragging = False
+        self._drag_last_pos = None
+
+        self.border = BorderManager()
+        self.font = pygame.font.SysFont("arial", 15)
+
+    def title_rect(self):
+        return pygame.Rect(self.panel.x, self.panel.y - self.TITLE_HEIGHT, self.panel.width, self.TITLE_HEIGHT)
+
+    def _toggle_rect(self):
+        title = self.title_rect()
+        return pygame.Rect(
+            title.right - self.TOGGLE_SIZE - 4,
+            title.y + (title.height - self.TOGGLE_SIZE) / 2,
+            self.TOGGLE_SIZE, self.TOGGLE_SIZE,
+        )
+
+    def move_to(self, x, y):
+        """Absolute reposition -- used to restore a saved layout. Delegates
+        to the wrapped panel's own move(dx, dy) so both the drag path and
+        the restore path share the exact same per-panel relocation logic
+        (icon rects, Stepper rects, etc. all get shifted the same way)."""
+        self.panel.move(x - self.panel.x, y - self.panel.y)
+
+    def contains(self, pos):
+        """True if `pos` hits either the title bar or (when not collapsed)
+        the wrapped panel's own body -- used by Creator both to bring this
+        frame to front and to decide whether a click here should block a
+        click from reaching the grid underneath (see Creator's existing
+        panel_click gating)."""
+        if self.title_rect().collidepoint(pos):
+            return True
+        return not self.collapsed and self.panel.contains(pos)
+
+    def handle_title_event(self, event):
+        """Title bar/toggle interaction only (drag start/continue/end,
+        collapse toggle) -- returns True if this event was about the
+        title bar and should NOT be forwarded to the wrapped panel's own
+        handle_event/click routing at all. Body events are the caller's
+        job (see this class's own docstring for why)."""
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self._toggle_rect().collidepoint(event.pos):
+                self.collapsed = not self.collapsed
+                self._notify_change()
+                return True
+            if self.title_rect().collidepoint(event.pos):
+                self._dragging = True
+                self._drag_last_pos = event.pos
+                return True
+            return False
+
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if self._dragging:
+                self._dragging = False
+                self._drag_last_pos = None
+                self.user_moved = True
+                self._notify_change()
+                return True
+            return False
+
+        if event.type == pygame.MOUSEMOTION and self._dragging and self._drag_last_pos is not None:
+            dx = event.pos[0] - self._drag_last_pos[0]
+            dy = event.pos[1] - self._drag_last_pos[1]
+            self.panel.move(dx, dy)
+            self._drag_last_pos = event.pos
+            return True
+
+        return False
+
+    def _notify_change(self):
+        if self.on_change is not None:
+            self.on_change(self)
+
+    def render(self, screen, **panel_kwargs):
+        """**panel_kwargs is forwarded to the wrapped panel's own render
+        (e.g. ToolPaletteUI.render(screen, autotile_enabled=...)) -- this
+        class doesn't need to know each panel's particular render
+        signature, just pass whatever the caller gave it through."""
+        title_rect = self.title_rect()
+        self.border.draw(screen, title_rect)
+        label = self.font.render(self.title, True, (255, 255, 255))
+        screen.blit(label, (title_rect.x + 8, title_rect.centery - label.get_height() / 2))
+        self.border.draw_centered_label(screen, self._toggle_rect(), self.font, "+" if self.collapsed else "-")
+
+        if not self.collapsed:
+            self.panel.render(screen, **panel_kwargs)
+
+
+# ---------------------------------------------------------------------
 # Border picker (Settings > Bordure)
 # ---------------------------------------------------------------------
 
@@ -302,6 +433,108 @@ class BorderPicker:
 
 
 # ---------------------------------------------------------------------
+# Context menu (right-click popup)
+# ---------------------------------------------------------------------
+
+
+class ContextMenu:
+    """A small right-click popup: a fixed screen position + a list of
+    (label, action_id) rows. Purely a hit-tester/renderer with no notion of
+    what an action actually does -- the caller (RoomBrowser today) owns
+    opening it and reacting to whatever handle_event returns. Generic on
+    purpose, same spirit as Stepper -- nothing here is room-specific, so a
+    later right-click menu elsewhere (a placed object, say) can reuse it as-is.
+    """
+
+    ROW_HEIGHT = 26
+    WIDTH = 150
+    DISMISS = "__dismiss__"
+
+    def __init__(self):
+        self.options = None  # list of (label, action_id), or None if closed
+        self.pos = (0, 0)
+        self.border = BorderManager()
+        self.font = pygame.font.SysFont("arial", 15)
+
+    @property
+    def is_open(self):
+        return self.options is not None
+
+    def open(self, pos, options):
+        self.pos = pos
+        self.options = list(options)
+
+    def close(self):
+        self.options = None
+
+    def _row_rect(self, index):
+        x, y = self.pos
+        return pygame.Rect(x, y + index * self.ROW_HEIGHT, self.WIDTH, self.ROW_HEIGHT)
+
+    def handle_event(self, event):
+        """Returns the chosen action_id on a row click, ContextMenu.DISMISS
+        on any other click (closes without an action -- click-away-to-close),
+        or None if this event wasn't a click at all (still open, nothing to
+        report yet)."""
+        if not self.is_open or event.type != pygame.MOUSEBUTTONDOWN:
+            return None
+        for index, (_, action_id) in enumerate(self.options):
+            if self._row_rect(index).collidepoint(event.pos):
+                self.close()
+                return action_id
+        self.close()
+        return self.DISMISS
+
+    def render(self, screen):
+        if not self.is_open:
+            return
+        for index, (label, _action_id) in enumerate(self.options):
+            self.border.draw_centered_label(screen, self._row_rect(index), self.font, label)
+
+
+# ---------------------------------------------------------------------
+# Text input box (single-line, blinking cursor)
+# ---------------------------------------------------------------------
+
+
+class TextInputBox:
+    """A single-line text field. Reuses the exact input-handling pattern
+    Menu's own "name_entry" mode already hand-rolls (core.ui.menu.Menu --
+    KEYDOWN: K_RETURN confirms, K_BACKSPACE erases, event.unicode.isprintable()
+    + a length cap appends) -- extracted here so a second caller
+    (RoomBrowser's rename prompt) doesn't have to duplicate it."""
+
+    def __init__(self, x, y, width, height, value="", max_length=32):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.value = value
+        self.max_length = max_length
+        self.border = BorderManager()
+        self.font = pygame.font.SysFont("arial", 16)
+
+    def handle_event(self, event):
+        """Returns True once Enter confirms a non-empty value, False if
+        Escape cancels, None otherwise (still being edited, or Enter on an
+        empty value -- ignored rather than treated as a cancel, so a typo'd-
+        down-to-nothing field doesn't silently close on the player)."""
+        if event.type != pygame.KEYDOWN:
+            return None
+        if event.key == pygame.K_RETURN:
+            return True if self.value.strip() else None
+        if event.key == pygame.K_ESCAPE:
+            return False
+        if event.key == pygame.K_BACKSPACE:
+            self.value = self.value[:-1]
+        elif event.unicode and event.unicode.isprintable():
+            if len(self.value) < self.max_length:
+                self.value += event.unicode
+        return None
+
+    def render(self, screen):
+        cursor = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
+        self.border.draw_centered_label(screen, self.rect, self.font, self.value + cursor)
+
+
+# ---------------------------------------------------------------------
 # Room browser
 # ---------------------------------------------------------------------
 
@@ -313,7 +546,7 @@ class RoomBrowser:
     VISIBLE_ROWS = 5
     SLIDER_WIDTH = 12
 
-    def __init__(self, x, y, width=240, multi_select=False):
+    def __init__(self, x, y, width=240, multi_select=False, on_rename=None, on_delete=None, can_rename=None):
         self.x = x
         self.y = y
         self.width = width
@@ -324,6 +557,21 @@ class RoomBrowser:
         self.selected_set = set()
         self.scroll = 0
         self._dragging_slider = False
+
+        # Right-click rename/delete (optional -- None means the caller
+        # doesn't want this at all, e.g. Menu's own room-picker doesn't wire
+        # these). RoomBrowser doesn't know about RoomManager/Creator itself,
+        # only "a name was chosen for this action" -- the caller decides
+        # what actually happens on disk. can_rename(name) -> bool, if given,
+        # hides "Renommer" for a name it returns False for (e.g. a player's
+        # own home_<name> room, which Creator refuses to let get renamed).
+        self.on_rename = on_rename
+        self.on_delete = on_delete
+        self.can_rename = can_rename
+        self._context_menu = ContextMenu()
+        self._context_target_index = None
+        self._rename_box = None
+        self._delete_confirm_index = None
 
         self.border = BorderManager()
         self.font = pygame.font.SysFont("arial", 16)
@@ -341,6 +589,25 @@ class RoomBrowser:
     @staticmethod
     def _value(entry):
         return entry[1] if isinstance(entry, tuple) else entry
+
+    @classmethod
+    def _room_name_for_context(cls, entry):
+        """The room-name string a right-click context menu should operate
+        on for `entry`, or None if this entry isn't a room at all --
+        RoomPanelUI's "Charger" list also lists donjons, tagged as
+        ("donjon", name) inside the (label, value) tuple (its "load" mode
+        entries look like (label, (kind, name)), one tuple nested in
+        another) -- those never get a rename/delete menu. Every other shape
+        (a plain string, or an ordinary (label, name) pair) is treated as a
+        real room name -- if it happens not to correspond to an actual file
+        (e.g. RoomPanelUI's "+ Nouvelle salle" placeholder row), the
+        RoomManager-level operation the caller performs just no-ops on a
+        missing file, same as it already does for any other stale name."""
+        value = cls._value(entry)
+        if isinstance(value, tuple) and len(value) == 2 and value[0] in ("room", "donjon"):
+            kind, name = value
+            return name if kind == "room" else None
+        return value
 
     @property
     def selected_name(self):
@@ -391,8 +658,72 @@ class RoomBrowser:
         panel_rect = pygame.Rect(self.x, self.y, self.width, self.height)
         return panel_rect.collidepoint(pos)
 
+    def _delete_confirm_rects(self):
+        x, y = self._context_menu.pos
+        return pygame.Rect(x, y, 70, 28), pygame.Rect(x + 74, y, 70, 28)
+
     def handle_event(self, event):
-        """Returns True if this event was consumed (row click, slider drag)."""
+        """Returns True if this event was consumed (row click, slider drag,
+        or absorbed by an open rename/delete popup)."""
+
+        # A pending rename box, delete confirmation, or context menu is
+        # modal within this browser -- it absorbs every event until
+        # resolved, same principle as Creator's chest_panel/role_panel
+        # being modal within Creator. At most one of these three is ever
+        # active at once (each one's resolution clears itself before the
+        # next can open).
+        if self._rename_box is not None:
+            result = self._rename_box.handle_event(event)
+            if result is not None:
+                old_name = self._room_name_for_context(self.rooms[self._context_target_index])
+                new_name = self._rename_box.value.strip()
+                self._rename_box = None
+                self._context_target_index = None
+                if result and self.on_rename is not None and new_name and new_name != old_name:
+                    self.on_rename(old_name, new_name)
+            return True
+
+        if self._delete_confirm_index is not None:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                yes_rect, no_rect = self._delete_confirm_rects()
+                target_index = self._delete_confirm_index
+                self._delete_confirm_index = None
+                if yes_rect.collidepoint(event.pos) and self.on_delete is not None:
+                    self.on_delete(self._room_name_for_context(self.rooms[target_index]))
+                # else (No, or clicked elsewhere): just cancels.
+            return True
+
+        if self._context_menu.is_open:
+            action = self._context_menu.handle_event(event)
+            if action == "rename":
+                name = self._room_name_for_context(self.rooms[self._context_target_index])
+                x, y = self._context_menu.pos
+                self._rename_box = TextInputBox(x, y, 220, 30, value=name)
+            elif action == "delete":
+                self._delete_confirm_index = self._context_target_index
+            elif action is not None:
+                self._context_target_index = None
+            return True
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+            if self.on_rename is None and self.on_delete is None:
+                return False
+            for row_index in range(self._visible_count()):
+                if self._row_rect(row_index).collidepoint(event.pos):
+                    room_index = self.scroll + row_index
+                    name = self._room_name_for_context(self.rooms[room_index])
+                    if name is None:
+                        return True  # a donjon row -- consumed, no menu
+                    options = []
+                    if self.on_rename is not None and (self.can_rename is None or self.can_rename(name)):
+                        options.append(("Renommer", "rename"))
+                    if self.on_delete is not None:
+                        options.append(("Supprimer", "delete"))
+                    if options:
+                        self._context_menu.open(event.pos, options)
+                        self._context_target_index = room_index
+                    return True
+            return False
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
 
@@ -452,3 +783,16 @@ class RoomBrowser:
         if self._max_scroll() > 0:
             pygame.draw.rect(screen, (60, 60, 70), self._slider_track_rect())
             pygame.draw.rect(screen, (150, 150, 150), self._slider_thumb_rect())
+
+        self._context_menu.render(screen)
+
+        if self._rename_box is not None:
+            self._rename_box.render(screen)
+
+        if self._delete_confirm_index is not None:
+            name = self._room_name_for_context(self.rooms[self._delete_confirm_index])
+            yes_rect, no_rect = self._delete_confirm_rects()
+            prompt = self.font.render(f"Supprimer {name} ?", True, (255, 220, 120))
+            screen.blit(prompt, (yes_rect.x, yes_rect.y - prompt.get_height() - 4))
+            self.border.draw_centered_label(screen, yes_rect, self.font, "Oui")
+            self.border.draw_centered_label(screen, no_rect, self.font, "Non")

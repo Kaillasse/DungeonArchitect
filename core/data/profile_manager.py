@@ -29,7 +29,8 @@ def _sanitize_name(name) -> str:
 
 
 class Profile:
-    def __init__(self, name: str, xp: int = 0, generator_room_names=None, generator_room_count: int = 3):
+    def __init__(self, name: str, xp: int = 0, generator_room_names=None, generator_room_count: int = 3,
+                 panel_layout=None):
         self.name = name
         self.xp = xp
         # Creator's GeneratorPanelUI room-pool selection + room-count
@@ -42,6 +43,13 @@ class Profile:
         # to before this field existed.
         self.generator_room_names = list(generator_room_names) if generator_room_names else []
         self.generator_room_count = generator_room_count
+        # {"tools"/"object_palette"/"room"/"generator": {"x", "y", "collapsed"}}
+        # -- Creator's docked PanelFrame positions/collapsed state (see
+        # Creator._on_panel_frame_change/_refresh_panel_layout). Additive,
+        # same convention as the generator fields above -- an empty dict
+        # (a profile that's never moved a panel) leaves every panel at its
+        # default constructor position.
+        self.panel_layout = dict(panel_layout) if panel_layout else {}
 
     @property
     def level(self) -> int:
@@ -79,6 +87,7 @@ class ProfileManager:
             xp=int(payload.get("xp", 0)),
             generator_room_names=payload.get("generator_room_names"),
             generator_room_count=int(payload.get("generator_room_count", 3)),
+            panel_layout=payload.get("panel_layout"),
         )
 
     def save(self, profile: Profile) -> Path:
@@ -92,6 +101,7 @@ class ProfileManager:
                     "xp": profile.xp,
                     "generator_room_names": profile.generator_room_names,
                     "generator_room_count": profile.generator_room_count,
+                    "panel_layout": profile.panel_layout,
                 },
                 handle, indent=2, ensure_ascii=False,
             )

@@ -8,8 +8,8 @@ import threading
 import pygame
 from core.world.dungeon import Dungeon, corner_cells
 from core.editor.autotile import FLOOR
-from core.world.assembly import load_assembly, generate_assembly
-from core.data.ressources import ROOMS_DIRECTORY
+from core.world.assembly import load_assembly, save_assembly, generate_assembly
+from core.data.ressources import ROOMS_DIRECTORY, next_new_donjon_name
 from core.world.entities import Player, PlayerRef, Animal, Enemy, Pickup, ItemPickup, ThrownDynamite, Explosion
 from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES
 from core.exploration.player_session import PlayerSession
@@ -227,6 +227,20 @@ class Explorator:
         # to know whether the active room is the local player's own home.
         self.current_room = None
 
+        # Name of the currently active assembly's saved .json (assets/donjons/),
+        # or None in single-room mode -- set by open_donjon/_enter_assembly.
+        # Included in every network snapshot (protocol.build_snapshot) so a
+        # client (including the host's own loopback client -- see
+        # Explorator.start_hosting) can notice when the authoritative
+        # Explorator (the server, or the local one in solo play) has swapped
+        # into a freshly generated dungeon (_maybe_complete_dungeon_entrance_
+        # barrier) and mirror that by loading the exact same saved assembly
+        # itself (see apply_network_snapshot) -- without this, a client had no
+        # way to learn a brand-new assembly (never seen at connect time, only
+        # generated mid-session) even exists, and kept rendering whatever
+        # single room/assembly it happened to have loaded before crossing.
+        self.current_donjon_name = None
+
         self.clock = pygame.time.Clock()
 
         # Networking (Phase 3+4), client-side only -- see
@@ -237,15 +251,38 @@ class Explorator:
         self._network_mirrors = {}  # room_ref -> {"animals": {...}, ...}
         self._network_targets = {}  # id(entity) -> (entity, target_x, target_y)
 
+        # True once _finish_connecting has run (a thin network client --
+        # start_hosting's own loopback client included, see its docstring)
+        # -- False for the authoritative Explorator (solo local play, or
+        # GameServer's own headless instance). open_room/_enter_assembly
+        # check this to skip spawn_animals()/spawn_enemies(): a client's
+        # animals/enemies are entirely mirrored from the server's snapshot
+        # (apply_network_snapshot's _sync_mirror_list), so locally spawning
+        # a real, separate set too used to leave a second, never-updated
+        # (frame-0, standing still) Animal/Enemy sitting right on top of
+        # every mirrored one -- exactly the "double sur leur point de spawn"
+        # bug reported after the dungeon-entrance sync barrier started
+        # calling open_donjon mid-session on clients too (see
+        # apply_network_snapshot), though the same gap already existed at
+        # ordinary connect time (_finish_connecting's own open_room/
+        # open_donjon call) for any room/donjon that happened to have
+        # animals/enemies placed in it.
+        self.is_network_client = False
+
     def open_room(self, name):
         """Load a specific room (chosen from the menu) and spawn every current
         session's player in it."""
         self.assembly = None
         self.current_placed_room = None
         self.current_room = name
+        self.current_donjon_name = None
         self.dungeon.load_from_json(name)
-        self.dungeon.spawn_animals()
-        self.dungeon.spawn_enemies()
+        # Skipped for a network client -- see self.is_network_client's own
+        # docstring for why locally spawning here too would double up with
+        # the mirrored animals/enemies apply_network_snapshot creates.
+        if not self.is_network_client:
+            self.dungeon.spawn_animals()
+            self.dungeon.spawn_enemies()
         for session in self.players.values():
             self._position_player_at_spawn(session)
             session.current_placed_room = None
@@ -264,23 +301,38 @@ class Explorator:
     def open_donjon(self, name):
         """Load a saved procedurally-assembled dungeon and spawn every
         current session's player in its starting room."""
-        self._enter_assembly(load_assembly(name))
+        self._enter_assembly(load_assembly(name), donjon_name=name)
 
-    def _enter_assembly(self, assembly):
+    def _enter_assembly(self, assembly, donjon_name=None):
         """Shared by open_donjon (a saved assembly, chosen from the menu)
-        and _check_dungeon_entrance (a freshly procedurally-generated one,
-        triggered mid-update() by crossing a dungeon_entrance in home):
-        assigns it as the active world, spawns every room's animals/
-        enemies, and places every current session at the start room's
-        spawn point."""
+        and _maybe_complete_dungeon_entrance_barrier (a freshly
+        procedurally-generated one, triggered mid-update() once every
+        connected player has crossed home's dungeon_entrance): assigns it
+        as the active world, spawns every room's animals/enemies, and
+        places every current session at the start room's spawn point.
+
+        donjon_name (assets/donjons/<name>.json) is recorded on
+        self.current_donjon_name -- included in every network snapshot
+        (protocol.build_snapshot) so a client (including the host's own
+        loopback client) can notice the authoritative Explorator entered a
+        NEW assembly it was never told about at connect time and mirror it
+        by loading that same saved file itself (see
+        apply_network_snapshot). _maybe_complete_dungeon_entrance_barrier
+        always saves the assembly it just generated (via save_assembly)
+        before calling this, specifically so this name is always something
+        a client can actually load from its own local assets/donjons/."""
         self.assembly = assembly
         self.current_room = None
+        self.current_donjon_name = donjon_name
         self.victory = False
         self.dungeon_entrance_ready.clear()
 
-        for room in self.assembly.rooms:
-            room.dungeon.spawn_animals()
-            room.dungeon.spawn_enemies()
+        # Skipped for a network client -- see self.is_network_client's own
+        # docstring.
+        if not self.is_network_client:
+            for room in self.assembly.rooms:
+                room.dungeon.spawn_animals()
+                room.dungeon.spawn_enemies()
 
         start_room = next(
             (room for room in self.assembly.rooms if room.has_spawn()),
@@ -432,7 +484,17 @@ class Explorator:
             print("[dungeon_entrance] Aucune salle avec spawn + sortie dans la selection.")
             return False
 
-        self._enter_assembly(assembly)
+        # Persisted (not just kept in memory) so a client -- including the
+        # host's own loopback client, see Explorator.start_hosting -- can
+        # load the exact same rooms/offsets itself once it notices
+        # current_donjon_name changed in the next snapshot (see
+        # apply_network_snapshot). Without this, only the authoritative
+        # Explorator (the server, or the local one in solo play) ever knew
+        # this assembly existed at all.
+        donjon_name = next_new_donjon_name()
+        save_assembly(assembly, donjon_name)
+
+        self._enter_assembly(assembly, donjon_name=donjon_name)
         return True
 
     def _check_dungeon_entrance(self, session):
@@ -1491,6 +1553,12 @@ class Explorator:
         sequence), adopts the assigned player_id, and hands the live
         client to GameManager so its dispatch routes into run_networked
         instead of run() from now on (see GameManager.run())."""
+        # Before the open_room/open_donjon call right below -- see
+        # self.is_network_client's own docstring for why order matters here
+        # (it must already be True by the time either of those runs, so
+        # they skip locally spawning animals/enemies that would otherwise
+        # double up with apply_network_snapshot's own mirrored ones).
+        self.is_network_client = True
         if welcome["room_kind"] == "donjon":
             self.open_donjon(welcome["room_name"])
         else:
@@ -1729,6 +1797,31 @@ class Explorator:
         _smooth_network_entities instead (remote entities) or
         _reconcile_local_player (the local player, predicted -- see Phase 4
         notes above)."""
+        # The authoritative Explorator (the server, or the local one in solo
+        # play) can swap into a freshly generated dungeon mid-session (the
+        # dungeon_entrance sync barrier, see _maybe_complete_dungeon_entrance_
+        # barrier) that this client was never told about at connect time --
+        # noticing the name changed here and mirroring it via open_donjon
+        # (loading that exact saved assembly from this client's own local
+        # assets/donjons/) is what lets _room_for_ref below actually resolve
+        # to a real room instead of staying stuck at None forever (which
+        # crashed render()'s _render_viewport on room.floor -- the "ça crash
+        # au moment ou les personnages rentres dans le donjon" bug) or,
+        # short of crashing, silently kept rendering whatever single room
+        # this client happened to have loaded before crossing (the "decors
+        # differents en fonction de la fenetre" bug). Edge-triggered against
+        # self.current_donjon_name (set by open_donjon/_enter_assembly) so
+        # this only actually reloads the one tick it changes, not every
+        # tick. Done first, before the payload's own authoritative fields
+        # below are applied, since open_donjon/_enter_assembly resets
+        # victory/dungeon_entrance_ready itself -- applying those from the
+        # payload afterward is what actually makes them correct for this
+        # tick rather than getting clobbered back to open_donjon's own
+        # just-loaded-a-fresh-room defaults.
+        donjon_name = payload.get("donjon_name")
+        if donjon_name is not None and donjon_name != self.current_donjon_name:
+            self.open_donjon(donjon_name)
+
         self.pvp_enabled = payload["pvp_enabled"]
         self.victory = payload["victory"]
         self.dungeon_entrance_ready = set(payload.get("dungeon_entrance_ready", []))

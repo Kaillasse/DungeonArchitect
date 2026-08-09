@@ -30,6 +30,13 @@ class ToolPaletteUI:
 
     # -------------------------------------------------------------
 
+    def move(self, dx, dy):
+        """Every rect here (_tool_rect/_autotile_rect) is already recomputed
+        from self.x/self.y on demand, so shifting the origin is enough --
+        see PanelFrame, which drives this via drag/restore."""
+        self.x += dx
+        self.y += dy
+
     def _tool_rect(self):
         return pygame.Rect(self.x + 12, self.y + 40, self.width - 24, 30)
 
@@ -88,14 +95,19 @@ class ToolPaletteUI:
     def hit_autotile_toggle(self, position: tuple[int, int]) -> bool:
         return self._autotile_rect().collidepoint(position)
 
-    def handle_click(self, position: tuple[int, int]) -> bool:
-
+    def contains(self, position: tuple[int, int]) -> bool:
         x, y = position
-
         return (
             self.x <= x <= self.x + self.width
             and self.y <= y <= self.y + self.height
         )
+
+    def handle_click(self, position: tuple[int, int]) -> bool:
+        # Despite the name, this has always been a pure containment check
+        # (nothing here mutates state) -- kept as-is since Creator already
+        # calls it; contains() above is the same check under the name
+        # PanelFrame expects from every wrapped panel.
+        return self.contains(position)
 
 class ObjectPalette:
 
@@ -178,10 +190,22 @@ class ObjectPalette:
         rows = max(1, -(-len(visible_types) // self.COLUMNS))  # ceil division
         self.height = 30 + rows * step + 10
 
+    def move(self, dx, dy):
+        """Shifts self.x/self.y AND every icon's already-placed rect
+        (load_icons() caches those in absolute coordinates, unlike
+        ToolPaletteUI's on-demand rects) -- move_ip rather than re-running
+        load_icons(), which would also reset each icon's animation
+        frame/timer. See PanelFrame, which drives this via drag/restore."""
+        self.x += dx
+        self.y += dy
+        for icon in self.icons.values():
+            icon["rect"].move_ip(dx, dy)
+
     def set_unlocked_types(self, unlocked_types):
         """Rebuilds icons/layout only if the unlocked set actually changed.
         Returns True if a rebuild happened, so a caller positioning another
-        panel below this one (see GeneratorPanelUI.set_y) knows to follow."""
+        panel below this one (see Creator._refresh_object_palette) knows to
+        follow."""
         new_set = set(unlocked_types)
         if new_set == self.unlocked_types:
             return False
@@ -189,7 +213,8 @@ class ObjectPalette:
         self.load_icons()
         return True
 
-
+    def contains(self, position):
+        return pygame.Rect(self.x, self.y, self.width, self.height).collidepoint(position)
 
     def render(self, screen):
 
@@ -275,7 +300,7 @@ class RoomPanelUI:
         ("Supprimer", "delete"),
     )
 
-    def __init__(self, room_manager, x=460, y=10):
+    def __init__(self, room_manager, x=460, y=10, on_rename=None, on_delete=None, can_rename=None):
 
         self.room_manager = room_manager
         self.x = x
@@ -286,9 +311,24 @@ class RoomPanelUI:
 
         self.mode = None
 
-        panel_width = self.BUTTON_WIDTH * len(self.LABELS_ACTIONS)
-        self.browser = RoomBrowser(x, y + self.BUTTON_HEIGHT + 8, width=panel_width)
-        self.confirm_rect = pygame.Rect(x, self.browser.y + self.browser.height + 8, panel_width, 32)
+        self.width = self.BUTTON_WIDTH * len(self.LABELS_ACTIONS)
+        self.browser = RoomBrowser(
+            x, y + self.BUTTON_HEIGHT + 8, width=self.width,
+            on_rename=on_rename, on_delete=on_delete, can_rename=can_rename,
+        )
+        self.confirm_rect = pygame.Rect(x, self.browser.y + self.browser.height + 8, self.width, 32)
+
+    def move(self, dx, dy):
+        """See PanelFrame, which drives this via drag/restore. self.browser
+        recomputes its own child rects from browser.x/browser.y on demand
+        (RoomBrowser, unlike Stepper, never caches an absolute rect), so a
+        plain reassignment is enough there; confirm_rect is a plain cached
+        Rect and needs its own move_ip."""
+        self.x += dx
+        self.y += dy
+        self.browser.x += dx
+        self.browser.y += dy
+        self.confirm_rect.move_ip(dx, dy)
 
     def _button_rect(self, index):
         return pygame.Rect(self.x + index * self.BUTTON_WIDTH, self.y, self.BUTTON_WIDTH, self.BUTTON_HEIGHT)
@@ -306,6 +346,16 @@ class RoomPanelUI:
         if mode == "save":
             rooms = [self.NEW_ROOM_LABEL] + rooms
         self.browser.set_rooms(rooms)
+
+    def refresh_rooms(self):
+        """Call after a room's name changed/disappeared on disk (a rename
+        or delete via the browser's own right-click menu -- see
+        Creator._rename_room/_delete_room) so a currently-open list
+        reflects it immediately instead of showing a stale name until
+        Sauvegarder/Charger/Supprimer is clicked again. A no-op while no
+        mode is open (self.browser isn't showing anything to refresh)."""
+        if self.mode is not None:
+            self._open(self.mode)
 
     def contains(self, pos):
 
@@ -376,11 +426,12 @@ class GeneratorPanelUI:
     MIN_COUNT = 1
     MAX_COUNT = 20
 
-    def __init__(self, room_manager, x=460, y=260):
+    def __init__(self, room_manager, x=460, y=260, on_rename=None, on_delete=None, can_rename=None):
 
         self.room_manager = room_manager
         self.x = x
         self.y = y
+        self.width = self.PANEL_WIDTH
 
         self.border = BorderManager()
         self.font = pygame.font.SysFont("arial", 16)
@@ -388,7 +439,10 @@ class GeneratorPanelUI:
 
         self.room_count = 3
 
-        self.pool_browser = RoomBrowser(x, y + 26, width=self.PANEL_WIDTH, multi_select=True)
+        self.pool_browser = RoomBrowser(
+            x, y + 26, width=self.PANEL_WIDTH, multi_select=True,
+            on_rename=on_rename, on_delete=on_delete, can_rename=can_rename,
+        )
         self.pool_browser.set_rooms(self.room_manager.scan(), preselect_all=True)
 
         stepper_y = self.pool_browser.y + self.pool_browser.height + 10
@@ -398,23 +452,25 @@ class GeneratorPanelUI:
 
         self.status_text = ""
 
-    def set_y(self, new_y):
-        """Repositions this whole panel vertically without losing state
-        (room_count, pool selection) -- used when ObjectPalette's height
-        changes (level-gated icon count, see Creator._refresh_object_palette)
-        and shifts everything below it. pool_browser.y is read fresh by its
-        own _row_rect on every call, so bumping it is enough, but Stepper
-        caches absolute rects at construction time -- those need an explicit
+    def move(self, dx, dy):
+        """See PanelFrame, which drives this via drag/restore (superseded
+        the old y-only set_y, used back when ObjectPalette's height change
+        was the only thing that ever repositioned this panel -- now that
+        the player can drag it directly, x needs to move too).
+        pool_browser.x/.y are read fresh by its own _row_rect on every
+        call, so a plain reassignment is enough there, but Stepper caches
+        absolute rects at construction time -- those need an explicit
         move_ip, same for generate_rect."""
-        dy = new_y - self.y
-        if dy == 0:
+        if dx == 0 and dy == 0:
             return
-        self.y = new_y
+        self.x += dx
+        self.y += dy
+        self.pool_browser.x += dx
         self.pool_browser.y += dy
-        self.stepper.minus_rect.move_ip(0, dy)
-        self.stepper.count_rect.move_ip(0, dy)
-        self.stepper.plus_rect.move_ip(0, dy)
-        self.generate_rect.move_ip(0, dy)
+        self.stepper.minus_rect.move_ip(dx, dy)
+        self.stepper.count_rect.move_ip(dx, dy)
+        self.stepper.plus_rect.move_ip(dx, dy)
+        self.generate_rect.move_ip(dx, dy)
 
     def apply_profile(self, profile):
         """Seeds room_count/pool selection from a saved Profile (see

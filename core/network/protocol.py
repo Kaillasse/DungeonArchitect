@@ -252,6 +252,14 @@ def build_snapshot(explorator, tick: int, terrain_versions: dict) -> dict:
         # players" indicator at all -- same reasoning "victory"/
         # "pvp_enabled" are here instead of being simulated client-side.
         "dungeon_entrance_ready": sorted(explorator.dungeon_entrance_ready),
+        # None in single-room mode, else the assets/donjons/<name>.json this
+        # world is currently the assembly from -- lets a client (including
+        # the host's own loopback client) notice a freshly generated
+        # dungeon it was never told about at connect time (see
+        # Explorator._maybe_complete_dungeon_entrance_barrier/
+        # apply_network_snapshot) and load that exact same saved file
+        # itself instead of staying stuck on whatever it had loaded before.
+        "donjon_name": explorator.current_donjon_name,
         "players": players, "animals": animals, "enemies": enemies,
         "pickups": pickups, "objects": objects,
         "dynamites": dynamites, "explosions": explosions,
