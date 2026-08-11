@@ -1,14 +1,15 @@
 """InventoryPanel: the "E" overlay drawn on top of Explorator while the world
-is paused. Not in core/ui.py -- that file is reserved for widgets actually
-shared across game states (BorderManager/RoomBrowser/BorderPicker); this
-panel is Explorator-only, same separation as core/editor/ui.py for Creator's
-own panels."""
+is paused. Not in core/ui/widgets.py -- that file is reserved for widgets
+actually shared across game states (BorderManager/RoomBrowser/BorderPicker);
+this panel is Explorator-only, same separation as core/editor/ui.py for
+Creator's own panels -- it lives in core/exploration/ alongside explorator.py
+and player_session.py instead."""
 
 from __future__ import annotations
 
 import pygame
 
-from core.ui import BorderManager
+from core.ui.widgets import BorderManager
 from core.world.object_manager import CURRENCY_FILES, load_currency_frames
 
 
@@ -55,9 +56,18 @@ class InventoryPanel:
 
     # ------------------------------------------------------------------
 
-    def _panel_rect(self, screen):
+    def _panel_rect(self, screen, region=None):
+        """region=None centers on the whole screen (solo case, pixel-identical
+        to before Phase 2's local co-op); region=(left, width) centers within
+        that horizontal slice instead -- used when more than one session has
+        its panel open at once (see Explorator.render)."""
+        if region is None:
+            center_x = screen.get_width() / 2
+        else:
+            left, width = region
+            center_x = left + width / 2
         return pygame.Rect(
-            screen.get_width() / 2 - self.PANEL_WIDTH / 2,
+            center_x - self.PANEL_WIDTH / 2,
             screen.get_height() / 2 - self.PANEL_HEIGHT / 2,
             self.PANEL_WIDTH, self.PANEL_HEIGHT,
         )
@@ -68,12 +78,12 @@ class InventoryPanel:
             icon = pygame.transform.scale(item.get_icon(), (rect.width - 12, rect.height - 12))
             screen.blit(icon, (rect.centerx - icon.get_width() / 2, rect.centery - icon.get_height() / 2))
 
-    def render(self, screen, player):
+    def render(self, screen, player, region=None):
         overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, self.OVERLAY_ALPHA))
         screen.blit(overlay, (0, 0))
 
-        panel_rect = self._panel_rect(screen)
+        panel_rect = self._panel_rect(screen, region)
         self.border.draw(screen, panel_rect)
 
         self._render_player_preview(screen, panel_rect, player)

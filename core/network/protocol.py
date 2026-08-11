@@ -1,0 +1,267 @@
+"""Wire protocol for the client/server transport layer (multiplayer Phase 3):
+newline-delimited JSON over a TCP socket, one message per line -- the
+thinnest layer that can carry "type" + freeform fields. No auth, no framing
+beyond the newline, no schema versioning -- see CLAUDE.md's Phase 3 section
+for why (trusted small co-op deployment, transport-layer scope only).
+
+Client -> server: "join" (name), "input" (one player's InputState, plus any
+one-shot actions buffered since the last send, plus a "seq" -- Phase 4's
+client-side prediction sequence number, echoed back per-player in "snapshot"
+as "last_input_seq" so the client knows which of its own predicted inputs are
+now confirmed), "pvp_toggle" (F4 -- must be server-authoritative since it
+gates real damage), "chat" (a "text" string -- plain chat if it doesn't start
+with "/", a command otherwise; see GameServer._dispatch_command for the
+host-only gating on privileged commands like level/kick/stop).
+
+Server -> client: "welcome" (assigned player_id + which room/donjon to load
+locally), "snapshot" (every tick -- see build_snapshot), "leave" (a session
+disconnected), "server_full" (Phase 5 -- sent instead of "welcome" and the
+connection closed right after, when --max-players is already reached),
+"chat" (broadcast to every client for an ordinary message, or sent to just
+the requester alone -- "system": true -- for a command's reply/rejection)."""
+
+from __future__ import annotations
+
+import json
+
+from core.engine.input import InputState
+
+MSG_JOIN = "join"
+MSG_INPUT = "input"
+MSG_PVP_TOGGLE = "pvp_toggle"
+MSG_CHAT = "chat"
+
+MSG_WELCOME = "welcome"
+MSG_SNAPSHOT = "snapshot"
+MSG_LEAVE = "leave"
+MSG_SERVER_FULL = "server_full"
+
+_KNOWN_MESSAGE_TYPES = (MSG_JOIN, MSG_INPUT, MSG_PVP_TOGGLE, MSG_CHAT)
+
+# Phase 5 hardening: a client's raw axis input is never meant to exceed ~1.4
+# (two keys held at once, unnormalized -- see read_local_keyboard_input).
+# This is a generous sanity bound, not a gameplay constraint -- it exists to
+# reject obviously-bogus values, not to second-guess legitimate input.
+MAX_INPUT_AXIS_MAGNITUDE = 10.0
+
+# A chat line (plain message or a "/command") is capped generously above
+# any reasonable typed message -- just enough to reject an obviously-bogus
+# payload, not a real UX constraint (ChatOverlay's own input box enforces a
+# tighter, user-visible cap well below this).
+MAX_CHAT_TEXT_LENGTH = 256
+
+
+def encode(msg_type: str, **fields) -> bytes:
+    """One JSON object + newline, ready to write to a socket file."""
+    return encode_dict({"type": msg_type, **fields})
+
+
+def encode_dict(payload: dict) -> bytes:
+    """Same framing as encode(), for a dict already carrying its own "type"
+    key (build_snapshot's return value) -- avoids stripping it back out just
+    to hand it to encode(msg_type, **fields) instead."""
+    return (json.dumps(payload) + "\n").encode("utf-8")
+
+
+def decode(line) -> dict:
+    """Parses one previously-encode()'d line (str or bytes -- sockets in
+    this codebase are read in binary mode) back into its dict -- callers
+    switch on payload["type"]."""
+    if isinstance(line, bytes):
+        line = line.decode("utf-8")
+    return json.loads(line)
+
+
+def validate_message(payload) -> None:
+    """Phase 5 hardening: raises ValueError/TypeError if `payload` isn't a
+    well-formed message this protocol understands. Called by the server's
+    per-connection reader thread on every decoded line (GameServer._handle_
+    connection), *before* it's ever queued for the shared tick thread -- so a
+    client can't crash or feed garbage into the simulation just by sending
+    a syntactically-valid-JSON-but-nonsensical payload. Deliberately doesn't
+    check `requested_actions` entries against Explorator.ONE_SHOT_ACTIONS --
+    that would need importing from core.exploration.explorator, which
+    already imports this module (circular), and Player.play_action already
+    silently ignores an unrecognized action id -- only the wire shape (a
+    list of strings) is this layer's concern."""
+    if not isinstance(payload, dict):
+        raise TypeError(f"message is not a JSON object: {payload!r}")
+
+    msg_type = payload.get("type")
+    if msg_type not in _KNOWN_MESSAGE_TYPES:
+        raise ValueError(f"unknown message type: {msg_type!r}")
+
+    if msg_type == MSG_INPUT:
+        for key in ("move_x", "move_y"):
+            value = payload.get(key, 0.0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{key} must be a number, got {value!r}")
+            if abs(value) > MAX_INPUT_AXIS_MAGNITUDE:
+                raise ValueError(f"{key} out of range: {value!r}")
+
+    if msg_type == MSG_CHAT:
+        text = payload.get("text")
+        if not isinstance(text, str):
+            raise TypeError(f"text must be a string, got {text!r}")
+        if not text.strip():
+            raise ValueError("text must not be empty")
+        if len(text) > MAX_CHAT_TEXT_LENGTH:
+            raise ValueError(f"text too long ({len(text)} > {MAX_CHAT_TEXT_LENGTH})")
+
+        actions = payload.get("requested_actions", [])
+        if not isinstance(actions, list) or not all(isinstance(a, str) for a in actions):
+            raise TypeError(f"requested_actions must be a list of strings, got {actions!r}")
+
+        seq = payload.get("seq")
+        if seq is not None and (isinstance(seq, bool) or not isinstance(seq, int)):
+            raise TypeError(f"seq must be an int, got {seq!r}")
+
+
+def input_state_to_fields(input_state: InputState) -> dict:
+    return {
+        "move_x": input_state.move_direction.x,
+        "move_y": input_state.move_direction.y,
+        "running": input_state.running,
+        "requested_actions": list(input_state.requested_actions),
+    }
+
+
+def input_state_from_fields(fields: dict) -> InputState:
+    import pygame
+
+    return InputState(
+        move_direction=pygame.Vector2(fields.get("move_x", 0.0), fields.get("move_y", 0.0)),
+        running=bool(fields.get("running", False)),
+        requested_actions=tuple(fields.get("requested_actions", ())),
+    )
+
+
+def _iter_dungeons(explorator):
+    """(room_ref, dungeon) for every room a full-state snapshot needs to
+    cover -- None (single-room mode) or every room in the assembly (not just
+    the active floor: Explorator.render already draws floors below/above
+    tinted, so their live entity/object state matters too, see
+    DungeonAssembly.render). Simplest-correct choice for a small dungeon --
+    see CLAUDE.md's flagged Phase 3 simplifications."""
+    if explorator.assembly is not None:
+        for room in explorator.assembly.rooms:
+            yield room.index, room.dungeon
+    else:
+        yield None, explorator.dungeon
+
+
+def build_snapshot(explorator, tick: int, terrain_versions: dict) -> dict:
+    """Full authoritative world state for one server tick. `terrain_versions`
+    is the server's own {room_ref: last_sent_version} bookkeeping -- mutated
+    in place; a room whose Dungeon.terrain_version has advanced since the
+    last call gets its raw grids included this tick (destroy_area is rare,
+    so this stays cheap in practice) so a client can just assign them
+    locally instead of replaying the destruction algorithm."""
+    players = []
+    for session in explorator.players.values():
+        player = session.player
+        players.append({
+            "id": session.player_id,
+            "x": player.position.x, "y": player.position.y,
+            "direction": player.direction,
+            "animation": player.animation,
+            "action": player.action,
+            "frame": player.frame,
+            "health": player.health,
+            "last_input_seq": session.last_input_seq,
+            "xp": session.profile.xp if session.profile is not None else 0,
+            # PlacedRoom.index (same room-identity convention as terrain's
+            # own "room" field below), or None in single-room mode -- lets
+            # a client learn which room/floor this player is ACTUALLY in
+            # server-side, since room/floor crossings are never predicted
+            # client-side (see Explorator._resolve_movement_step's
+            # predicting=True branch) and so can't be derived locally.
+            "room": session.current_placed_room.index if session.current_placed_room is not None else None,
+        })
+
+    animals, enemies, pickups, objects, dynamites, explosions, terrain = [], [], [], [], [], [], []
+
+    for room_ref, dungeon in _iter_dungeons(explorator):
+        for animal in dungeon.animal_manager.animals:
+            animals.append({
+                "id": id(animal), "room": room_ref, "animal_type": animal.animal_type,
+                "x": animal.position.x, "y": animal.position.y, "state": animal.state,
+                "dir_x": animal.direction.x, "dir_y": animal.direction.y,
+                "flip": animal.flip, "frame": animal.frame, "health": animal.health,
+            })
+
+        for enemy in dungeon.enemy_manager.enemies:
+            enemies.append({
+                "id": id(enemy), "room": room_ref, "enemy_type": enemy.enemy_type,
+                "x": enemy.position.x, "y": enemy.position.y, "state": enemy.state,
+                "dir_x": enemy.direction.x, "dir_y": enemy.direction.y,
+                "flip": enemy.flip, "frame": enemy.frame,
+                "health": enemy.health, "alive": enemy.alive,
+            })
+
+        for pickup in dungeon.pickup_manager.pickups:
+            pickups.append({
+                "id": id(pickup), "room": room_ref, "kind": "currency",
+                "currency_type": pickup.currency_type,
+                "x": pickup.position.x, "y": pickup.position.y,
+                "state": pickup.state, "frame": pickup.frame,
+            })
+        for item_pickup in dungeon.pickup_manager.item_pickups:
+            pickups.append({
+                "id": id(item_pickup), "room": room_ref, "kind": "item",
+                "item_id": item_pickup.item.item_id, "slot": item_pickup.slot,
+                "x": item_pickup.position.x, "y": item_pickup.position.y,
+            })
+
+        for index, obj in enumerate(dungeon.object_manager.objects):
+            objects.append({
+                "room": room_ref, "index": index,
+                "activated": obj.get("activated", False),
+                "open": obj.get("open", False),
+                "frame": obj.get("frame", 0),
+            })
+
+        for dynamite in dungeon.projectile_manager.dynamites:
+            dynamites.append({
+                "id": id(dynamite), "room": room_ref,
+                "x": dynamite.position.x, "y": dynamite.position.y, "frame": dynamite.frame,
+            })
+        for explosion in dungeon.projectile_manager.explosions:
+            explosions.append({
+                "id": id(explosion), "room": room_ref,
+                "x": explosion.position.x, "y": explosion.position.y, "frame": explosion.frame,
+            })
+
+        if terrain_versions.get(room_ref) != dungeon.terrain_version:
+            terrain_versions[room_ref] = dungeon.terrain_version
+            terrain.append({
+                "room": room_ref,
+                "logical_grid": dungeon.logical_grid,
+                "sprite_grid": dungeon.sprite_grid,
+            })
+
+    return {
+        "type": MSG_SNAPSHOT, "tick": tick,
+        "pvp_enabled": explorator.pvp_enabled, "victory": explorator.victory,
+        "game_over": explorator.game_manager.state.name != "EXPLORATION",
+        # Dungeon-entry sync barrier (Explorator._check_dungeon_entrance) --
+        # player_ids currently frozen, waiting for the rest of the party to
+        # also cross home's dungeon_entrance. A client never runs the
+        # barrier logic itself (only the server/solo-local Explorator does,
+        # inside update()), so this is how it learns to show a "waiting for
+        # players" indicator at all -- same reasoning "victory"/
+        # "pvp_enabled" are here instead of being simulated client-side.
+        "dungeon_entrance_ready": sorted(explorator.dungeon_entrance_ready),
+        # None in single-room mode, else the assets/donjons/<name>.json this
+        # world is currently the assembly from -- lets a client (including
+        # the host's own loopback client) notice a freshly generated
+        # dungeon it was never told about at connect time (see
+        # Explorator._maybe_complete_dungeon_entrance_barrier/
+        # apply_network_snapshot) and load that exact same saved file
+        # itself instead of staying stuck on whatever it had loaded before.
+        "donjon_name": explorator.current_donjon_name,
+        "players": players, "animals": animals, "enemies": enemies,
+        "pickups": pickups, "objects": objects,
+        "dynamites": dynamites, "explosions": explosions,
+        "terrain": terrain,
+    }

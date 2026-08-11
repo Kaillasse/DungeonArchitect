@@ -1,4 +1,8 @@
-"""Contient toute la logique du game state Menu (ecran titre)."""
+"""Contient toute la logique du game state Menu (ecran titre). Lives in
+core/ui/ alongside widgets.py rather than core/exploration/ or
+core/editor/ -- unlike Creator/Explorator it owns no world/simulation state
+of its own, it's a title screen built almost entirely out of this package's
+own BorderManager/RoomBrowser/BorderPicker widgets."""
 
 from __future__ import annotations
 
@@ -7,7 +11,8 @@ import pygame
 from core.engine.gamestate import GameState
 from core.data.ressources import list_rooms, list_donjons, next_new_room_name
 from core.data.settings import ACTIONS, ACTION_KINDS
-from core.ui import BorderManager, BorderPicker, RoomBrowser
+from core.ui.widgets import BorderManager, BorderPicker, RoomBrowser
+from core.world.home import ensure_home_room
 
 
 class Menu:
@@ -33,6 +38,7 @@ class Menu:
     DISPLAY_PRESETS = ((1280, 720), (1600, 900), (1920, 1080))
 
     NEW_ROOM_LABEL = "+ Nouvelle salle"
+    NAME_MAX_LENGTH = 20
 
     OPTION_WIDTH = 320
     OPTION_HEIGHT = 50
@@ -50,6 +56,12 @@ class Menu:
 
         self.mode = "main"
         self.selected = 0
+
+        # Forced first mode whenever no local profile identity exists yet
+        # (see core.data.settings.Settings.local_player_name) -- checked at
+        # the top of run() rather than here, since __init__ can run before
+        # settings are fully loaded in some call sites.
+        self._name_input = ""
 
         self.room_target_state = None
         x = self.screen.get_width() / 2 - self.OPTION_WIDTH / 2
@@ -85,6 +97,36 @@ class Menu:
     def _room_back_rect(self):
         confirm = self._room_confirm_rect()
         return pygame.Rect(confirm.x, confirm.y + confirm.height + 12, confirm.width, 44)
+
+    # -- "name_entry" mode: a text field row, a "Valider" row underneath --
+    # same "reuse _option_rect's bounding box" trick as the room-picker rows.
+    def _name_field_rect(self):
+        return self._option_rect(0)
+
+    def _name_confirm_rect(self):
+        return self._option_rect(1)
+
+    def _confirm_name(self):
+        """Returns True if a non-empty name was accepted (and the menu loop
+        should stop showing this mode)."""
+        name = self._name_input.strip()
+        if not name:
+            return False
+        self.game_manager.settings.set_local_player_name(name)
+        self.game_manager.boot_into_home = False  # consumed -- redirecting right now instead
+        self._redirect_to_home()
+        return True
+
+    def _redirect_to_home(self):
+        """Skips the main list entirely and sends game_manager straight
+        into the player's home room, in Creator (a brand-new home has no
+        floor/spawn yet -- matches the original pitch's "demarre sur le
+        creator stade"). Camera zoom is left alone: both Creator's and
+        Explorator's cameras already start at zoom=1.0, safely inside
+        core.world.home's Creator band, so no explicit seed is needed."""
+        name = ensure_home_room(self.game_manager.settings.local_player_name)
+        self.game_manager.pending_room = name
+        self.game_manager.state = GameState.CREATOR
 
     # -- "Touches" sub-screen: one compact row per action, plus a back row.
     # Deliberately smaller/tighter than _option_rect's rows -- 8 actions + a
@@ -201,6 +243,14 @@ class Menu:
 
         pygame.display.set_caption("DungeonArchitect - Menu")
 
+        if not self.game_manager.settings.local_player_name:
+            self.mode = "name_entry"
+            self._name_input = ""
+        elif self.game_manager.boot_into_home:
+            self.game_manager.boot_into_home = False
+            self._redirect_to_home()
+            return
+
         running = True
 
         while running:
@@ -226,7 +276,12 @@ class Menu:
                         self.awaiting_action = None
 
                     elif event.key == pygame.K_ESCAPE:
-                        if self.mode in ("settings_keys", "settings_display", "settings_border", "settings_volume"):
+                        if self.mode == "name_entry":
+                            # No "back" to fall to without a name -- quitting
+                            # is the only escape hatch, same as ESC from "main".
+                            self.game_manager.running = False
+                            running = False
+                        elif self.mode in ("settings_keys", "settings_display", "settings_border", "settings_volume"):
                             self.mode = "settings"
                         elif self.mode != "main":
                             self.mode = "main"
@@ -234,6 +289,16 @@ class Menu:
                         else:
                             self.game_manager.running = False
                             running = False
+
+                    elif self.mode == "name_entry":
+                        if event.key == pygame.K_RETURN:
+                            if self._confirm_name():
+                                running = False
+                        elif event.key == pygame.K_BACKSPACE:
+                            self._name_input = self._name_input[:-1]
+                        elif event.unicode and event.unicode.isprintable():
+                            if len(self._name_input) < self.NAME_MAX_LENGTH:
+                                self._name_input += event.unicode
 
                     elif self.mode in ("main", "settings"):
 
@@ -264,6 +329,12 @@ class Menu:
                                 self.awaiting_action, {"kind": "mouse", "button": event.button}
                             )
                             self.awaiting_action = None
+
+                    elif self.mode == "name_entry":
+
+                        if self._name_confirm_rect().collidepoint(event.pos):
+                            if self._confirm_name():
+                                running = False
 
                     elif self.mode in ("main", "settings"):
 
@@ -356,6 +427,7 @@ class Menu:
         self.screen.fill((20, 20, 30))
 
         TITLES = {
+            "name_entry": "Quel est ton nom ?",
             "rooms": "Choisir une salle",
             "settings": "Parametres",
             "settings_keys": "Touches",
@@ -371,7 +443,18 @@ class Menu:
             (self.screen.get_width() / 2 - title.get_width() / 2, 140),
         )
 
-        if self.mode == "rooms":
+        if self.mode == "name_entry":
+
+            field_rect = self._name_field_rect()
+            cursor = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
+            field_text = (self._name_input or "") + cursor
+            self.border.draw_centered_label(self.screen, field_rect, self.option_font, field_text)
+
+            confirm_rect = self._name_confirm_rect()
+            enabled = bool(self._name_input.strip())
+            self.border.draw_enabled_label(self.screen, confirm_rect, self.option_font, "Valider", enabled)
+
+        elif self.mode == "rooms":
 
             self.room_browser.render(self.screen)
 

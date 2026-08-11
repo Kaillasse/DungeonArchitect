@@ -4,11 +4,11 @@ import os
 
 import pygame
 from core.editor.creator import Creator
-from core.explorator import Explorator
-from core.menu import Menu
+from core.exploration.explorator import Explorator
+from core.ui.menu import Menu
 from core.engine.gamestate import GameState
 from core.data.settings import Settings
-from core.ui import BorderManager
+from core.ui.widgets import BorderManager
 
 class GameManager:
     def __init__(self, screen, settings=None):
@@ -21,6 +21,39 @@ class GameManager:
         self.state = GameState.CREATOR if headless else GameState.MENU
         self.running = True
         self.pending_room = None
+        # Zoom value to seed the destination state's camera with right
+        # after applying pending_room -- set by the home-room zoom-switch
+        # (Creator/Explorator) and by Menu's boot-into-home redirect, so
+        # the new state opens already on the correct side of its own
+        # threshold instead of its camera's own stale/default zoom (see
+        # core.world.home).
+        self.pending_zoom_carry = None
+        # (world_x, world_y) to center the destination camera on, right
+        # after applying pending_zoom_carry -- set by Explorator's
+        # zoom-switch back to Creator (see core.world.home) so Creator
+        # opens centered on where the player actually was, instead of
+        # Creator's own camera keeping whatever stale pan position it was
+        # left at last time it was open (the "camera bouge" jump the user
+        # reported). Exploration never needs the equivalent: its own
+        # per-frame camera-follow already recenters on the player the very
+        # first frame regardless of carried position.
+        self.pending_camera_center = None
+        # One-shot: True until the first time Menu.run() actually executes
+        # with a known player name, at which point it redirects straight
+        # into home instead of showing the main list (see
+        # Menu._redirect_to_home). Irrelevant in headless mode -- Menu is
+        # never reached there.
+        self.boot_into_home = True
+        # Set by Explorator.start_hosting/join_session (via the home-only
+        # MultiplayerPanelUI, M key) once a connection is live -- makes
+        # run()'s EXPLORATION dispatch below route into run_networked
+        # instead of the normal solo run(). _game_server/_host_announcer
+        # are host-side only (None when just joined, not hosting), kept
+        # here so Explorator.stop_networking can tear both down without
+        # GameManager needing to know anything about how they work.
+        self.network_client = None
+        self._game_server = None
+        self._host_announcer = None
         self.clock = pygame.time.Clock()
         self.menu = Menu(self)
         self.creator = Creator(self)
@@ -61,6 +94,13 @@ class GameManager:
                 if self.pending_room is not None:
                     self.creator.open_room(self.pending_room)
                     self.pending_room = None
+                    if self.pending_zoom_carry is not None:
+                        self.creator.camera.zoom = self.pending_zoom_carry
+                        self.pending_zoom_carry = None
+                    if self.pending_camera_center is not None:
+                        cx, cy = self.pending_camera_center
+                        self.creator.camera.center_on(cx, cy, self.screen.get_width(), self.screen.get_height())
+                        self.pending_camera_center = None
                 self.creator.run()
 
             elif self.state == GameState.EXPLORATION:
@@ -71,4 +111,10 @@ class GameManager:
                     else:
                         self.explorator.open_room(name)
                     self.pending_room = None
-                self.explorator.run()
+                    if self.pending_zoom_carry is not None:
+                        self.explorator.camera.zoom = self.pending_zoom_carry
+                        self.pending_zoom_carry = None
+                if self.network_client is not None:
+                    self.explorator.run_networked(self.network_client)
+                else:
+                    self.explorator.run()

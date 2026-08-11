@@ -3,7 +3,10 @@ from core.world.entities import AnimalManager, EnemyManager, PickupManager, Proj
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
 from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
-from core.editor.autotile import EMPTY, FLOOR, WALL, build_walls_around, unbuild_walls_around, erase_at, resolve_sprite_grid
+from core.editor.autotile import (
+    EMPTY, FLOOR, WALL, build_walls_around, unbuild_walls_around, erase_at,
+    resolve_sprite_grid, resolve_sprite_grid_region,
+)
 
 
 DEFAULT_GRID_SAVE_PATH = "room_001"
@@ -42,11 +45,21 @@ class Dungeon:
         self.logical_grid = [[EMPTY for _ in range(width)] for _ in range(height)]
         self.sprite_grid = [[-1 for _ in range(width)] for _ in range(height)]
 
-        # Only ever toggled in Creator (see core.editor.ui.ToolPaletteUI) --
-        # Explorator never paints, so this is moot on its own dungeons. When
-        # False, painting/erasing touch only the clicked cell, no automatic
-        # wall halo -- a prerequisite for a destructible world, where a wall
-        # broken at runtime must never get "healed" by a later rebuild.
+        # Bumped by anything that mutates logical_grid's actual cell values
+        # -- paint_cell (Creator painting/erasing) and destroy_area
+        # (exploration-time destruction) -- lets a cache keyed on it (see
+        # DungeonAssembly._border_cells_by_room, WorldRenderer's own ledge
+        # cache) know when previously-computed terrain-derived data has gone
+        # stale, without needing to be told explicitly by every caller.
+        self.terrain_version = 0
+
+        # Only ever toggled in Creator (see core.editor.ui.ToolPaletteUI --
+        # derived there as floor_tool_active and wall_tool_active, True only
+        # when both the Sol and Mur buttons are active) -- Explorator never
+        # paints, so this is moot on its own dungeons. When False, painting/
+        # erasing touch only the clicked cell, no automatic wall halo -- a
+        # prerequisite for a destructible world, where a wall broken at
+        # runtime must never get "healed" by a later rebuild.
         self.autotile_enabled = True
 
         self.object_manager = ObjectManager(self)
@@ -68,13 +81,25 @@ class Dungeon:
         being re-derived from its floor cells every time a room opens."""
         self.sprite_grid = resolve_sprite_grid(self.logical_grid)
 
-    def paint_cell(self, grid_x: int, grid_y: int, erase: bool = False) -> None:
+    def paint_cell(self, grid_x: int, grid_y: int, erase: bool = False, cell_type: int = FLOOR, wall_gate=None) -> None:
         """Autotile (when enabled) is purely incremental -- only the clicked
         cell's own immediate neighborhood is ever touched (build_walls_around/
         unbuild_walls_around), never a full-grid rescan. That full rescan
         (the old build_walls()) is exactly what made re-enabling autotile
         after painting a lot of floor with it off wall everything at once on
-        the very next click, instead of just that one cell."""
+        the very next click, instead of just that one cell.
+
+        cell_type only ever matters in the non-autotile paint branch --
+        autotile ON always paints FLOOR (a WALL only ever appears there as
+        build_walls_around's own side effect). It's what lets Creator's
+        Sol/Mur tools (core.editor.ui.ToolPaletteUI) paint a raw WALL cell
+        directly when only "Mur" is active, something no caller could do
+        before this parameter existed.
+
+        wall_gate is forwarded as-is to build_walls_around's own `gate`
+        (autotile ON only) -- lets a caller meter/limit each individual
+        halo cell (e.g. Creator gating on card stock for a partial fill)
+        without this method or build_walls_around needing to know why."""
         if not (0 <= grid_x < self.width and 0 <= grid_y < self.height):
             return
 
@@ -89,19 +114,28 @@ class Dungeon:
             else:
                 self.logical_grid[grid_y][grid_x] = EMPTY
         else:
-            self.logical_grid[grid_y][grid_x] = FLOOR
             if self.autotile_enabled:
-                build_walls_around(self.logical_grid, grid_x, grid_y)
+                self.logical_grid[grid_y][grid_x] = FLOOR
+                build_walls_around(self.logical_grid, grid_x, grid_y, gate=wall_gate)
+            else:
+                self.logical_grid[grid_y][grid_x] = cell_type
 
-        self.sprite_grid = resolve_sprite_grid(self.logical_grid)
+        # Bounded to the clicked cell's own neighborhood (see
+        # resolve_sprite_grid_region/LOCAL_EDIT_SPRITE_RADIUS) instead of a
+        # full-grid rescan -- this runs on every cell of a click-drag paint
+        # stroke, potentially dozens of times a second, while a sprite only
+        # ever depends on its own 4 cardinal neighbors regardless of how big
+        # the room is.
+        resolve_sprite_grid_region(self.logical_grid, self.sprite_grid, grid_x, grid_y)
         self.object_manager.prune_invalid()
+        self.terrain_version += 1
 
-    def update(self, dt: float, player=None, player_hitbox=None) -> None:
+    def update(self, dt: float, player_refs=()) -> None:
         self.object_manager.update(dt)
-        self.animal_manager.update(dt, player_hitbox=player_hitbox)
-        self.enemy_manager.update(dt, player=player, player_hitbox=player_hitbox)
+        self.animal_manager.update(dt, player_refs=player_refs)
+        self.enemy_manager.update(dt, player_refs=player_refs)
         self.pickup_manager.update(dt)
-        self.projectile_manager.update(dt, player=player, player_hitbox=player_hitbox)
+        self.projectile_manager.update(dt, player_refs=player_refs)
 
     def destroy_area(self, center_x: int, center_y: int, radius_tiles: int) -> None:
         """Carves a circular hole into the terrain -- both FLOOR and WALL
@@ -120,8 +154,14 @@ class Dungeon:
                 if 0 <= x < self.width and 0 <= y < self.height:
                     self.logical_grid[y][x] = EMPTY
 
-        self.sprite_grid = resolve_sprite_grid(self.logical_grid)
+        # Same bounded-region update as paint_cell -- the carved circle
+        # itself is exactly radius_tiles, +1 more for the cardinal-neighbor
+        # sprite dependency (see resolve_sprite_grid_region).
+        resolve_sprite_grid_region(
+            self.logical_grid, self.sprite_grid, center_x, center_y, radius=radius_tiles + 1
+        )
         self.object_manager.prune_invalid()
+        self.terrain_version += 1
 
     def spawn_animals(self) -> None:
         """(Re)build the live wandering Animal entities for this room's placed
@@ -185,12 +225,24 @@ class Dungeon:
 
         return True
 
+    def is_void_at(self, grid_x, grid_y) -> bool:
+        """True if (grid_x, grid_y) is out of this dungeon's own bounds or an
+        EMPTY logical cell -- e.g. a hole carved by destroy_area, or simply
+        past the room's edge. Shared by every live entity manager's own
+        void-culling (AnimalManager/EnemyManager/PickupManager.update) and
+        by Explorator._is_void_at's single-room branch, which used to
+        duplicate this exact check locally."""
+        if not (0 <= grid_x < self.width and 0 <= grid_y < self.height):
+            return True
+        return self.logical_grid[grid_y][grid_x] == EMPTY
+
     # ------------------------------------------------------------------
     # Rendu
     # ------------------------------------------------------------------
 
     def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
-               skip_foreground_objects=False, skip_animals=False, skip_enemies=False, show_grid=True):
+               skip_foreground_objects=False, skip_animals=False, skip_enemies=False, show_grid=True,
+               hide_border_cells=None):
         self.renderer.render(
             screen, self, camera,
             spawn_preview=spawn_preview,
@@ -198,6 +250,7 @@ class Dungeon:
             show_link_indicators=show_link_indicators,
             skip_foreground_objects=skip_foreground_objects,
             show_grid=show_grid,
+            hide_border_cells=hide_border_cells,
         )
         if not skip_animals:
             self.animal_manager.draw(screen, camera)

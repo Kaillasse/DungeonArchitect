@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "name": "thib",
+  "xp": 1200,
+  "generator_room_names": [
+    "room_001",
+    "room_002",
+    "room_003",
+    "room_004",
+    "room_005"
+  ],
+  "generator_room_count": 4,
+  "panel_layout": {
+    "tools": {
+      "x": 10,
+      "y": 40,
+      "collapsed": true
+    },
+    "object_palette": {
+      "x": 1013,
+      "y": 64,
+      "collapsed": false
+    },
+    "room": {
+      "x": 920,
+      "y": 254,
+      "collapsed": true
+    },
+    "generator": {
+      "x": 20,
+      "y": 205,
+      "collapsed": false
+    },
+    "card": {
+      "x": 846,
+      "y": 316,
+      "collapsed": false
+    }
+  },
+  "card_collection": {
+    "tile_floor": 20,
+    "tile_wall": 0,
+    "vase": 1
+  }
+}
