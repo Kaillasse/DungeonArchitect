@@ -45,7 +45,7 @@ import pygame
 from core.engine.gamestate import GameState
 from core.exploration.explorator import Explorator
 from core.data import progression
-from core.data.profile_manager import ProfileManager
+from core.data.profile_manager import apply_to_fresh_profile
 from core.network import protocol
 
 
@@ -268,14 +268,7 @@ class GameServer:
             new_level = int(value_str)
         new_level = max(1, min(progression.MAX_LEVEL, new_level))
 
-        # Same fix as Explorator._grant_xp: session.profile is loaded once
-        # (add_network_session, at connect time) and never refreshed --
-        # saving it as-is would clobber any other field another writer
-        # touched since (chiefly card_collection). Reload fresh first.
-        fresh = ProfileManager().load(session.profile.name)
-        fresh.xp = progression.xp_for_level(new_level)
-        ProfileManager().save(fresh)
-        session.profile = fresh
+        apply_to_fresh_profile(session, lambda profile: setattr(profile, "xp", progression.xp_for_level(new_level)))
         return f"player {player_id} ({session.profile.name}) level {current_level} -> {new_level}"
 
     def _cmd_kick(self, player_id_str, reason):

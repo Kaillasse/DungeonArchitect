@@ -39,6 +39,10 @@ def build_arg_parser():
         "--give-all-cards", action="store_true",
         help="Ajoute des exemplaires de CHAQUE carte connue au profil local (test de toute la collection), sans lancer le jeu.",
     )
+    parser.add_argument(
+        "--admingod", action="store_true",
+        help="Donne au profil local une collection complete et illimitee (le stock affiche ne baisse jamais en jeu), sans lancer le jeu.",
+    )
     parser.add_argument("--count", type=int, default=1, help="Nombre d'exemplaires a donner par carte (defaut 1).")
     parser.add_argument(
         "--player", default=None,
@@ -95,8 +99,40 @@ def _apply_give_all_cards(args):
     print(f"{player} a recu {args.count}x chacune des {len(card_ids)} cartes connues.")
 
 
+def _apply_admingod(args):
+    """Same shape as _apply_give_all_cards, plus a persisted Profile.admingod
+    flag that Creator's card-consumption gates and CardPanelUI's own
+    display check to bypass card_collection entirely (see
+    core.data.profile_manager.ADMINGOD_STOCK's own comment) -- the seeded
+    count here is mostly cosmetic (so a fresh save already reads as
+    "basically infinite" instead of 0 before the profile is ever touched
+    in-game), the actual never-runs-out guarantee comes from that bypass,
+    not from the number being large."""
+    from core.data.cards import CardManager
+    from core.data.profile_manager import ProfileManager, ADMINGOD_STOCK
+
+    player = args.player or load_settings().local_player_name
+    if not player:
+        print("Aucun joueur local configure -- passe --player <nom>.")
+        return
+
+    manager = ProfileManager()
+    profile = manager.load(player)
+    card_manager = CardManager()
+    card_ids = card_manager.list_known_card_ids()
+    for card_id in card_ids:
+        profile.card_collection[card_id] = ADMINGOD_STOCK
+    profile.admingod = True
+    manager.save(profile)
+    print(f"{player} est desormais en admingod : {len(card_ids)} cartes, stock illimite.")
+
+
 def main():
     args = build_arg_parser().parse_args()
+
+    if args.admingod:
+        _apply_admingod(args)
+        return
 
     if args.give_all_cards:
         _apply_give_all_cards(args)

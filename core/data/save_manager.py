@@ -17,6 +17,8 @@ class SaveManager:
             "height": dungeon.height,
             "objects": dungeon.object_manager.objects,
             "cells": dungeon.logical_grid,
+            "floor_theme": dungeon.floor_theme,
+            "wall_theme": dungeon.wall_theme,
         }
 
     def save(self, dungeon, room_name: str = "room_001") -> Path:
@@ -47,6 +49,11 @@ class SaveManager:
         dungeon.logical_grid = [
             list(row) for row in payload.get("cells", dungeon.logical_grid)
         ]
+        # Additive (absent on any save from before this existed) -- None
+        # means exactly today's interior-only behavior, see Dungeon's own
+        # floor_theme/wall_theme docstring.
+        dungeon.floor_theme = payload.get("floor_theme")
+        dungeon.wall_theme = payload.get("wall_theme")
         # Not rebuild() -- a load trusts the saved `cells` as-is (walls
         # included) rather than re-deriving them from floor cells, so a
         # runtime-destroyed wall (or a room hand-edited with autotile off)

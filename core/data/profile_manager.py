@@ -18,6 +18,12 @@ PROFILES_DIRECTORY.mkdir(parents=True, exist_ok=True)
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
 _MAX_NAME_LENGTH = 32
 
+# Display/pin value used everywhere a Profile.admingod=True bypass shows a
+# stock number instead of a real one (main.py's --admingod, Creator's card-
+# consumption gates, CardPanelUI's collection display) -- one shared
+# constant so "what does admingod's stock read as" only has one answer.
+ADMINGOD_STOCK = 999999
+
 
 def _sanitize_name(name) -> str:
     """Restricts a profile name to [A-Za-z0-9_-], capped in length, falling
@@ -31,9 +37,16 @@ def _sanitize_name(name) -> str:
 
 class Profile:
     def __init__(self, name: str, xp: int = 0, generator_room_names=None, generator_room_count: int = 3,
-                 panel_layout=None, card_collection=None):
+                 panel_layout=None, card_collection=None, admingod: bool = False):
         self.name = name
         self.xp = xp
+        # Set only via `python main.py --admingod` (see main.py) -- never
+        # from in-game UI. Creator._consume_card/_refund_card/_try_place_object
+        # short-circuit on this instead of touching card_collection at all,
+        # so the seeded count (see main.py's _apply_admingod) never actually
+        # moves -- easier to test new cards/behaviors without stock running
+        # out mid-session.
+        self.admingod = bool(admingod)
         # Creator's GeneratorPanelUI room-pool selection + room-count
         # stepper, persisted here so a dungeon_entrance crossing (see
         # Explorator._check_dungeon_entrance) has generation parameters to
@@ -104,6 +117,7 @@ class ProfileManager:
             generator_room_count=int(payload.get("generator_room_count", 3)),
             panel_layout=payload.get("panel_layout"),
             card_collection=payload.get("card_collection"),
+            admingod=payload.get("admingod", False),
         )
 
     def save(self, profile: Profile) -> Path:
@@ -119,7 +133,31 @@ class ProfileManager:
                     "generator_room_count": profile.generator_room_count,
                     "panel_layout": profile.panel_layout,
                     "card_collection": profile.card_collection,
+                    "admingod": profile.admingod,
                 },
                 handle, indent=2, ensure_ascii=False,
             )
         return path
+
+
+def apply_to_fresh_profile(session, mutate) -> Profile | None:
+    """Reloads `session.profile` fresh from disk, applies `mutate(profile)`
+    to it in place, saves, and updates `session.profile` to the fresh+
+    mutated instance -- returns None (no-op) if the session has no profile
+    at all. Centralizes a pattern two independent call sites used to
+    duplicate verbatim (core.exploration.explorator.Explorator._grant_xp,
+    core.network.server.GameServer._cmd_level): session.profile is loaded
+    exactly once, at session creation, and never refreshed afterwards, so
+    saving it as-is would silently clobber any field another long-lived
+    writer touched since (chiefly Creator's card_collection consumption/
+    refunds, see Creator._active_profile -- the original bug this reload-
+    first pattern exists to avoid: erasing/placing a card in Creator, then
+    earning any XP in Exploration during the same run, used to revert the
+    card_collection change on disk the moment the naive save landed)."""
+    if session.profile is None:
+        return None
+    fresh = ProfileManager().load(session.profile.name)
+    mutate(fresh)
+    ProfileManager().save(fresh)
+    session.profile = fresh
+    return fresh

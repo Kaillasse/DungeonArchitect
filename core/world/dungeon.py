@@ -62,6 +62,17 @@ class Dungeon:
         # runtime must never get "healed" by a later rebuild.
         self.autotile_enabled = True
 
+        # Autotile pack names (core.data.ressources.save_autotile_pack) this
+        # room paints FLOOR/WALL cells with instead of the built-in interior
+        # tileset -- None (the default for every room, forever, unless
+        # explicitly set by Creator's right-click theme picker, see
+        # core.editor.ui.AutotileThemePanelUI) means exactly today's
+        # behavior. Plain attributes, not constructor params -- assigned
+        # after the fact the same way autotile_enabled itself is toggled,
+        # not baked into __init__'s signature.
+        self.floor_theme = None
+        self.wall_theme = None
+
         self.object_manager = ObjectManager(self)
         self.animal_manager = AnimalManager(self)
         self.enemy_manager = EnemyManager(self)
@@ -78,8 +89,12 @@ class Dungeon:
         """Recomputes sprite_grid from the current logical_grid without ever
         touching it (no wall regeneration) -- used after loading, so a save's
         already-correct `cells` (walls included) is trusted as-is instead of
-        being re-derived from its floor cells every time a room opens."""
-        self.sprite_grid = resolve_sprite_grid(self.logical_grid)
+        being re-derived from its floor cells every time a room opens.
+        Reads self.floor_theme/wall_theme -- also the method Creator calls
+        right after changing either (see AutotileThemePanelUI/the bitmap
+        editor) so an already-open room re-resolves against the new theme
+        immediately."""
+        self.sprite_grid = resolve_sprite_grid(self.logical_grid, self.floor_theme, self.wall_theme)
 
     def paint_cell(self, grid_x: int, grid_y: int, erase: bool = False, cell_type: int = FLOOR, wall_gate=None) -> None:
         """Autotile (when enabled) is purely incremental -- only the clicked
@@ -126,7 +141,10 @@ class Dungeon:
         # stroke, potentially dozens of times a second, while a sprite only
         # ever depends on its own 4 cardinal neighbors regardless of how big
         # the room is.
-        resolve_sprite_grid_region(self.logical_grid, self.sprite_grid, grid_x, grid_y)
+        resolve_sprite_grid_region(
+            self.logical_grid, self.sprite_grid, grid_x, grid_y,
+            floor_pack=self.floor_theme, wall_pack=self.wall_theme,
+        )
         self.object_manager.prune_invalid()
         self.terrain_version += 1
 
@@ -158,7 +176,8 @@ class Dungeon:
         # itself is exactly radius_tiles, +1 more for the cardinal-neighbor
         # sprite dependency (see resolve_sprite_grid_region).
         resolve_sprite_grid_region(
-            self.logical_grid, self.sprite_grid, center_x, center_y, radius=radius_tiles + 1
+            self.logical_grid, self.sprite_grid, center_x, center_y, radius=radius_tiles + 1,
+            floor_pack=self.floor_theme, wall_pack=self.wall_theme,
         )
         self.object_manager.prune_invalid()
         self.terrain_version += 1

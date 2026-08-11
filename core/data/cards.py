@@ -123,7 +123,11 @@ def default_card_for(card_id):
     if config is not None:
         card_type = "mob" if (config.get("animal") or config.get("enemy")) else "tile"
         images = [config["asset"]] + list(config.get("variants", {}).values())
-        name = card_id.replace("_", " ").title()
+        # A custom type registered via the sprite editor carries its own
+        # chosen display name (see object_manager.register_custom_type) --
+        # preferred over the auto-titlecased id every hand-authored
+        # OBJECT_TYPES entry still falls back to (none of those set "name").
+        name = config.get("name") or card_id.replace("_", " ").title()
         return Card(card_id, name, images, card_type)
 
     definition = ITEM_DEFINITIONS.get(card_id)

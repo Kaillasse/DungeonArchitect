@@ -1,7 +1,7 @@
 import pygame
 
-from core.data.ressources import TILE_SIZE, load_tileset, get_tile_surface
-from core.editor.autotile import EMPTY, DEFAULT_FLOOR_SPRITE
+from core.data.ressources import TILE_SIZE, load_tileset, get_tile_surface, load_autotile_pack, load_tileset_region
+from core.editor.autotile import EMPTY, WALL, DEFAULT_FLOOR_SPRITE, build_pack_lookup
 from core.world.object_manager import OBJECT_TYPES, load_object_frames
 
 
@@ -33,6 +33,7 @@ class WorldRenderer:
     def __init__(self):
         self.tileset = load_tileset()
         self._tile_cache = {}
+        self._pack_tile_cache = {}
         self._object_sprites = {}
         self._object_sprite_cache = {}
         # (doorway_cells, spawn_cells, pillars), cached against the
@@ -66,6 +67,50 @@ class WorldRenderer:
             self._tile_cache[cache_key] = pygame.transform.scale(tile_surface, (tile_px, tile_px))
         return self._tile_cache[cache_key]
 
+    def _get_pack_tile_surface(self, pack_name, tile_index, tile_px):
+        """The scaled surface for tile `tile_index` of autotile pack
+        `pack_name` (see core.data.ressources.save_autotile_pack) -- unlike
+        _get_scaled_tile, never invalidated by a bitmask/default/variant_of
+        edit (core.data.ressources.update_autotile_pack_tile never touches
+        a tile's own `rect`, so the cropped image itself never goes stale;
+        only build_pack_lookup's *choice* of which index to use can change,
+        which is why that cache has its own separate mtime invalidation).
+        A blank tile if the pack or index no longer resolves (e.g. deleted
+        mid-session) instead of raising, same defensive spirit as
+        get_tile_surface's own out-of-bounds branch."""
+        cache_key = (pack_name, tile_index, tile_px)
+        if cache_key not in self._pack_tile_cache:
+            payload = load_autotile_pack(pack_name)
+            tiles = payload.get("tiles", []) if payload else []
+            if payload is None or not (0 <= tile_index < len(tiles)):
+                surface = pygame.Surface((tile_px, tile_px), pygame.SRCALPHA)
+            else:
+                region = load_tileset_region(payload["tileset"], tiles[tile_index]["rect"])
+                surface = pygame.transform.scale(region, (tile_px, tile_px))
+            self._pack_tile_cache[cache_key] = surface
+        return self._pack_tile_cache[cache_key]
+
+    def _get_tile_surface(self, dungeon, tile_index, pack_name, tile_px, columns):
+        """Dispatches to a themed pack tile or the default interior tileset
+        slice, depending on whether `pack_name` (dungeon.floor_theme/
+        wall_theme for this cell's role -- see render()) is set. The single
+        place render()'s tile-blit loop and its doorway/spawn overrides both
+        go through, so the two can never resolve a cell differently."""
+        if pack_name is not None:
+            return self._get_pack_tile_surface(pack_name, tile_index, tile_px)
+        return self._get_scaled_tile(tile_index, tile_px, columns)
+
+    def _floor_override_index(self, dungeon):
+        """The tile_index doorway/spawn cell overrides fall back to --
+        DEFAULT_FLOOR_SPRITE (an interior tileset index) when the room has
+        no floor theme, exactly as before; the theme's own default tile
+        when it does, since DEFAULT_FLOOR_SPRITE means nothing in a themed
+        pack's own index space."""
+        if dungeon.floor_theme is not None:
+            _lookup, default_index, _variants = build_pack_lookup(dungeon.floor_theme)
+            return default_index
+        return DEFAULT_FLOOR_SPRITE
+
     def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
                skip_foreground_objects=False, show_grid=True, hide_border_cells=None):
         zoom = camera.zoom
@@ -93,17 +138,41 @@ class WorldRenderer:
         origin_x, origin_y = camera.world_to_screen(0, 0)
         origin_x, origin_y = round(origin_x), round(origin_y)
 
-        for y, row in enumerate(dungeon.sprite_grid):
-            for x, tile_index in enumerate(row):
+        # Viewport culling: only the cells that could actually land on
+        # screen, instead of every cell in the room regardless of zoom/
+        # camera position -- a small room this made no visible difference
+        # for, but scales with room/viewport size instead of always being
+        # O(width*height) per frame.
+        x_start, x_end = self._visible_range(origin_x, tile_px, screen.get_width(), dungeon.width)
+        y_start, y_end = self._visible_range(origin_y, tile_px, screen.get_height(), dungeon.height)
+
+        for y in range(y_start, y_end):
+            row = dungeon.sprite_grid[y]
+            for x in range(x_start, x_end):
+                tile_index = row[x]
                 if tile_index < 0:
                     continue
 
+                # A doorway/spawn override always renders as FLOOR-styled
+                # art (see _footprint_cells' own docstring -- cosmetic only,
+                # the logical cell underneath stays WALL) regardless of
+                # which role's theme actually owns this cell, so both
+                # branches force pack_name to the room's *floor* theme, not
+                # whatever its own logical type would normally pick.
                 if (x, y) in doorway_cells:
-                    tile_index = DEFAULT_FLOOR_SPRITE
+                    tile_index = self._floor_override_index(dungeon)
+                    pack_name = dungeon.floor_theme
                 elif (x, y) in spawn_cells:
-                    tile_index = self.SPAWN_FLOOR_SPRITE
+                    if dungeon.floor_theme is not None:
+                        tile_index = self._floor_override_index(dungeon)
+                    else:
+                        tile_index = self.SPAWN_FLOOR_SPRITE
+                    pack_name = dungeon.floor_theme
+                else:
+                    is_wall_cell = dungeon.logical_grid[y][x] == WALL
+                    pack_name = dungeon.wall_theme if is_wall_cell else dungeon.floor_theme
 
-                scaled = self._get_scaled_tile(tile_index, tile_px, columns)
+                scaled = self._get_tile_surface(dungeon, tile_index, pack_name, tile_px, columns)
                 screen.blit(scaled, (origin_x + x * tile_px, origin_y + y * tile_px))
 
         self._draw_objects(
@@ -262,26 +331,69 @@ class WorldRenderer:
         origin_x, origin_y = camera.world_to_screen(0, 0)
         return tile_px, round(origin_x), round(origin_y)
 
+    @staticmethod
+    def _visible_range(origin, tile_px, screen_extent, count):
+        """[start, end) grid indices along one axis whose tile could touch
+        the visible [0, screen_extent) screen span -- cell i draws at
+        origin + i*tile_px (see _tile_grid_origin), so this is just that
+        formula solved for i, clamped to [0, count] and padded by one tile
+        on each side so a partially-visible edge tile is never dropped.
+        Used by render()'s tile-grid loop and _draw_objects to skip work
+        for cells/objects nowhere near the camera instead of walking the
+        entire grid/object list every frame regardless of what a room's
+        size actually is -- previously O(width*height) unconditionally, no
+        matter the zoom level or room size."""
+        start = max(0, (0 - origin) // tile_px - 1)
+        end = min(count, (screen_extent - origin) // tile_px + 2)
+        return start, end
+
     def _draw_objects(self, screen, dungeon, camera, hide_object_types=None, foreground_only=False, skip_foreground=False):
         hide_object_types = hide_object_types or ()
         tile_px, origin_x, origin_y = self._tile_grid_origin(dungeon, camera)
+        screen_w, screen_h = screen.get_width(), screen.get_height()
 
         for obj in dungeon.object_manager.objects:
             if obj["type"] in hide_object_types:
                 continue
 
-            is_foreground = dungeon.object_manager.is_foreground_object(obj)
+            config = OBJECT_TYPES[obj["type"]]
+            size_cells_x, size_cells_y = config["size"]
 
-            if foreground_only and not is_foreground:
+            # Viewport culling -- an object's footprint depends only on its
+            # position/size, never its frame/variant, so this can be
+            # checked before touching the sprite cache (or loading frames
+            # from disk on a cache miss) at all. Anchored to the
+            # footprint's left/top edge, same as the blit position below
+            # (left_x, top_y = origin_x + obj["x"]*tile_px, origin_y +
+            # obj["y"]*tile_px -- scaled_sprite is always scaled to exactly
+            # size_cells*tile_px, so this is the same position the old
+            # bottom_y-then-subtract-height computation always landed on).
+            left_x = origin_x + obj["x"] * tile_px
+            top_y = origin_y + obj["y"] * tile_px
+            if (
+                left_x + size_cells_x * tile_px <= 0 or left_x >= screen_w
+                or top_y + size_cells_y * tile_px <= 0 or top_y >= screen_h
+            ):
                 continue
 
-            if skip_foreground and is_foreground:
-                continue
+            # A custom type with per-cell "cell_modes" (see
+            # object_manager.CELL_MODES/cell_mode) decides front/back PER
+            # CELL below instead of through this single whole-object check
+            # -- skip the early foreground_only/skip_foreground filter here
+            # entirely for those, since a single object can straddle both
+            # passes at once.
+            cell_modes = config.get("cell_modes")
+
+            if cell_modes is None:
+                is_foreground = dungeon.object_manager.is_foreground_object(obj)
+                if foreground_only and not is_foreground:
+                    continue
+                if skip_foreground and is_foreground:
+                    continue
 
             frames = self._get_object_frames(obj["type"], obj.get("variant"))
             frame_index = min(obj.get("frame", 0), len(frames) - 1)
 
-            size_cells_x, size_cells_y = OBJECT_TYPES[obj["type"]]["size"]
             cache_key = (obj["type"], obj.get("variant"), frame_index, tile_px)
             scaled_sprite = self._object_sprite_cache.get(cache_key)
             if scaled_sprite is None:
@@ -297,13 +409,41 @@ class WorldRenderer:
                     scaled_sprite = pygame.transform.flip(scaled_sprite, True, False)
                 self._object_sprite_cache[cache_key] = scaled_sprite
 
-            # Anchored to the footprint's left/bottom edge (not the origin cell's
-            # center) so a multi-cell object like "wall" fills exactly the cells
-            # it occupies instead of straddling half a tile into its neighbors.
-            left_x = origin_x + obj["x"] * tile_px
-            bottom_y = origin_y + (obj["y"] + size_cells_y) * tile_px
+            if cell_modes is not None:
+                self._draw_object_cells(
+                    screen, scaled_sprite, cell_modes, size_cells_x, size_cells_y,
+                    left_x, top_y, tile_px, foreground_only, skip_foreground,
+                )
+                continue
 
-            screen.blit(scaled_sprite, (left_x, bottom_y - scaled_sprite.get_height()))
+            screen.blit(scaled_sprite, (left_x, top_y))
+
+    def _draw_object_cells(
+        self, screen, scaled_sprite, cell_modes, size_cells_x, size_cells_y,
+        left_x, top_y, tile_px, foreground_only, skip_foreground,
+    ):
+        """Splits one already-scaled object sprite into its individual
+        size_cells_x x size_cells_y cell-sized pieces, each blitted
+        separately (Surface.blit's `area` crops the source) so DIFFERENT
+        cells of the SAME object can land in different render passes --
+        "front" cells only in the foreground pass (after the player, like
+        an L/R torch), "block"/"behind" cells only in the normal pass
+        (before the player) -- matching the per-cell walkable+draw-order
+        the sprite editor's multi-tile grid assigns (see
+        core.world.object_manager.CELL_MODES/cell_mode). Neither filter
+        active (Creator's single combined pass) draws every cell."""
+        for row in range(size_cells_y):
+            row_modes = cell_modes[row] if row < len(cell_modes) else ()
+            for col in range(size_cells_x):
+                mode = row_modes[col] if col < len(row_modes) else "behind"
+                is_front = mode == "front"
+                if foreground_only and not is_front:
+                    continue
+                if skip_foreground and is_front:
+                    continue
+                source_rect = pygame.Rect(col * tile_px, row * tile_px, tile_px, tile_px)
+                dest = (left_x + col * tile_px, top_y + row * tile_px)
+                screen.blit(scaled_sprite, dest, area=source_rect)
 
     def _draw_pillar_tops(self, screen, dungeon, camera, hide_object_types=None):
         """Every pillar's decorative top half, one cell north of wherever

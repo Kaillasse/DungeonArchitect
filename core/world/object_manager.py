@@ -1,9 +1,10 @@
+import json
 from pathlib import Path
 
 import pygame
 
 from core.editor.autotile import EMPTY, FLOOR, WALL
-from core.data.ressources import DEFAULT_ANIM_SPEED
+from core.data.ressources import DEFAULT_ANIM_SPEED, load_tileset_region
 from core.data.sound_manager import SoundManager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -244,6 +245,171 @@ OBJECT_LIST = [
     "pillar",
 ]
 
+# ---------------------------------------------------------------------
+# Registre additif de types custom -- le fichier que l'editeur de sprite
+# (core.editor.ui.SpriteEditorPanelUI) ecrit, fusionne dans OBJECT_TYPES/
+# OBJECT_LIST au chargement du module puis a chaque nouvel enregistrement
+# via register_custom_type (voir plus bas) -- meme esprit additif que
+# CardManager (fichier custom qui complete le defaut), sans risque de
+# collision puisque le tool ne genere jamais un id deja pris (voir
+# register_custom_type).
+# ---------------------------------------------------------------------
+
+CUSTOM_OBJECT_TYPES_PATH = PROJECT_ROOT / "assets" / "tiles" / "custom_object_types.json"
+
+
+def _load_custom_object_types():
+    """Absent/vide/corrompu -> dict vide, meme tolerance que les autres
+    loaders JSON optionnels du projet (ProfileManager, CardManager)."""
+    if not CUSTOM_OBJECT_TYPES_PATH.exists():
+        return {}
+    try:
+        with CUSTOM_OBJECT_TYPES_PATH.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+_custom_types = _load_custom_object_types()
+OBJECT_TYPES.update(_custom_types)
+OBJECT_LIST.extend(name for name in _custom_types if name not in OBJECT_LIST)
+
+# Archetypes proposes par l'editeur de sprite -- volontairement limites aux
+# types a une seule region (pas de paire torche L/R, pas de pilier
+# base+haut, qui ont chacun besoin de deux selections liees -- extension
+# future, non construite ici). "mur" n'a besoin d'aucun flag supplementaire :
+# la case WALL elle-meme bloque deja, comme la variante plate de "torch".
+# "porte" (placement="doorway", is_es=True) obtient la vraie validation
+# is_valid_doorway/eligibilite assembleur procedural via is_es_type
+# (voir plus bas) -- initialement ecarte le jour ou "Tuile speciale" a ete
+# construit, parce que ES_TYPES etait un tuple code en dur ; is_es_type
+# lit desormais aussi ce flag, donc un type custom en beneficie pour de bon.
+ARCHETYPES = {
+    "sol": {"label": "Sol", "placement": "floor", "flags": {}},
+    "mur": {"label": "Mur", "placement": "wall", "flags": {}},
+    "porte": {"label": "Porte", "placement": "doorway", "flags": {"walkable": True, "is_es": True}},
+}
+
+
+#  Les 3 etats possibles d'une case dans un "cell_modes" (voir
+# _build_custom_type_entry) -- "block" est solide (non walkable, dessine
+# dans la passe normale/arriere) ; "behind" et "front" sont tous deux
+# walkable, seul leur ordre de dessin differe (arriere = normal, comme une
+# fleur/un tapis ; devant = comme une torche, la case se dessine par-dessus
+# le joueur). Voir ObjectManager.is_cell_walkable/cell_draw_mode et
+# WorldRenderer._draw_objects pour la consommation.
+CELL_MODES = ("block", "behind", "front")
+
+
+def _build_custom_type_entry(name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None, interactable=False):
+    """Construction pure (aucune I/O) d'un dict au format OBJECT_TYPES --
+    partagee par register_custom_type (creer) et update_custom_type
+    (editer), pour que les deux produisent toujours exactement la meme
+    forme d'entree. `cell_modes`, s'il est fourni, prevaut sur
+    `blocks_movement` (voisinage ET ordre de dessin par case pour un objet
+    multi-cases, voir ObjectManager.is_cell_walkable/cell_draw_mode) -- les
+    deux representent la meme idee a des granularites differentes, jamais
+    les deux a la fois sur une entree."""
+    preset = ARCHETYPES.get(archetype)
+    if preset is None:
+        raise ValueError(f"Archetype inconnu : {archetype}")
+
+    entry = {
+        "asset": {"tileset": tileset, "rect": list(rect)},
+        "placement": preset["placement"],
+        "size": list(size),
+        "frames": 1,
+        "name": name,
+    }
+    entry.update(preset["flags"])
+    if cell_modes is not None:
+        entry["cell_modes"] = [list(row) for row in cell_modes]
+    elif blocks_movement:
+        entry["blocks_movement"] = True
+    if interactable:
+        entry["interactable"] = True
+    return entry
+
+
+def _write_custom_type(type_id, entry):
+    """Ecrit `entry` dans custom_object_types.json (fusionne, pas remplace
+    -- toute autre carte custom deja enregistree reste intacte) et met a
+    jour OBJECT_TYPES/OBJECT_LIST en memoire immediatement, que ce soit une
+    creation ou une mise a jour."""
+    custom = _load_custom_object_types()
+    custom[type_id] = entry
+    CUSTOM_OBJECT_TYPES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CUSTOM_OBJECT_TYPES_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(custom, handle, indent=2, ensure_ascii=False)
+
+    OBJECT_TYPES[type_id] = entry
+    if type_id not in OBJECT_LIST:
+        OBJECT_LIST.append(type_id)
+
+
+def register_custom_type(type_id, name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None, interactable=False):
+    """Valide et persiste une NOUVELLE entree OBJECT_TYPES sourcee depuis une
+    region de tileset -- le point d'ecriture que SpriteEditorPanelUI appelle
+    une fois la selection confirmee, en mode creation (voir update_custom_type
+    pour le mode edition). Leve ValueError sur un id/archetype invalide ou
+    deja pris, pour que l'appelant affiche un message plutot que de
+    corrompre le registre silencieusement."""
+    if not type_id or not all(c.isalnum() or c == "_" for c in type_id):
+        raise ValueError("Identifiant invalide (lettres/chiffres/_ uniquement)")
+    if type_id in OBJECT_TYPES:
+        raise ValueError(f"'{type_id}' existe deja")
+    entry = _build_custom_type_entry(name, tileset, rect, size, archetype, blocks_movement, cell_modes, interactable)
+    _write_custom_type(type_id, entry)
+    return entry
+
+
+def update_custom_type(type_id, name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None, interactable=False):
+    """Edite une carte custom DEJA enregistree (type_id doit deja exister
+    ET etre une carte custom -- jamais un type integre au jeu comme "vase",
+    identifie par la forme dict de son "asset", voir _build_custom_type_entry
+    -- meme un id qui collisionnerait par coincidence avec un type integre
+    ne peut jamais l'ecraser). Utilise quand le joueur clique une entree
+    dans la liste "Cartes existantes" de SpriteEditorPanelUI puis
+    reconfirme -- corrige a la source la confusion "deux cartes au meme nom,
+    indiscernables" plutot que d'en laisser une nouvelle s'empiler."""
+    existing = OBJECT_TYPES.get(type_id)
+    if existing is None:
+        raise ValueError(f"'{type_id}' n'existe pas")
+    if not isinstance(existing.get("asset"), dict):
+        raise ValueError(f"'{type_id}' est un type integre au jeu, non modifiable")
+    entry = _build_custom_type_entry(name, tileset, rect, size, archetype, blocks_movement, cell_modes, interactable)
+    _write_custom_type(type_id, entry)
+    return entry
+
+
+def find_custom_type_by_source(tileset, rect):
+    """L'id de la carte custom dont le rect source correspond exactement a
+    (tileset, rect), ou None -- permet a l'editeur de sprite d'avertir/
+    proposer une edition plutot que d'enregistrer un doublon visuellement
+    redondant. Une entree custom se reconnait a la forme dict de son
+    "asset" (voir _build_custom_type_entry) -- jamais un type integre, qui
+    utilise toujours un chemin de fichier (chaine)."""
+    rect = list(rect)
+    for candidate_id, config in OBJECT_TYPES.items():
+        asset = config.get("asset")
+        if isinstance(asset, dict) and asset.get("tileset") == tileset and list(asset.get("rect", [])) == rect:
+            return candidate_id
+    return None
+
+
+def custom_types_for_tileset(tileset):
+    """(type_id, config) pour chaque carte custom sourcee depuis `tileset`
+    -- alimente la liste/les marqueurs "cartes existantes" de
+    SpriteEditorPanelUI pour qu'un joueur voie ce qui est deja pris avant
+    de recadrer par-dessus, ou clique une entree pour la rouvrir en
+    edition (voir update_custom_type)."""
+    return [
+        (candidate_id, config) for candidate_id, config in OBJECT_TYPES.items()
+        if isinstance(config.get("asset"), dict) and config["asset"].get("tileset") == tileset
+    ]
+
+
 # Object types backed by a live, wandering entity (core.world.entities.Animal)
 # during exploration rather than just a static placed sprite -- see
 # entities.AnimalManager. Derived from the "animal" flag above instead of a
@@ -389,6 +555,16 @@ def load_object_frames(object_type, variant=None):
     know rows exist at all (see OBJECT_TYPES["lilchest"])."""
     config = OBJECT_TYPES[object_type]
     asset_path = config.get("variants", {}).get(variant, config["asset"])
+
+    if isinstance(asset_path, dict):
+        # {"tileset": ..., "rect": [x, y, w, h]} -- a region reference into a
+        # shared tileset (custom types registered via the in-app sprite
+        # editor, see register_custom_type below) instead of a dedicated
+        # per-type file. Always a single static frame, same as the
+        # "frames": 1 branch below -- a region reference is never sliced
+        # into an animation.
+        return [load_tileset_region(asset_path["tileset"], asset_path["rect"])]
+
     asset = PROJECT_ROOT / "assets" / asset_path
     sheet = pygame.image.load(asset).convert_alpha()
 
@@ -601,11 +777,18 @@ class ObjectManager:
         return OBJECT_TYPES[object_type].get("linkable", False)
 
     def is_es_type(self, object_type):
-        """True for gate/wall/cave_entrance/big_entrance -- the object
-        kinds that carry a role (get_role/set_role below) and that
-        core.world.assembly's generator can treat as a room-to-room
-        connector. Used by Creator's right-click role-picker dispatch."""
-        return object_type in ES_TYPES
+        """True for gate/wall/cave_entrance/big_entrance, OR a custom type
+        registered with the "porte" archetype (config["is_es"], see
+        _build_custom_type_entry) -- the object kinds that carry a role
+        (get_role/set_role below, both already call this rather than
+        ES_TYPES directly, so they pick up custom E/S types for free) and
+        that core.world.assembly's generator can treat as a room-to-room
+        connector (assembly._valid_entry_exits also calls this). Used by
+        Creator's right-click role-picker dispatch, and by
+        _resolve_placement's doorway-shape validation below."""
+        if object_type in ES_TYPES:
+            return True
+        return bool(OBJECT_TYPES.get(object_type, {}).get("is_es"))
 
     def get_role(self, obj):
         """The object's role -- "connector"/"dungeon_entrance"/
@@ -643,8 +826,25 @@ class ObjectManager:
         return True
 
     def is_foreground_object(self, obj):
-        """Drawn after (in front of) the player, and walkable despite sitting on a WALL cell -- currently just L/R wall-mounted torches; a straight torch stays a plain blocking wall decoration. (A pillar's decorative top half gets the same front-of-player treatment, but it isn't a real object -- see WorldRenderer._draw_pillar_tops -- so it never reaches this method.)"""
+        """Drawn after (in front of) the player, and walkable despite sitting on a WALL cell -- currently just L/R wall-mounted torches; a straight torch stays a plain blocking wall decoration. (A pillar's decorative top half gets the same front-of-player treatment, but it isn't a real object -- see WorldRenderer._draw_pillar_tops -- so it never reaches this method. A custom type with per-cell "cell_modes" -- see cell_mode/WorldRenderer._draw_objects -- decides front/back PER CELL instead of through this whole-object check.)"""
         return obj["type"] == "torch" and obj.get("variant") in ("L", "R")
+
+    def cell_mode(self, obj, config, grid_x, grid_y):
+        """The CELL_MODES value ("block"/"behind"/"front") for (grid_x,
+        grid_y) within `obj`'s footprint, or None if this type has no
+        per-cell data at all (every built-in type, and any custom type
+        registered with the plain blocks_movement flag instead) -- callers
+        fall back to the whole-object blocks_movement/is_foreground_object
+        checks in that case. Cells outside the declared grid (shouldn't
+        happen) read as "behind" -- walkable, normal draw order, the least
+        surprising fail-open."""
+        cell_modes = config.get("cell_modes")
+        if cell_modes is None:
+            return None
+        dx, dy = grid_x - obj["x"], grid_y - obj["y"]
+        if 0 <= dy < len(cell_modes) and 0 <= dx < len(cell_modes[dy]):
+            return cell_modes[dy][dx]
+        return "behind"
 
     def is_cell_walkable(self, grid_x, grid_y):
         if not self._in_bounds(grid_x, grid_y):
@@ -654,6 +854,17 @@ class ObjectManager:
 
         if obj is not None:
             config = OBJECT_TYPES[obj["type"]]
+
+            # Per-cell override (custom types only, see
+            # _build_custom_type_entry) -- a multi-cell object's footprint
+            # can mix blocking/walkable cells (e.g. a pillar-like object
+            # with a walkable top row, blocking base row), instead of the
+            # single whole-object blocks_movement/walkable flags below
+            # applying uniformly. Absent on every built-in type, so this
+            # branch is simply never reached for them -- fully additive.
+            cell_mode = self.cell_mode(obj, config, grid_x, grid_y)
+            if cell_mode is not None:
+                return cell_mode != "block"
 
             if config.get("blocks_movement"):
                 return False
@@ -778,7 +989,7 @@ class ObjectManager:
                 return True, None
             return False, None
 
-        if object_type in ES_TYPES:
+        if self.is_es_type(object_type):
             return self.is_valid_doorway(grid_x, grid_y), None
 
         if object_type == "stairs":

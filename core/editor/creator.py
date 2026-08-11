@@ -6,16 +6,19 @@ import pygame
 from core.world.dungeon import DEFAULT_GRID_SAVE_PATH, Dungeon
 from core.world.assembly import generate_assembly, load_assembly, save_assembly
 from core.editor.ui import ToolPaletteUI
-from core.ui.widgets import PanelFrame
+from core.ui.widgets import PanelFrame, BorderManager
 from core.engine.gamestate import GameState
 from core.engine.room_manager import RoomManager
 from core.engine.camera import Camera
 from core.data.ressources import FLOOR, next_new_donjon_name
 from core.editor.autotile import WALL, LOCAL_EDIT_SPRITE_RADIUS
-from core.data.profile_manager import ProfileManager
+from core.data.profile_manager import ProfileManager, ADMINGOD_STOCK
 from core.data.cards import room_name_from_card_id, room_card_manifest
 from core.world.home import home_room_name, wants_exploration
-from core.editor.ui import GeneratorPanelUI, RoomPanelUI, ChestPanelUI, RolePanelUI, CardPanelUI, CardRenderer
+from core.editor.ui import (
+    GeneratorPanelUI, RoomPanelUI, ChestPanelUI, RolePanelUI, CardPanelUI, CardRenderer,
+    SpriteEditorPanelUI, AutotileThemePanelUI,
+)
 from core.editor.tools import ObjectTool
 
 class Creator:
@@ -78,7 +81,22 @@ class Creator:
             x=self.screen.get_width() / 2 - 130,
             y=180,
         )
+        self.autotile_theme_panel = AutotileThemePanelUI(
+            x=self.screen.get_width() / 2 - 130,
+            y=180,
+        )
         self.card_panel = CardPanelUI(x=460, y=340, renderer=self.card_renderer)
+        # Fondation "carte"/sprite editor -- panneau modal centre (comme
+        # chest_panel/role_panel), pas un panneau docke/draggable (pas
+        # besoin de PanelFrame ici). Bouton d'ouverture toujours visible,
+        # voir sprite_editor_button_rect ci-dessous et son check dans run().
+        self.sprite_editor_panel = SpriteEditorPanelUI(
+            x=self.screen.get_width() / 2 - SpriteEditorPanelUI.PANEL_WIDTH / 2,
+            y=self.screen.get_height() / 2 - SpriteEditorPanelUI.PANEL_HEIGHT / 2,
+        )
+        self.sprite_editor_button_rect = pygame.Rect(730, 10, 220, 32)
+        self._sprite_editor_border = BorderManager()
+        self.sprite_editor_button_font = pygame.font.SysFont("arial", 15)
         # Small preview size for the sprite that follows the mouse while
         # dragging a card to place it or relocating an already-placed
         # object -- see run()'s render section.
@@ -391,9 +409,18 @@ class Creator:
         none left -- the single gate every terrain-paint path goes through
         (see _paint_at_mouse). Object placement (_try_place_object) checks/
         decrements inline instead, since it needs to peek the stock BEFORE
-        attempting a placement that can itself still fail validation."""
+        attempting a placement that can itself still fail validation.
+
+        Profile.admingod pins card_collection[card_id] to ADMINGOD_STOCK and
+        always succeeds instead of checking/decrementing -- works even for a
+        card_id never actually granted (e.g. one just created via the
+        sprite editor this session), unlike a plain "give a huge count"
+        seed would for anything registered afterward."""
         if self._active_profile is None:
             return False
+        if self._active_profile.admingod:
+            self._active_profile.card_collection[card_id] = ADMINGOD_STOCK
+            return True
         if self._active_profile.card_collection.get(card_id, 0) <= 0:
             return False
         self._active_profile.card_collection[card_id] -= 1
@@ -404,8 +431,13 @@ class Creator:
         the symmetric inverse of _consume_card, and is never blocked
         (unlike consuming, there's no "can't refund" case). card_id=None
         (nothing to refund, e.g. erasing an already-EMPTY cell) is a
-        no-op."""
-        if self._active_profile is None or card_id is None:
+        no-op. A no-op under admingod too -- _consume_card already pins the
+        stock, nothing was ever really spent to give back (and the sprite
+        editor's own "grant the first copy of a new card" call goes through
+        this too -- see run()'s sprite-editor block -- where under
+        admingod every card already reads as unlimited, so there's nothing
+        useful left for this to do)."""
+        if self._active_profile is None or card_id is None or self._active_profile.admingod:
             return
         self._active_profile.card_collection[card_id] = self._active_profile.card_collection.get(card_id, 0) + 1
 
@@ -574,7 +606,10 @@ class Creator:
         decremented once placement has genuinely succeeded -- never
         consume-then-refund)."""
         object_type = self.object_tool.object_type
-        if self._active_profile is None or self._active_profile.card_collection.get(object_type, 0) <= 0:
+        if self._active_profile is None:
+            return False
+        admingod = self._active_profile.admingod
+        if not admingod and self._active_profile.card_collection.get(object_type, 0) <= 0:
             return False
 
         world = self.camera.screen_to_world(*self.object_tool.position)
@@ -583,7 +618,10 @@ class Creator:
         if not self.dungeon.object_manager.add_object(object_type, grid_x, grid_y):
             return False
 
-        self._active_profile.card_collection[object_type] -= 1
+        if admingod:
+            self._active_profile.card_collection[object_type] = ADMINGOD_STOCK
+        else:
+            self._active_profile.card_collection[object_type] -= 1
         self._flush_active_profile()
         # A type that just hit 0 stock must disappear from the collection
         # panel's grid/list right away, not wait for the next entry into
@@ -718,7 +756,7 @@ class Creator:
 
             for event in pygame.event.get():
 
-                if self.chest_panel.is_open or self.role_panel.is_open:
+                if self.chest_panel.is_open or self.role_panel.is_open or self.autotile_theme_panel.is_open:
                     # Fully modal -- every other tool/panel acts on
                     # self.dungeon, which is exactly what the open chest/E-S
                     # belongs to, so letting painting/saving/etc. run
@@ -731,10 +769,47 @@ class Creator:
                     if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
                         if self.chest_panel.is_open:
                             self.chest_panel.handle_event(event)
-                        else:
+                        elif self.role_panel.is_open:
                             role = self.role_panel.handle_event(event)
                             if role is not None:
                                 self.dungeon.object_manager.set_role(self.role_panel.obj, role)
+                        else:
+                            # Read role BEFORE handle_event -- it calls
+                            # self.close() internally on a row click, which
+                            # clears .role, so reading it after would always
+                            # see None regardless of which button opened this.
+                            role = self.autotile_theme_panel.role
+                            changed, pack_name = self.autotile_theme_panel.handle_event(event)
+                            if changed:
+                                if role == "floor":
+                                    self.dungeon.floor_theme = pack_name
+                                else:
+                                    self.dungeon.wall_theme = pack_name
+                                self.dungeon.resync_sprite_grid()
+                    continue
+
+                if self.sprite_editor_panel.is_open:
+                    # Same fully-modal treatment as chest_panel/role_panel
+                    # above, kept as its own block since this one also needs
+                    # KEYDOWN (the name field) -- QUIT must still work.
+                    if event.type == pygame.QUIT:
+                        running = False
+                        self.game_manager.running = False
+                        break
+                    if event.type in (
+                        pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION, pygame.KEYDOWN,
+                        pygame.MOUSEWHEEL,
+                    ):
+                        new_type_id = self.sprite_editor_panel.handle_event(event)
+                        if new_type_id is not None:
+                            # Same "credit one card back" gesture _refund_card
+                            # already uses for erasing terrain/objects -- a
+                            # freshly-registered type starts at 0 owned, so
+                            # crediting 1 makes it immediately placeable/
+                            # testable, matching --give-card's own intent.
+                            self._refund_card(new_type_id)
+                            self._flush_active_profile()
+                            self._refresh_card_panel()
                     continue
 
                 # Draggable/collapsible panel title bars -- topmost frame
@@ -821,6 +896,10 @@ class Creator:
 
                     if event.button == 1:
 
+                        if self.sprite_editor_button_rect.collidepoint(event.pos):
+                            self.sprite_editor_panel.open()
+                            continue
+
                         if not self.tools_frame.collapsed and self.palette.hit_floor_toggle(event.pos):
                             self.floor_tool_active = not self.floor_tool_active
                             continue
@@ -863,6 +942,14 @@ class Creator:
                             self.erasing = False
 
                     elif event.button == 3:
+
+                        if not self.tools_frame.collapsed and self.palette.hit_floor_toggle(event.pos):
+                            self.autotile_theme_panel.open("floor", self.dungeon.floor_theme)
+                            continue
+
+                        if not self.tools_frame.collapsed and self.palette.hit_wall_toggle(event.pos):
+                            self.autotile_theme_panel.open("wall", self.dungeon.wall_theme)
+                            continue
 
                         indicator_obj = self._find_indicator_at(event.pos)
 
@@ -1112,6 +1199,11 @@ class Creator:
                     frame.render(self.screen)
             self.chest_panel.render(self.screen)
             self.role_panel.render(self.screen)
+            self.autotile_theme_panel.render(self.screen)
+            self._sprite_editor_border.draw_centered_label(
+                self.screen, self.sprite_editor_button_rect, self.sprite_editor_button_font, "Editeur de sprite",
+            )
+            self.sprite_editor_panel.render(self.screen)
 
             pygame.display.flip()
 

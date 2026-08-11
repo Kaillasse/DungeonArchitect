@@ -14,35 +14,34 @@ import pygame
 
 from core.world.dungeon import Dungeon
 from core.world.entities import PlayerRef
-from core.world.object_manager import OBJECT_TYPES, ES_TYPES
+from core.world.object_manager import OBJECT_TYPES
 from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DONJONS_DIRECTORY
 from core.data.sound_manager import SoundManager
-
-# The canonical E/S type list lives in object_manager.py (ES_TYPES) --
-# kept under this name here since every existing reference in this module
-# already says ENTRY_EXIT_TYPES.
-ENTRY_EXIT_TYPES = ES_TYPES
 
 OPPOSITE_SIDE = {"north": "south", "south": "north", "east": "west", "west": "east"}
 
 
 def _valid_entry_exits(dungeon):
-    """gate/wall/cave_entrance/big_entrance objects that actually qualify as
-    a room-to-room connection: ObjectManager.is_valid_doorway (a WALL cell
-    with one FLOOR neighbor opposite one EMPTY neighbor, WALL flanking the
-    rest) means this exit genuinely borders the void, not just another spot
-    inside the room. A gate/wall placed with no void neighbor (e.g. a locked
-    door gating a side room) still works as an ordinary in-room obstacle --
-    it's just never picked as a connector here. Also excludes anything
-    flagged "dungeon_entrance"/"dungeon_exit" (ObjectManager.get_role) --
-    neither is ever an ordinary inter-room connector: a dungeon_entrance
-    only ever lives in home (never generation material in practice) and a
+    """gate/wall/cave_entrance/big_entrance objects (plus any custom type
+    registered with the "porte" archetype -- ObjectManager.is_es_type is
+    the single source of truth for E/S membership, so a custom E/S is a
+    genuine assembler-eligible connector here, not just placeable in the
+    editor) that actually qualify as a room-to-room connection:
+    ObjectManager.is_valid_doorway (a WALL cell with one FLOOR neighbor
+    opposite one EMPTY neighbor, WALL flanking the rest) means this exit
+    genuinely borders the void, not just another spot inside the room. A
+    gate/wall placed with no void neighbor (e.g. a locked door gating a
+    side room) still works as an ordinary in-room obstacle -- it's just
+    never picked as a connector here. Also excludes anything flagged
+    "dungeon_entrance"/"dungeon_exit" (ObjectManager.get_role) -- neither
+    is ever an ordinary inter-room connector: a dungeon_entrance only ever
+    lives in home (never generation material in practice) and a
     dungeon_exit is meant to stay a genuine dead end in whichever room it
     lands in, not get merged with another room."""
     return [
         obj for obj in dungeon.object_manager.objects
-        if obj["type"] in ENTRY_EXIT_TYPES
+        if dungeon.object_manager.is_es_type(obj["type"])
         and dungeon.object_manager.get_role(obj) == "connector"
         and dungeon.object_manager.is_valid_doorway(obj["x"], obj["y"])
     ]
@@ -98,18 +97,29 @@ class PlacedRoom:
         self.offset_x = offset_x
         self.offset_y = offset_y
         self.index = index
+        self._occupied_cells_cache = None
 
     def to_global(self, local_x, local_y):
         return self.offset_x + local_x, self.offset_y + local_y
 
     def occupied_cells(self):
-        """Global (x, y) -> logical cell type, for every non-empty cell in this room."""
-        cells = {}
-        for y, row in enumerate(self.dungeon.logical_grid):
-            for x, cell in enumerate(row):
-                if cell != EMPTY:
-                    cells[self.to_global(x, y)] = cell
-        return cells
+        """Global (x, y) -> logical cell type, for every non-empty cell in
+        this room. Cached: a placed room's own logical_grid never changes
+        for the lifetime of this PlacedRoom (destructibility isn't
+        implemented yet -- see CLAUDE.md -- and Creator's painting tools
+        are suspended while a generated dungeon is being previewed), so the
+        first scan is reused for every later call instead of rescanning the
+        full grid every time -- this is called repeatedly inside
+        generate_assembly's own placement search (_fits, _collides), where
+        it used to dominate generation cost on a large room pool."""
+        if self._occupied_cells_cache is None:
+            cells = {}
+            for y, row in enumerate(self.dungeon.logical_grid):
+                for x, cell in enumerate(row):
+                    if cell != EMPTY:
+                        cells[self.to_global(x, y)] = cell
+            self._occupied_cells_cache = cells
+        return self._occupied_cells_cache
 
     def entry_exits(self):
         return _valid_entry_exits(self.dungeon)
@@ -139,10 +149,17 @@ class DungeonAssembly:
         self._gradient_hole_cache = {}
         self._below_cache = {}
         self._border_cache = {}  # floor -> (terrain_version tuple, {room: hide_border_cells}) -- see _border_cells_by_room
+        # floor -> merged occupied_cells() dict, see occupied_cells_on_floor
+        # -- invalidated per-floor by add_room, the only mutator.
+        self._occupied_cache = {}
 
     def add_room(self, placed_room):
         self.rooms.append(placed_room)
         self._rooms_by_floor.setdefault(placed_room.floor, []).append(placed_room)
+        # A new room on this floor changes what occupied_cells_on_floor(floor)
+        # must return -- drop just that floor's cached merge (individual
+        # rooms' own occupied_cells() stay valid and cached, see PlacedRoom).
+        self._occupied_cache.pop(placed_room.floor, None)
 
     def rooms_on_floor(self, floor):
         return self._rooms_by_floor.get(floor, [])
@@ -151,9 +168,20 @@ class DungeonAssembly:
         return sorted(self._rooms_by_floor.keys())
 
     def occupied_cells_on_floor(self, floor):
+        """Merged occupied_cells() of every room on `floor`. Cached per
+        floor (unlike PlacedRoom.occupied_cells(), which is cheap to keep
+        forever, a floor's merge must invalidate whenever add_room places a
+        new room there -- see add_room) -- called repeatedly inside
+        generate_assembly's own placement search (_fits/_collides), where
+        re-merging every room on a floor from scratch on every candidate
+        placement used to dominate generation cost as the room pool grew."""
+        cached = self._occupied_cache.get(floor)
+        if cached is not None:
+            return cached
         cells = {}
         for room in self.rooms_on_floor(floor):
             cells.update(room.occupied_cells())
+        self._occupied_cache[floor] = cells
         return cells
 
     def room_at(self, floor, global_x, global_y):

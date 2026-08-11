@@ -16,11 +16,6 @@
       "y": 40,
       "collapsed": true
     },
-    "object_palette": {
-      "x": 1013,
-      "y": 64,
-      "collapsed": false
-    },
     "room": {
       "x": 920,
       "y": 254,
@@ -32,14 +27,33 @@
       "collapsed": false
     },
     "card": {
-      "x": 846,
-      "y": 316,
+      "x": 900,
+      "y": 353,
       "collapsed": false
     }
   },
   "card_collection": {
-    "tile_floor": 20,
-    "tile_wall": 0,
-    "vase": 1
-  }
+    "tile_floor": 0,
+    "tile_wall": 1,
+    "vase": 2,
+    "cave_entrance": 1,
+    "torch": 2,
+    "stone": 0,
+    "stone_2": 1,
+    "banc": 0,
+    "arbre1": 0,
+    "tombe1": 0,
+    "tombe2": 0,
+    "tombe3": 0,
+    "bancl": 0,
+    "bancr": 0,
+    "totem1": 0,
+    "totem2": 0,
+    "totem3": 0,
+    "totem4": 0,
+    "tombe4": 0,
+    "bordureporte": 0,
+    "portebois": 1
+  },
+  "admingod": false
 }

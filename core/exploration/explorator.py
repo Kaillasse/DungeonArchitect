@@ -22,7 +22,7 @@ from core.engine.input import (
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
 from core.data.sound_manager import SoundManager
-from core.data.profile_manager import ProfileManager
+from core.data.profile_manager import ProfileManager, apply_to_fresh_profile
 from core.data.progression import XP_ENEMY_KILL, XP_ANIMAL_KILL, XP_DUNGEON_CLEAR
 from core.world.home import home_room_name, wants_creator
 
@@ -1208,34 +1208,15 @@ class Explorator(NetworkSessionMixin):
 
     def _grant_xp(self, session, amount):
         """Awards XP earned from an already-authoritative event (enemy/animal
-        kill, dungeon clear -- see call sites) and persists immediately. A
-        no-op for a session with no profile (local co-op's secondary device,
-        or a network session that joined without a usable name). Saving right
-        away rather than deferring to disconnect is deliberate: these are
-        rare, discrete events, not a per-frame hot path, so there's no real
-        cost to keeping the profile file always up to date.
-
-        Reloads the profile fresh from disk right before mutating+saving,
-        instead of applying add_xp directly to session.profile -- that
-        object is loaded exactly once, at Explorator.__init__ (effectively
-        app-launch time), and never refreshed afterwards. Saving it as-is
-        would silently overwrite any change made by another long-lived
-        writer since then (chiefly Creator's card_collection consumption/
-        refunds, see Creator._active_profile -- a real bug: erasing/placing
-        a card in Creator, then earning any XP in Exploration during the
-        same run, reverted the card_collection change on disk the moment
-        this method's own save landed). Re-fetching here keeps every field
-        this method doesn't itself touch (card_collection, panel_layout,
-        generator_room_names/count) exactly as some other writer last left
-        it, and session.profile is updated to the fresh instance so any
-        later read of it during this Exploration session (level display,
-        network sync) reflects the merge too."""
-        if session.profile is None:
-            return
-        fresh = ProfileManager().load(session.profile.name)
-        fresh.add_xp(amount)
-        ProfileManager().save(fresh)
-        session.profile = fresh
+        kill, dungeon clear -- see call sites) and persists immediately via
+        apply_to_fresh_profile (see its own docstring for why a fresh reload
+        precedes the mutation+save -- a no-op for a session with no profile,
+        local co-op's secondary device, or a network session that joined
+        without a usable name). Saving right away rather than deferring to
+        disconnect is deliberate: these are rare, discrete events, not a
+        per-frame hot path, so there's no real cost to keeping the profile
+        file always up to date."""
+        apply_to_fresh_profile(session, lambda profile: profile.add_xp(amount))
 
     def _resolve_player_attacks(self):
         """Every session's attack, checked against the same one
