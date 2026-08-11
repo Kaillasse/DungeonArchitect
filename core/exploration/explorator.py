@@ -783,6 +783,7 @@ class Explorator(NetworkSessionMixin):
         obj["open"] = True
         obj["frame"] = OBJECT_TYPES[obj["type"]]["frames"] // OBJECT_TYPES[obj["type"]]["rows"]
         obj["anim_timer"] = 0.0
+        dungeon.object_manager.begin_animation(obj)
 
         chest_x, chest_y = dungeon.grid_to_world(obj["x"], obj["y"])
         for currency_type, count in obj.get("loot", {}).items():

@@ -126,6 +126,15 @@ class DungeonAssembly:
 
     def __init__(self):
         self.rooms = []
+        # floor -> [PlacedRoom, ...], kept in sync by add_room (the only
+        # place self.rooms is ever mutated after __init__ -- generate_assembly
+        # always finalizes a room's .floor before calling add_room, never
+        # after). rooms_on_floor is called from nearly every per-frame
+        # collision/render/button query in this class and from Explorator's
+        # own _rooms_with_offset, so an O(total rooms) scan per call adds up
+        # fast on an assembly with many rooms/floors -- this makes it O(1)
+        # plus the size of just that floor's own room list.
+        self._rooms_by_floor = {}
         self._shadow_cache = {}
         self._gradient_hole_cache = {}
         self._below_cache = {}
@@ -133,12 +142,13 @@ class DungeonAssembly:
 
     def add_room(self, placed_room):
         self.rooms.append(placed_room)
+        self._rooms_by_floor.setdefault(placed_room.floor, []).append(placed_room)
 
     def rooms_on_floor(self, floor):
-        return [room for room in self.rooms if room.floor == floor]
+        return self._rooms_by_floor.get(floor, [])
 
     def floors(self):
-        return sorted({room.floor for room in self.rooms})
+        return sorted(self._rooms_by_floor.keys())
 
     def occupied_cells_on_floor(self, floor):
         cells = {}
@@ -245,6 +255,7 @@ class DungeonAssembly:
             target_door_obj["open"] = True
             target_door_obj["activated"] = door_obj.get("activated", True)
             target_door_obj["frame"] = door_obj.get("frame", target_door_obj.get("frame", 0))
+            target_room.dungeon.object_manager.begin_animation(target_door_obj)
 
         return target_room, target_door_obj
 
@@ -275,11 +286,12 @@ class DungeonAssembly:
         obj["activated"] = True
         obj["frame"] = 0
         obj["anim_timer"] = 0.0
+        room.dungeon.object_manager.begin_animation(obj)
         SoundManager().play("button_pressed")
 
         for link_target in obj.get("links", []):
             target = room.dungeon.object_manager.get_object_at(link_target["x"], link_target["y"])
-            self._open_if_blocking(target)
+            self._open_if_blocking(target, room.dungeon.object_manager)
 
         for link_target in obj.get("assembly_links", []):
             # "room" (a room index, added at generation time -- see
@@ -304,14 +316,15 @@ class DungeonAssembly:
                 link_target["x"] - target_room.offset_x,
                 link_target["y"] - target_room.offset_y,
             )
-            self._open_if_blocking(target)
+            self._open_if_blocking(target, target_room.dungeon.object_manager)
 
     @staticmethod
-    def _open_if_blocking(target):
+    def _open_if_blocking(target, object_manager):
         if target is not None and OBJECT_TYPES[target["type"]].get("blocks_until_open") and not target.get("open"):
             target["open"] = True
             target["frame"] = 0
             target["anim_timer"] = 0.0
+            object_manager.begin_animation(target)
 
     def update(self, dt, player_refs_by_floor=None):
         """player_refs_by_floor ({floor: [PlayerRef, ...]}) only ever gets
@@ -332,10 +345,33 @@ class DungeonAssembly:
         transform needed since only its identity matters here, never its
         .position (see EnemyManager/Enemy, which only ever read distances
         from the already-shifted hitbox).
+
+        Only rooms on a floor within SHADOW_MAX_DISTANCE of some occupied
+        floor are actually simulated -- a room nobody is near (no player on
+        its floor, and not even visible as a tinted shadow/below floor,
+        since that's exactly what SHADOW_MAX_DISTANCE bounds -- see render())
+        has its object animations/animal wandering/enemy AI frozen instead of
+        ticking every frame for no one to see. This used to simulate every
+        room in the whole assembly unconditionally, which scales as O(total
+        rooms x entities) regardless of how much of the dungeon is actually
+        in play. Freezing is harmless and self-healing: an object's animation
+        just holds where it was and resumes the next tick a player is close
+        enough again, same as this class's own shadow/below render caches
+        already tolerate staleness on floors that aren't the active one.
         """
         player_refs_by_floor = player_refs_by_floor or {}
+        if not player_refs_by_floor:
+            return
+
+        active_floors = set()
+        for floor in player_refs_by_floor:
+            for offset in range(-self.SHADOW_MAX_DISTANCE, self.SHADOW_MAX_DISTANCE + 1):
+                active_floors.add(floor + offset)
+
         tile_size = Dungeon.TILE_SIZE
         for room in self.rooms:
+            if room.floor not in active_floors:
+                continue
             refs_on_floor = player_refs_by_floor.get(room.floor, ())
             local_refs = [
                 PlayerRef(ref.player, ref.hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size))
@@ -473,9 +509,12 @@ class DungeonAssembly:
         """{room: hide_border_cells} for every room on `floor` (see
         _south_seam_cells) -- cached per floor and only recomputed when some
         room's Dungeon.terrain_version has actually changed (destroy_area is
-        the only thing that bumps it), since _render_floor runs every frame
-        at 60fps but the underlying seam data is static except after a rare,
-        event-driven terrain edit. `occupied_cells_on_floor` already does the
+        the only thing that bumps it for a room inside an assembly -- Creator
+        painting also bumps terrain_version, but only ever on a standalone
+        single-room Dungeon, never one that's part of a DungeonAssembly),
+        since _render_floor runs every frame at 60fps but the underlying seam
+        data is static except after a rare, event-driven terrain edit.
+        `occupied_cells_on_floor` already does the
         "merge every room's occupied_cells" work this used to re-derive by
         hand.
 

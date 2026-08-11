@@ -3,7 +3,10 @@ from core.world.entities import AnimalManager, EnemyManager, PickupManager, Proj
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
 from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
-from core.editor.autotile import EMPTY, FLOOR, WALL, build_walls_around, unbuild_walls_around, erase_at, resolve_sprite_grid
+from core.editor.autotile import (
+    EMPTY, FLOOR, WALL, build_walls_around, unbuild_walls_around, erase_at,
+    resolve_sprite_grid, resolve_sprite_grid_region,
+)
 
 
 DEFAULT_GRID_SAVE_PATH = "room_001"
@@ -42,10 +45,12 @@ class Dungeon:
         self.logical_grid = [[EMPTY for _ in range(width)] for _ in range(height)]
         self.sprite_grid = [[-1 for _ in range(width)] for _ in range(height)]
 
-        # Bumped by destroy_area (the only exploration-time terrain mutator)
-        # -- lets a cache keyed on it (see DungeonAssembly._border_cells_by_room)
-        # know when previously-computed terrain-derived data has gone stale,
-        # without needing to be told explicitly by every caller.
+        # Bumped by anything that mutates logical_grid's actual cell values
+        # -- paint_cell (Creator painting/erasing) and destroy_area
+        # (exploration-time destruction) -- lets a cache keyed on it (see
+        # DungeonAssembly._border_cells_by_room, WorldRenderer's own ledge
+        # cache) know when previously-computed terrain-derived data has gone
+        # stale, without needing to be told explicitly by every caller.
         self.terrain_version = 0
 
         # Only ever toggled in Creator (see core.editor.ui.ToolPaletteUI --
@@ -115,8 +120,15 @@ class Dungeon:
             else:
                 self.logical_grid[grid_y][grid_x] = cell_type
 
-        self.sprite_grid = resolve_sprite_grid(self.logical_grid)
+        # Bounded to the clicked cell's own neighborhood (see
+        # resolve_sprite_grid_region/LOCAL_EDIT_SPRITE_RADIUS) instead of a
+        # full-grid rescan -- this runs on every cell of a click-drag paint
+        # stroke, potentially dozens of times a second, while a sprite only
+        # ever depends on its own 4 cardinal neighbors regardless of how big
+        # the room is.
+        resolve_sprite_grid_region(self.logical_grid, self.sprite_grid, grid_x, grid_y)
         self.object_manager.prune_invalid()
+        self.terrain_version += 1
 
     def update(self, dt: float, player_refs=()) -> None:
         self.object_manager.update(dt)
@@ -142,7 +154,12 @@ class Dungeon:
                 if 0 <= x < self.width and 0 <= y < self.height:
                     self.logical_grid[y][x] = EMPTY
 
-        self.sprite_grid = resolve_sprite_grid(self.logical_grid)
+        # Same bounded-region update as paint_cell -- the carved circle
+        # itself is exactly radius_tiles, +1 more for the cardinal-neighbor
+        # sprite dependency (see resolve_sprite_grid_region).
+        resolve_sprite_grid_region(
+            self.logical_grid, self.sprite_grid, center_x, center_y, radius=radius_tiles + 1
+        )
         self.object_manager.prune_invalid()
         self.terrain_version += 1
 

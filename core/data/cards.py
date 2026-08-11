@@ -24,7 +24,7 @@ from pathlib import Path
 import pygame
 
 from core.world.object_manager import OBJECT_TYPES, ITEM_DEFINITIONS, load_object_frames, make_item
-from core.data.ressources import load_tileset, get_tile_surface, list_rooms
+from core.data.ressources import load_tileset, get_tile_surface, list_rooms, ROOMS_DIRECTORY
 from core.editor.autotile import DEFAULT_FLOOR_SPRITE, DEFAULT_WALL_SPRITE, FLOOR, WALL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -79,6 +79,16 @@ def room_name_from_card_id(card_id):
     return None
 
 
+def _room_file_exists(room_name):
+    """A single stat() check, not list_rooms()'s full directory glob --
+    default_card_for is called once per card id every time CardPanelUI/
+    GeneratorPanelUI's grids resolve a room card (see core.editor.ui), so
+    using list_rooms() here would re-glob assets/rooms/ once per visible
+    room-card on top of the one glob list_known_card_ids() already does to
+    enumerate them in the first place (N+1 scans instead of 1)."""
+    return (ROOMS_DIRECTORY / f"{room_name}.json").exists()
+
+
 class Card:
     def __init__(self, card_id, name, images, card_type, effects=None):
         self.card_id = card_id
@@ -101,7 +111,7 @@ def default_card_for(card_id):
         return Card(card_id, base_tile["name"], base_tile["images"], "tile")
 
     room_name = room_name_from_card_id(card_id)
-    if room_name is not None and room_name in list_rooms():
+    if room_name is not None and _room_file_exists(room_name):
         # No images/effects -- a room-card's properties (dimensions, E/S
         # count, entities by type) are computed on demand from the room's
         # current saved content (see room_card_properties below) rather than

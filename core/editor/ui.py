@@ -330,6 +330,17 @@ class CardRenderer:
         self._backing = pygame.image.load(PROJECT_ROOT / "assets" / self.BACKING_PATH).convert_alpha()
         self._cache = {}
         self._sprite_cache = {}
+        # card_id -> Card, and room_name -> room_card_properties() result --
+        # every caller that needs a Card object to hand to get_surface (or a
+        # room card's dimensions/E-S/entity counts for the standard-mode
+        # detail readout) used to call CardManager().load(card_id)/
+        # room_card_properties(room_name) fresh -- a JSON-or-disk-scan read,
+        # for a room card even a full Dungeon reload -- every single frame
+        # a card is visible, even though only the already-cached composited
+        # Surface actually needed the result. Both invalidate together with
+        # clear_cache() below, same as _cache/_sprite_cache.
+        self._card_cache = {}
+        self._properties_cache = {}
 
     def clear_cache(self):
         """Called by CardPanelUI.refresh() -- a freshly reloaded card's
@@ -337,6 +348,8 @@ class CardRenderer:
         keep showing a stale composited image."""
         self._cache.clear()
         self._sprite_cache.clear()
+        self._card_cache.clear()
+        self._properties_cache.clear()
 
     def get_surface(self, card, pixel_height):
         key = (card.card_id, pixel_height)
@@ -345,6 +358,37 @@ class CardRenderer:
             surface = self._compose(card, pixel_height)
             self._cache[key] = surface
         return surface
+
+    def get_card(self, card_id):
+        """The Card for card_id, loaded via CardManager().load() at most
+        once per clear_cache() cycle instead of once per frame per visible
+        card -- callers that used to do their own `CardManager().load(...)`
+        right before handing the result to get_surface (CardPanelUI's grid/
+        list, GeneratorPanelUI's room-card grid, Creator's drag-follow
+        sprite) should call this instead. Not cached if load() returns None
+        (an id that doesn't currently resolve to anything) -- retried next
+        call rather than permanently remembered as missing, in case the
+        underlying data reappears (e.g. a deleted-then-recreated room)."""
+        card = self._card_cache.get(card_id)
+        if card is None:
+            card = CardManager().load(card_id)
+            if card is not None:
+                self._card_cache[card_id] = card
+        return card
+
+    def get_room_properties(self, room_name):
+        """room_card_properties(room_name), cached -- it reloads a whole
+        Dungeon from the room's JSON and re-walks every placed object, the
+        exact same work _sprite_for's own render_room_thumbnail (see
+        core.data.cards.resolve_card_sprite) does right next to it for the
+        room's thumbnail, which IS already cached via _sprite_cache. Used by
+        CardPanelUI's standard-mode detail readout, recomputed every frame
+        while a room card is selected."""
+        properties = self._properties_cache.get(room_name)
+        if properties is None:
+            properties = room_card_properties(room_name)
+            self._properties_cache[room_name] = properties
+        return properties
 
     def _sprite_for(self, card_id):
         if card_id not in self._sprite_cache:
@@ -518,14 +562,20 @@ class CardPanelUI(_ResizableCornerMixin):
         20 entries) to just rebuild outright rather than diff. Also clears
         the renderer's cache and resets scroll, since a fresh entry can
         follow a card_collection change (giving/spending cards) that the
-        enlarged grid needs to reflect."""
-        manager = CardManager()
-        self._card_ids = manager.list_known_card_ids()
+        enlarged grid needs to reflect.
+
+        clear_cache() runs BEFORE the loop below (not after, as it used to)
+        so the loop's own self._renderer.get_card(card_id) calls populate a
+        fresh cache instead of one that's immediately thrown away -- the
+        very first render after a refresh no longer has to re-resolve every
+        visible card from disk a second time."""
+        self._renderer.clear_cache()
+        self._card_ids = CardManager().list_known_card_ids()
         entries = []
         self._owned = []
         self._owned_counts = {}
         for card_id in self._card_ids:
-            card = manager.load(card_id)
+            card = self._renderer.get_card(card_id)
             if card.card_type == "room":
                 # A room-card's existence is 1:1 with its saved file, not a
                 # card_collection stock -- always "owned" (see the Card
@@ -539,7 +589,6 @@ class CardPanelUI(_ResizableCornerMixin):
             if owned > 0:
                 self._owned.append((card_id, owned))
         self.browser.set_rooms(entries)
-        self._renderer.clear_cache()
         self._scroll_row = 0
 
     # -- enlarged-mode grid layout/scroll --
@@ -677,10 +726,10 @@ class CardPanelUI(_ResizableCornerMixin):
         self.border.draw(screen, self.detail_rect)
         if self.browser.selected is not None and 0 <= self.browser.selected < len(self._card_ids):
             card_id = self._card_ids[self.browser.selected]
-            card = CardManager().load(card_id)
+            card = self._renderer.get_card(card_id)
             room_name = room_name_from_card_id(card_id)
             if room_name is not None:
-                props = room_card_properties(room_name)
+                props = self._renderer.get_room_properties(room_name)
                 lines = [
                     f"Nom : {card.name}",
                     f"Dimensions : {props['width']}x{props['height']}",
@@ -716,19 +765,18 @@ class CardPanelUI(_ResizableCornerMixin):
 
         self._hovered_card_id = None
         deferred_hover = None
-        manager = CardManager()
         for card_id, count, rect in self._stack_layout():
             if rect.collidepoint(mouse_pos):
                 self._hovered_card_id = card_id
                 deferred_hover = (card_id, count, rect)
                 continue
-            self._draw_stack(screen, manager.load(card_id), count, rect, self.GRID_CARD_HEIGHT)
+            self._draw_stack(screen, self._renderer.get_card(card_id), count, rect, self.GRID_CARD_HEIGHT)
 
         # The hovered stack is drawn last (on top of its neighbors) and at
         # HOVER_SCALE, centered on its own slot -- see class docstring.
         if deferred_hover is not None:
             card_id, count, rect = deferred_hover
-            self._draw_stack(screen, manager.load(card_id), count, rect, round(self.GRID_CARD_HEIGHT * self.HOVER_SCALE), center_on=rect.center)
+            self._draw_stack(screen, self._renderer.get_card(card_id), count, rect, round(self.GRID_CARD_HEIGHT * self.HOVER_SCALE), center_on=rect.center)
 
         screen.set_clip(previous_clip)
 
@@ -737,7 +785,7 @@ class CardPanelUI(_ResizableCornerMixin):
             pygame.draw.rect(screen, (150, 150, 150), self._slider_thumb_rect())
 
         if self._focused_card_id is not None:
-            focused_card = manager.load(self._focused_card_id)
+            focused_card = self._renderer.get_card(self._focused_card_id)
             surface = self._renderer.get_surface(focused_card, self.FOCUS_HEIGHT)
             screen.blit(surface, (screen.get_width() / 2 - surface.get_width() / 2, screen.get_height() / 2 - surface.get_height() / 2))
 
@@ -926,14 +974,13 @@ class GeneratorPanelUI(_ResizableCornerMixin):
         slot_w = card_width + self.GRID_CELL_SPACING
         slot_h = self.GRID_CARD_HEIGHT + self.GRID_CELL_SPACING
         columns = self._grid_columns()
-        manager = CardManager()
 
         previous_clip = screen.get_clip()
         screen.set_clip(area)
         for index, room_name in enumerate(room_names):
             row, col = divmod(index, columns)
             pos = (area.x + 8 + col * slot_w, area.y + 8 + row * slot_h)
-            card = manager.load(room_card_id(room_name))
+            card = self._renderer.get_card(room_card_id(room_name))
             surface = self._renderer.get_surface(card, self.GRID_CARD_HEIGHT)
             screen.blit(surface, pos)
         screen.set_clip(previous_clip)

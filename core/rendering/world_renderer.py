@@ -35,6 +35,17 @@ class WorldRenderer:
         self._tile_cache = {}
         self._object_sprites = {}
         self._object_sprite_cache = {}
+        # (doorway_cells, spawn_cells, pillars), cached against the
+        # objects_version they were computed from -- see
+        # _get_objects_derived. A WorldRenderer is always owned 1:1 by
+        # exactly one Dungeon (constructed once in Dungeon.__init__, never
+        # shared across dungeons), so a bare instance attribute is safe
+        # here, no dict keyed by dungeon needed.
+        self._objects_cache = None
+        # set of (x, y) source cells needing the debug south-border ledge
+        # tile drawn one cell below them, cached against terrain_version --
+        # see _get_ledge_cells.
+        self._ledge_cache = None
 
     def _get_object_frames(self, object_type, variant=None):
         cache_key = (object_type, variant)
@@ -77,8 +88,7 @@ class WorldRenderer:
         # are always exactly contiguous, no matter the zoom.
         tile_px = round(tile_size * zoom)
         columns = self.tileset.get_width() // TILE_SIZE
-        doorway_cells = self._doorway_cells(dungeon)
-        spawn_cells = self._spawn_cells(dungeon)
+        doorway_cells, spawn_cells, _pillars = self._get_objects_derived(dungeon)
 
         origin_x, origin_y = camera.world_to_screen(0, 0)
         origin_x, origin_y = round(origin_x), round(origin_y)
@@ -110,14 +120,13 @@ class WorldRenderer:
 
         if show_grid:
             hide_border_cells = hide_border_cells or ()
-            for y, row in enumerate(dungeon.logical_grid):
-                for x, cell in enumerate(row):
-                    if cell == EMPTY or (x, y) in hide_border_cells:
-                        continue
-                    south_y = y + 1
-                    if south_y >= dungeon.height or dungeon.logical_grid[south_y][x] == EMPTY:
-                        scaled = self._get_scaled_tile(self.BORDER_TILE_INDEX, tile_px, columns)
-                        screen.blit(scaled, (origin_x + x * tile_px, origin_y + south_y * tile_px))
+            ledge_source_cells = self._get_ledge_cells(dungeon)
+            scaled_ledge = self._get_scaled_tile(self.BORDER_TILE_INDEX, tile_px, columns)
+            for x, y in ledge_source_cells:
+                if (x, y) in hide_border_cells:
+                    continue
+                south_y = y + 1
+                screen.blit(scaled_ledge, (origin_x + x * tile_px, origin_y + south_y * tile_px))
 
             for gy in range(dungeon.height + 1):
                 world_y = gy * tile_size
@@ -180,6 +189,58 @@ class WorldRenderer:
     @classmethod
     def _spawn_cells(cls, dungeon):
         return cls._footprint_cells(dungeon, lambda obj: obj["type"] == "spawn")
+
+    def _get_objects_derived(self, dungeon):
+        """(doorway_cells, spawn_cells, pillars), recomputed only when
+        dungeon.object_manager.objects_version has actually changed --
+        render() used to rebuild doorway/spawn cells from scratch (a full
+        scan of every placed object) every single frame, and
+        _draw_pillar_tops did its own separate full scan for pillars alone,
+        even though objects change rarely (a paint/erase/move/prune, not
+        per-frame). Folded into one cache since all three share the exact
+        same invalidation signal. Same versioned-cache shape as
+        DungeonAssembly._border_cells_by_room's use of terrain_version --
+        objects_version is the object-list equivalent."""
+        version = dungeon.object_manager.objects_version
+        cached = self._objects_cache
+        if cached is not None and cached[0] == version:
+            return cached[1], cached[2], cached[3]
+
+        doorway_cells = self._doorway_cells(dungeon)
+        spawn_cells = self._spawn_cells(dungeon)
+        pillars = [obj for obj in dungeon.object_manager.objects if obj["type"] == "pillar"]
+        self._objects_cache = (version, doorway_cells, spawn_cells, pillars)
+        return doorway_cells, spawn_cells, pillars
+
+    def _get_ledge_cells(self, dungeon):
+        """Every (x, y) SOURCE cell (a non-empty cell whose south neighbor is
+        EMPTY, off-grid counting as EMPTY) needing the debug south-border
+        ledge tile (BORDER_TILE_INDEX) drawn one cell below it -- cached
+        against dungeon.terrain_version instead of rescanned every frame
+        (render()'s show_grid block used to be a full O(width*height) grid
+        scan every call). Keyed by the SOURCE cell, not the drawn position,
+        to match hide_border_cells' own coordinate convention
+        (DungeonAssembly._south_seam_cells collects source floor cells, not
+        the cell below them). terrain_version is bumped by both Dungeon.
+        paint_cell (Creator painting/erasing) and destroy_area (exploration-
+        time destruction), so a hole freshly carved into a room -- by either
+        -- shows its own ledge on the very next render instead of only ever
+        reflecting whatever the grid looked like when this was first cached."""
+        version = dungeon.terrain_version
+        cached = self._ledge_cache
+        if cached is not None and cached[0] == version:
+            return cached[1]
+
+        cells = set()
+        for y, row in enumerate(dungeon.logical_grid):
+            for x, cell in enumerate(row):
+                if cell == EMPTY:
+                    continue
+                south_y = y + 1
+                if south_y >= dungeon.height or dungeon.logical_grid[south_y][x] == EMPTY:
+                    cells.add((x, y))
+        self._ledge_cache = (version, cells)
+        return cells
 
     def render_foreground_objects(self, screen, dungeon, camera, hide_object_types=None):
         """Objects ObjectManager.is_foreground_object() flags (e.g. an L/R torch), plus every pillar's decorative top -- call this after drawing the player sprite."""
@@ -257,8 +318,7 @@ class WorldRenderer:
         if "pillar" in hide_object_types:
             return
 
-        object_manager = dungeon.object_manager
-        pillars = [obj for obj in object_manager.objects if obj["type"] == "pillar"]
+        _doorway_cells, _spawn_cells, pillars = self._get_objects_derived(dungeon)
         if not pillars:
             return
 

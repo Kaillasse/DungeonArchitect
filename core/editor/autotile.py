@@ -285,6 +285,19 @@ def select_sprite(
 # Génération sprite grid
 # --------------------------------------------------------------------
 
+def _resolve_cell_sprite(logical_grid: List[List[int]], x: int, y: int) -> int:
+    """The sprite index for a single cell -- shared by resolve_sprite_grid's
+    full-grid rebuild and resolve_sprite_grid_region's bounded one, so the
+    two never risk drifting into computing a cell's sprite differently."""
+    logical = logical_grid[y][x]
+    if logical == EMPTY:
+        return -1
+
+    neighbors = get_logical_neighbors(logical_grid, x, y)
+    sprite = select_sprite(logical, neighbors)
+    return _pick_variant(sprite, x, y)
+
+
 def resolve_sprite_grid(
     logical_grid: List[List[int]],
 ):
@@ -296,36 +309,48 @@ def resolve_sprite_grid(
 
     w = len(logical_grid[0])
 
-    sprite_grid = [
-
-        [-1] * w
-
-        for _ in range(h)
-
+    return [
+        [_resolve_cell_sprite(logical_grid, x, y) for x in range(w)]
+        for y in range(h)
     ]
 
-    for y in range(h):
-        for x in range(w):
 
-            logical = logical_grid[y][x]
+# A cell's sprite only ever depends on its own 4 cardinal neighbors (see
+# get_logical_neighbors/select_sprite) -- so a logical-grid edit confined to
+# a bounded neighborhood only ever needs a correspondingly bounded
+# neighborhood of sprites recomputed, never resolve_sprite_grid's full
+# O(width*height) rescan. Dungeon.paint_cell's autotile cascade
+# (build_walls_around/unbuild_walls_around, each strictly local to the
+# clicked cell's own 8-neighborhood, chained at most one further hop by
+# paint_cell's erase-a-wall branch) never mutates the logical grid beyond
+# Chebyshev distance 2 of the clicked cell -- +1 more for the cardinal-
+# neighbor sprite dependency above gives a safe upper bound of 3.
+LOCAL_EDIT_SPRITE_RADIUS = 3
 
-            if logical == EMPTY:
-                continue
 
-            neighbors = get_logical_neighbors(
-                logical_grid,
-                x,
-                y,
-            )
+def resolve_sprite_grid_region(
+    logical_grid: List[List[int]],
+    sprite_grid: List[List[int]],
+    center_x: int,
+    center_y: int,
+    radius: int = LOCAL_EDIT_SPRITE_RADIUS,
+) -> None:
+    """Recomputes sprite_grid IN PLACE for every cell within `radius`
+    (Chebyshev) of (center_x, center_y) instead of resolve_sprite_grid's
+    full-grid rebuild -- see the module comment above LOCAL_EDIT_SPRITE_RADIUS
+    for why a bounded neighborhood is exactly as correct. `sprite_grid` must
+    already have the same dimensions as `logical_grid` (true throughout
+    Dungeon.paint_cell/destroy_area's lifetime -- only a load/resize ever
+    changes dimensions, and those go through resolve_sprite_grid's full
+    rebuild instead, see Dungeon.resync_sprite_grid)."""
+    h = len(logical_grid)
+    if h == 0:
+        return
+    w = len(logical_grid[0])
 
-            sprite = select_sprite(
-                logical,
-                neighbors,
-            )
-
-            sprite_grid[y][x] = _pick_variant(sprite, x, y)
-
-    return sprite_grid
+    for y in range(max(0, center_y - radius), min(h, center_y + radius + 1)):
+        for x in range(max(0, center_x - radius), min(w, center_x + radius + 1)):
+            sprite_grid[y][x] = _resolve_cell_sprite(logical_grid, x, y)
 
 
 def _pick_variant(sprite_index: int, x: int, y: int) -> int:

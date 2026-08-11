@@ -468,7 +468,84 @@ class ObjectManager:
 
     def __init__(self, dungeon):
         self.dungeon = dungeon
-        self.objects = []
+        # _cell_index/objects_version back get_object_at -- see the `objects`
+        # property setter below and _index_object/_deindex_object. Kept in
+        # sync incrementally by add_object/move_object (the only two methods
+        # that ever add a cell or move one without replacing the whole list);
+        # any wholesale replacement of `self.objects` (prune_invalid,
+        # SaveManager.apply_json's direct `object_manager.objects = ...`)
+        # goes through the property setter instead, which just rebuilds the
+        # index from scratch -- simpler and safe for an infrequent, already
+        # O(n)-anyway operation, and it means an external assignment can
+        # never silently leave the index stale.
+        self._cell_index = {}
+        self.objects_version = 0
+        # id(obj) -> obj, every object currently animating (activated/open
+        # and not yet holding on its last frame) -- see begin_animation/
+        # update() below. Rebuilt from scratch on any wholesale replacement
+        # of `self.objects` (the property setter), same reasoning as
+        # _cell_index: a fresh load can arrive with objects already
+        # activated/open mid-animation (see SaveManager's "additive field"
+        # docs), and prune_invalid dropping an animating object must drop it
+        # from here too.
+        self._animating = {}
+        self._objects = []
+
+    @property
+    def objects(self):
+        return self._objects
+
+    @objects.setter
+    def objects(self, value):
+        self._objects = value
+        self._rebuild_cell_index()
+        self._rebuild_animating()
+        self.objects_version += 1
+
+    def _rebuild_animating(self):
+        self._animating = {}
+        for obj in self._objects:
+            if obj.get("activated") or obj.get("open"):
+                self.begin_animation(obj)
+
+    def begin_animation(self, obj):
+        """Registers `obj` as currently animating -- call right after
+        setting "activated"/"open" True for the first time, from wherever
+        that happens: this class's own check_button_trigger, or
+        core.world.assembly's cross-room button/door-sync logic (each
+        against the ObjectManager that actually owns the target object, not
+        necessarily `self`), or Explorator._interact_with_chest opening a
+        chest. update() below only ever iterates this set instead of every
+        placed object, and self-removes an entry once it reaches its last
+        frame -- calling this again for an already-registered or
+        already-finished object is harmless (dict keyed by id(obj), and a
+        finished one is simply re-pruned on the very next update() tick)."""
+        self._animating[id(obj)] = obj
+
+    def _footprint_cells_of(self, obj):
+        size_x, size_y = OBJECT_TYPES[obj["type"]]["size"]
+        for dx in range(size_x):
+            for dy in range(size_y):
+                yield obj["x"] + dx, obj["y"] + dy
+
+    def _index_object(self, obj):
+        # setdefault, not a plain assignment: if two objects' footprints ever
+        # overlapped (shouldn't happen through ordinary placement, but
+        # nothing here re-validates a hand-edited save), this preserves the
+        # exact same "first in self.objects order wins" result the old
+        # linear scan in get_object_at used to produce.
+        for cell in self._footprint_cells_of(obj):
+            self._cell_index.setdefault(cell, obj)
+
+    def _deindex_object(self, obj):
+        for cell in self._footprint_cells_of(obj):
+            if self._cell_index.get(cell) is obj:
+                del self._cell_index[cell]
+
+    def _rebuild_cell_index(self):
+        self._cell_index = {}
+        for obj in self._objects:
+            self._index_object(obj)
 
     def _in_bounds(self, grid_x, grid_y):
         return 0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height
@@ -498,17 +575,20 @@ class ObjectManager:
             placed["loot"] = dict(config.get("default_loot", {}))
             placed["item_loot"] = dict(config.get("default_item_loot", {}))
 
-        self.objects.append(placed)
+        self._objects.append(placed)
+        self._index_object(placed)
+        self.objects_version += 1
 
         return True
 
     def get_object_at(self, grid_x, grid_y):
-        """The object whose footprint (OBJECT_TYPES[type]["size"]) covers this cell -- not just its origin, so a 2-wide "wall" is found from either cell it occupies."""
-        for obj in self.objects:
-            size_x, size_y = OBJECT_TYPES[obj["type"]]["size"]
-            if obj["x"] <= grid_x < obj["x"] + size_x and obj["y"] <= grid_y < obj["y"] + size_y:
-                return obj
-        return None
+        """The object whose footprint (OBJECT_TYPES[type]["size"]) covers this
+        cell -- not just its origin, so a 2-wide "wall" is found from either
+        cell it occupies. O(1) via _cell_index rather than a linear scan --
+        this is the hottest call in the collision path (is_cell_walkable, up
+        to 4 corners x every entity x every frame), so an O(n) scan here
+        multiplied badly with entity count."""
+        return self._cell_index.get((grid_x, grid_y))
 
     def is_chest(self, object_type):
         """True for a chest-like type (currently just lilchest) -- its
@@ -596,6 +676,7 @@ class ObjectManager:
         obj["activated"] = True
         obj["frame"] = 0
         obj["anim_timer"] = 0.0
+        self.begin_animation(obj)
         SoundManager().play("button_pressed")
 
         for link_target in obj.get("links", []):
@@ -605,17 +686,23 @@ class ObjectManager:
                 target["open"] = True
                 target["frame"] = 0
                 target["anim_timer"] = 0.0
+                self.begin_animation(target)
 
     def update(self, dt):
-        """Advance animation for any activated/open object, holding on its last frame once reached."""
-        for obj in self.objects:
-            if not (obj.get("activated") or obj.get("open")):
-                continue
+        """Advance animation for any currently-animating object (see
+        begin_animation), holding on its last frame once reached and
+        dropping out of _animating right then -- iterates only that set
+        instead of every placed object, since most of a room's objects are
+        never activated/open at all and the ones that are eventually finish
+        and stop needing per-frame work."""
+        finished_ids = []
 
+        for object_id, obj in self._animating.items():
             last_frame = OBJECT_TYPES[obj["type"]]["frames"] - 1
             frame = obj.get("frame", 0)
 
             if frame >= last_frame:
+                finished_ids.append(object_id)
                 continue
 
             timer = obj.get("anim_timer", 0.0) + dt
@@ -626,6 +713,12 @@ class ObjectManager:
 
             obj["frame"] = frame
             obj["anim_timer"] = timer
+
+            if frame >= last_frame:
+                finished_ids.append(object_id)
+
+        for object_id in finished_ids:
+            del self._animating[object_id]
 
     def link(self, obj_a, obj_b):
         """Symmetric link between two linkable objects (e.g. a button and the gate/wall it opens)."""
@@ -652,6 +745,8 @@ class ObjectManager:
         if not valid:
             return False
 
+        self._deindex_object(obj)
+
         old_x, old_y = obj["x"], obj["y"]
         obj["x"], obj["y"] = grid_x, grid_y
 
@@ -659,6 +754,9 @@ class ObjectManager:
             obj["variant"] = variant
         else:
             obj.pop("variant", None)
+
+        self._index_object(obj)
+        self.objects_version += 1
 
         self._retarget_links(old_x, old_y, grid_x, grid_y)
 

@@ -11,9 +11,9 @@ from core.engine.gamestate import GameState
 from core.engine.room_manager import RoomManager
 from core.engine.camera import Camera
 from core.data.ressources import FLOOR, next_new_donjon_name
-from core.editor.autotile import WALL
+from core.editor.autotile import WALL, LOCAL_EDIT_SPRITE_RADIUS
 from core.data.profile_manager import ProfileManager
-from core.data.cards import CardManager, room_name_from_card_id, room_card_manifest
+from core.data.cards import room_name_from_card_id, room_card_manifest
 from core.world.home import home_room_name, wants_exploration
 from core.editor.ui import GeneratorPanelUI, RoomPanelUI, ChestPanelUI, RolePanelUI, CardPanelUI, CardRenderer
 from core.editor.tools import ObjectTool
@@ -83,6 +83,16 @@ class Creator:
         # dragging a card to place it or relocating an already-placed
         # object -- see run()'s render section.
         self.DRAG_CARD_HEIGHT = 64
+
+        # Built once here instead of every render() frame (run() used to
+        # call pygame.font.SysFont("arial", ...) unconditionally each frame
+        # for the title, and again every frame an assembly preview was open
+        # for the hint text) -- every other font in this UI layer is already
+        # a constructor-built instance attribute (see ToolPaletteUI/
+        # CardPanelUI/etc in core.editor.ui); these two were the only
+        # stragglers left rebuilding themselves per frame.
+        self.title_font = pygame.font.SysFont("arial", 24)
+        self.assembly_hint_font = pygame.font.SysFont("arial", 16)
 
         # Draggable/collapsible title-bar wrappers around the docked panels
         # (not the modal chest/role popups, which open centered on demand
@@ -202,6 +212,13 @@ class Creator:
         if mode == "save":
             self.room_manager.save(selection)
             self.current_room = selection
+            # A saved room's card (a new room-card if `selection` is a brand
+            # new name, or an existing one whose manifest/properties/
+            # thumbnail just changed) must not keep showing whatever
+            # CardRenderer cached before this save -- see CardRenderer.
+            # get_room_properties/_sprite_for, both keyed off the room's
+            # on-disk content and only invalidated by clear_cache().
+            self._refresh_card_panel()
 
         elif mode == "load":
             kind, name = selection
@@ -428,22 +445,45 @@ class Creator:
             self._paint_raw_and_charge(grid_x, grid_y, WALL, "tile_wall")
         # else: neither tool active -- nothing to paint.
 
+    def _objects_near(self, grid_x, grid_y, radius=LOCAL_EDIT_SPRITE_RADIUS):
+        """Every currently-placed object whose footprint falls within
+        `radius` (Chebyshev) of (grid_x, grid_y) -- id(obj) -> obj, for
+        _refund_pruned_objects to snapshot before a terrain edit. A single
+        paint/erase can only ever change logical_grid cells within
+        LOCAL_EDIT_SPRITE_RADIUS of the clicked cell (see autotile.py's own
+        docstring on that constant), and every placement rule
+        (_resolve_placement) only ever reads an object's own cell plus at
+        most one more cell out (a torch's adjacent wall, an E/S doorway's 4
+        neighbors, a stairs neighbor) -- so an object more than
+        LOCAL_EDIT_SPRITE_RADIUS away from the click can never have its
+        validity affected by that edit, and doesn't need to be in this
+        snapshot at all. Uses ObjectManager.get_object_at (O(1) per cell via
+        its own cell index) over the padded neighborhood instead of scanning
+        the dungeon's full object list, which is what made the old
+        before/after diff cost O(total placed objects) per painted cell of
+        a drag stroke regardless of room size."""
+        object_manager = self.dungeon.object_manager
+        found = {}
+        for y in range(grid_y - radius, grid_y + radius + 1):
+            for x in range(grid_x - radius, grid_x + radius + 1):
+                obj = object_manager.get_object_at(x, y)
+                if obj is not None:
+                    found[id(obj)] = obj
+        return found
+
     def _refund_pruned_objects(self, objects_before):
-        """Refunds the card of any placed object that vanished from
-        object_manager.objects between objects_before (a snapshot taken
-        before a terrain edit) and now -- prune_invalid() (run at the end
-        of every Dungeon.paint_cell call, pose or erase) drops any object
-        whose placement rule no longer holds, e.g. a vase whose FLOOR cell
-        just got painted over with a WALL. An object's validity can depend
-        on a NEIGHBORING cell too (a doorway's opposite-EMPTY/FLOOR shape,
-        an L/R torch's adjacent wall), so this is a full before/after list
-        diff (by identity) rather than a single-cell lookup -- shared by
-        every terrain-editing method below (pose and erase alike) so a
-        card is never silently lost to a side effect of any kind of
-        editing, not just erasing."""
-        after_ids = {id(obj) for obj in self.dungeon.object_manager.objects}
-        for obj in objects_before:
-            if id(obj) not in after_ids:
+        """Refunds the card of any object in `objects_before` (id(obj) ->
+        obj, gathered via _objects_near right before a terrain edit -- see
+        call sites below) that's no longer the object occupying its own
+        recorded cell -- prune_invalid() (run at the end of every Dungeon.
+        paint_cell call, pose or erase) only ever REMOVES an object, never
+        relocates one, so "is this exact object dict still what
+        get_object_at(obj.x, obj.y) returns" is a sufficient, O(1)-per-
+        candidate presence check -- no need to re-diff the whole object
+        list to find out."""
+        object_manager = self.dungeon.object_manager
+        for obj in objects_before.values():
+            if object_manager.get_object_at(obj["x"], obj["y"]) is not obj:
                 self._refund_card(obj["type"])
 
     def _paint_raw_and_charge(self, grid_x, grid_y, cell_type, card_id):
@@ -466,7 +506,7 @@ class Creator:
         previous_card = {FLOOR: "tile_floor", WALL: "tile_wall"}.get(previous)
         if previous_card is not None:
             self._refund_card(previous_card)
-        objects_before = list(self.dungeon.object_manager.objects)
+        objects_before = self._objects_near(grid_x, grid_y)
         self.dungeon.paint_cell(grid_x, grid_y, erase=False, cell_type=cell_type)
         self._refund_pruned_objects(objects_before)
 
@@ -490,7 +530,7 @@ class Creator:
             return
         if previous == WALL:
             self._refund_card("tile_wall")
-        objects_before = list(self.dungeon.object_manager.objects)
+        objects_before = self._objects_near(grid_x, grid_y)
         self.dungeon.paint_cell(
             grid_x, grid_y, erase=False,
             wall_gate=lambda nx, ny: self._consume_card("tile_wall"),
@@ -503,9 +543,10 @@ class Creator:
         ever called), so the clicked cell is the only terrain cell that
         can possibly change -- refunds its prior type directly, no
         before/after grid diff needed for the terrain itself. Object
-        pruning still needs the full diff -- see _refund_pruned_objects."""
+        pruning still needs the bounded-neighborhood diff -- see
+        _refund_pruned_objects/_objects_near."""
         cell_before = self.dungeon.logical_grid[grid_y][grid_x]
-        objects_before = list(self.dungeon.object_manager.objects)
+        objects_before = self._objects_near(grid_x, grid_y)
 
         self.dungeon.paint_cell(grid_x, grid_y, erase=True)
 
@@ -519,8 +560,11 @@ class Creator:
         (self.moving_object) -- replaces the old ObjectPalette.
         get_current_frame(type), now that the card collection is the
         object-placement tool. Uses the same shared CardRenderer/cache the
-        Cards panel itself renders from."""
-        card = CardManager().load(object_type)
+        Cards panel itself renders from -- get_card() resolves object_type
+        once per clear_cache() cycle (not once per rendered frame of the
+        drag, which used to mean a fresh CardManager().load() disk read on
+        every single frame the drag sprite was drawn)."""
+        card = self.card_renderer.get_card(object_type)
         return self.card_renderer.get_surface(card, self.DRAG_CARD_HEIGHT)
 
     def _try_place_object(self):
@@ -989,10 +1033,8 @@ class Creator:
 
             self.screen.fill((20, 20, 20))
 
-            title_font = pygame.font.SysFont("arial", 24)
-
             self.screen.blit(
-                title_font.render(
+                self.title_font.render(
                     "Editeur de salle",
                     True,
                     (255, 255, 255),
@@ -1008,9 +1050,8 @@ class Creator:
                     active_floor=self.assembly_active_floor,
                 )
 
-                hint_font = pygame.font.SysFont("arial", 16)
                 self.screen.blit(
-                    hint_font.render(
+                    self.assembly_hint_font.render(
                         "Apercu du donjon genere -- ECHAP pour revenir a l'edition",
                         True,
                         (220, 220, 220),
