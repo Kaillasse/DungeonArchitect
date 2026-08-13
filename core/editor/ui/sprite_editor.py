@@ -101,7 +101,6 @@ class SpriteEditorPanelUI:
     MODES = (("tuile", "Tuile"), ("pack", "Pack"), ("bitmap", "Bitmap"))
 
     NEIGHBOR_KEYS = ("up", "right", "down", "left")
-    NEIGHBOR_LABELS = {"up": "Haut", "right": "Droite", "down": "Bas", "left": "Gauche"}
     NEIGHBOR_VALUE_LABELS = {EMPTY: "Vide", FLOOR: "Sol", WALL: "Mur"}
     NEIGHBOR_VALUE_COLORS = {EMPTY: (50, 50, 55), FLOOR: (214, 186, 138), WALL: (92, 78, 66)}
     NEIGHBOR_CYCLE = (EMPTY, FLOOR, WALL)

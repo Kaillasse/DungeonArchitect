@@ -39,7 +39,6 @@ ACTIONS = (
     ("inventory", "Inventaire", {"kind": "key", "code": pygame.K_e}, ("key",)),
 )
 
-ACTION_LABELS = {action_id: label for action_id, label, _, _ in ACTIONS}
 ACTION_KINDS = {action_id: kinds for action_id, _, _, kinds in ACTIONS}
 _ACTION_DEFAULTS = {action_id: default for action_id, _, default, _ in ACTIONS}
 

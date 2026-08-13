@@ -172,8 +172,6 @@ class Explorator(NetworkSessionMixin):
         # uses to reach clients that never simulate it themselves.
         self.dungeon_entrance_ready = set()
 
-        self.grid_offset_x = 0
-        self.grid_offset_y = 0
         self.grid_zoom = 1
 
         # -----------------------------
@@ -689,32 +687,43 @@ class Explorator(NetworkSessionMixin):
         return triples
 
     @staticmethod
+    def _scatter_loot(dungeon, x, y, loot, item_loot, spread):
+        """Drops `loot` (currency_type -> count) as individual coin Pickups
+        (2 gold + 1 blue -> 3 separate coins, not one "x2" stack) and
+        `item_loot` (item_id -> count) as individual ItemPickups (e.g.
+        dynamite), each scattered +/-spread px around (x, y) on `dungeon`'s
+        own PickupManager. Shared by _spawn_loot (enemy death) and
+        _interact_with_chest (opening a chest) -- only the loot-table source
+        and scatter radius differ between the two callers."""
+        for currency_type, count in loot.items():
+            for _ in range(count):
+                dungeon.pickup_manager.spawn(
+                    currency_type,
+                    x + random.uniform(-spread, spread),
+                    y + random.uniform(-spread, spread),
+                )
+
+        for item_id, count in item_loot.items():
+            for _ in range(count):
+                dungeon.pickup_manager.spawn_item(
+                    make_item(item_id),
+                    ITEM_DEFINITIONS[item_id]["slot"],
+                    x + random.uniform(-spread, spread),
+                    y + random.uniform(-spread, spread),
+                )
+
+    @staticmethod
     def _spawn_loot(enemy, enemy_dungeon):
-        """Drops ENEMY_STATS[enemy.enemy_type]["loot"] as individual coin
-        Pickups (2 gold + 1 blue -> 3 separate coins, not one "x2" stack) and
-        ["item_loot"] as individual ItemPickups (e.g. dynamite), scattered a
-        few pixels around the death spot. enemy.position is already local to
+        """Drops ENEMY_STATS[enemy.enemy_type]'s loot/item_loot around the
+        death spot via _scatter_loot. enemy.position is already local to
         enemy_dungeon (never offset-translated -- see Animal/Enemy's own
         coordinate convention), so no conversion is needed before handing it
         to that same dungeon's PickupManager."""
         stats = ENEMY_STATS[enemy.enemy_type]
-
-        for currency_type, count in stats.get("loot", {}).items():
-            for _ in range(count):
-                enemy_dungeon.pickup_manager.spawn(
-                    currency_type,
-                    enemy.position.x + random.uniform(-10, 10),
-                    enemy.position.y + random.uniform(-10, 10),
-                )
-
-        for item_id, count in stats.get("item_loot", {}).items():
-            for _ in range(count):
-                enemy_dungeon.pickup_manager.spawn_item(
-                    make_item(item_id),
-                    ITEM_DEFINITIONS[item_id]["slot"],
-                    enemy.position.x + random.uniform(-10, 10),
-                    enemy.position.y + random.uniform(-10, 10),
-                )
+        Explorator._scatter_loot(
+            enemy_dungeon, enemy.position.x, enemy.position.y,
+            stats.get("loot", {}), stats.get("item_loot", {}), spread=10,
+        )
 
     def _collect_pickups(self, player_hitbox, inventory):
         """Credits inventory.currency for every ground Pickup player_hitbox
@@ -816,21 +825,7 @@ class Explorator(NetworkSessionMixin):
         dungeon.object_manager.begin_animation(obj)
 
         chest_x, chest_y = dungeon.grid_to_world(obj["x"], obj["y"])
-        for currency_type, count in obj.get("loot", {}).items():
-            for _ in range(count):
-                dungeon.pickup_manager.spawn(
-                    currency_type,
-                    chest_x + random.uniform(-12, 12),
-                    chest_y + random.uniform(-12, 12),
-                )
-        for item_id, count in obj.get("item_loot", {}).items():
-            for _ in range(count):
-                dungeon.pickup_manager.spawn_item(
-                    make_item(item_id),
-                    ITEM_DEFINITIONS[item_id]["slot"],
-                    chest_x + random.uniform(-12, 12),
-                    chest_y + random.uniform(-12, 12),
-                )
+        self._scatter_loot(dungeon, chest_x, chest_y, obj.get("loot", {}), obj.get("item_loot", {}), spread=12)
 
         session.player.play_action("interact")
         if dungeon.object_manager.get_role(obj) == "dungeon_exit":

@@ -2,7 +2,7 @@
 
 import pygame
 
-from core.ui.widgets import BorderManager, RoomBrowser, Stepper
+from core.ui.widgets import BorderManager, RoomBrowser
 from core.data.ressources import list_donjons
 
 

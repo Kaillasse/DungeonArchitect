@@ -188,9 +188,6 @@ def update_autotile_pack_tiles(pack_name, updates):
         json.dump(payload, handle, indent=2, ensure_ascii=False)
     return path
 
-DEFAULT_ROOM_NAME = "room_001"
-
-
 def list_rooms():
     """Names (no .json) of every saved room, sorted."""
     return [path.stem for path in sorted(ROOMS_DIRECTORY.glob("*.json"))]
@@ -460,13 +457,6 @@ def _load_tile_metadata(path: Path) -> Dict[int, TileMetadata]:
     for key, value in raw.items():
         metadata[int(key)] = {"category": str(value.get("category", "other")).lower()}
     return metadata
-
-def load_tile_metadata(config_path: Optional[Path] = None) -> Dict[int, TileMetadata]:
-    """Load tile category metadata used for legacy save migration."""
-    path = Path(config_path or DEFAULT_TILE_METADATA_PATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return _load_tile_metadata(path)
-
 
 def get_tile_surface(
     tileset: pygame.Surface,

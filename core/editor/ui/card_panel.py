@@ -3,7 +3,7 @@
 import pygame
 
 from core.ui.widgets import BorderManager, RoomBrowser
-from core.world.object_manager import OBJECT_TYPES, register_custom_type
+from core.world.object_manager import OBJECT_TYPES
 from core.data.cards import CardManager, room_name_from_card_id
 from core.data.profile_manager import ADMINGOD_STOCK
 from core.editor.ui.mixins import _ResizableCornerMixin
@@ -82,7 +82,6 @@ class CardPanelUI(_ResizableCornerMixin):
         self._resize_last_pos = None
         self._scroll_row = 0
         self._dragging_slider = False
-        self._hovered_card_id = None
         self._focused_card_id = None
 
     @property
@@ -348,11 +347,9 @@ class CardPanelUI(_ResizableCornerMixin):
         previous_clip = screen.get_clip()
         screen.set_clip(area)
 
-        self._hovered_card_id = None
         deferred_hover = None
         for card_id, count, rect in self._stack_layout():
             if rect.collidepoint(mouse_pos):
-                self._hovered_card_id = card_id
                 deferred_hover = (card_id, count, rect)
                 continue
             self._draw_stack(screen, self._renderer.get_card(card_id), count, rect, self.GRID_CARD_HEIGHT)

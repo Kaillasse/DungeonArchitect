@@ -280,14 +280,6 @@ class PanelFrame:
         self.title = title
         self.on_change = on_change
         self.collapsed = False
-        # True once the player has actually dragged this frame (or a saved
-        # layout was restored onto it) -- lets a caller (Creator's level-
-        # driven auto-repositioning of the generation panel below the
-        # object palette) know to stop overriding a placement the player
-        # actually chose. Never set by this class on its own besides an
-        # actual drag -- Creator sets it directly when restoring a saved
-        # layout (see profile_manager.Profile.panel_layout).
-        self.user_moved = False
 
         self._dragging = False
         self._drag_last_pos = None
@@ -344,7 +336,6 @@ class PanelFrame:
             if self._dragging:
                 self._dragging = False
                 self._drag_last_pos = None
-                self.user_moved = True
                 self._notify_change()
                 return True
             return False

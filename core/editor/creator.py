@@ -210,18 +210,6 @@ class Creator:
 
         self.spawn_preview = None
 
-        self.grid_width_px = (
-            self.dungeon.width
-            * self.dungeon.tile_size
-            * self.grid_zoom
-        )
-
-        self.grid_height_px = (
-            self.dungeon.height
-            * self.dungeon.tile_size
-            * self.grid_zoom
-        )
-
     def _mouse_to_grid(self, mouse_pos):
 
         world_x, world_y = self.camera.screen_to_world(*mouse_pos)
@@ -739,10 +727,7 @@ class Creator:
         name-entry screen has necessarily run, so this can't happen in
         __init__). A missing/empty entry (a fresh profile, or a frame added
         after the profile was last saved) leaves that panel at whatever its
-        constructor already placed it at. user_moved is set True for every
-        restored frame (a leftover-but-still-correct precaution from when
-        the generator panel used to auto-follow the now-retired
-        ObjectPalette's dynamic height -- harmless to keep setting)."""
+        constructor already placed it at."""
         if self._panel_layout_seeded:
             return
         profile = self._load_profile()
@@ -754,7 +739,6 @@ class Creator:
                 continue
             frame.move_to(saved["x"], saved["y"])
             frame.collapsed = saved.get("collapsed", False)
-            frame.user_moved = True
         self._panel_layout_seeded = True
 
     def _on_panel_frame_change(self, _frame):
@@ -1222,7 +1206,7 @@ class Creator:
             # -------------------------------------------------
             # Render
             # -------------------------------------------------
-            dt = clock.tick(60) / 1000
+            clock.tick(60)
             if self.object_tool.dragging:
 
                 grid_x, grid_y = self._mouse_to_grid(

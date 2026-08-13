@@ -15,7 +15,6 @@ import pygame
 
 from core.world.dungeon import Dungeon
 from core.world.entities import PlayerRef
-from core.world.object_manager import OBJECT_TYPES
 from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DONJONS_DIRECTORY
 

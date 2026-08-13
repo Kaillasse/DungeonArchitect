@@ -68,10 +68,6 @@ class Player:
     FRAME_WIDTH = 24
     FRAME_HEIGHT = 24
 
-    # Play once and hand control back to idle/walk/run instead of looping --
-    # see play_action()/update().
-    ONE_SHOT_ANIMATIONS = ("attack", "interact", "jump")
-
     MAX_HEALTH = 2
 
     # 0-based frames (3, 4, 5) == the to-do's 1-based "frames 4, 5, 6" of the
@@ -108,7 +104,6 @@ class Player:
         self.load_assets()
         self.hitbox_width = 16
         self.hitbox_height = 10
-        self.sprite_scale = 1
 
         self.health = self.MAX_HEALTH
         self._hit_delivered_this_swing = False
