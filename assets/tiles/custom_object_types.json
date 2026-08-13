@@ -639,6 +639,7 @@
       "idle": "marche",
       "move": "marche",
       "run": "course"
-    }
+    },
+    "card_type": "pnj"
   }
 }

@@ -146,7 +146,14 @@ _BUILTIN_OBJECT_TYPES = {
         # inventory items rather than currency.
         "stats": {
             "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
-            "active_attack_frames": (6, 7),
+            # A list, not a tuple -- MechanicsPanelUI's stats editing
+            # round-trips this through update_type_mechanics/JSON (which
+            # has no tuple type, always deserializes an array as a list),
+            # so keeping the Python source a list too means the builtin's
+            # own value and a persisted-then-reloaded override compare
+            # equal (see _write_builtin_mechanics_override's no-op check)
+            # instead of permanently miscomparing tuple != list.
+            "active_attack_frames": [6, 7],
             "loot": {"gold": 2, "blue": 1},
             "item_loot": {"dynamite": 1},
         },
@@ -164,7 +171,7 @@ _BUILTIN_OBJECT_TYPES = {
         # position (~75%-87% through the swing) rather than guessed outright.
         "stats": {
             "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
-            "active_attack_frames": (11, 12),
+            "active_attack_frames": [11, 12],  # see skeleton1's own comment -- list, not tuple
             "loot": {"gold": 2, "blue": 1},
         },
     },
@@ -324,7 +331,7 @@ _custom_types = _load_custom_object_types()
 # update_type_mechanics below. A builtin's mechanics can be overridden (a
 # custom_object_types.json entry marked OVERRIDE_MARKER, holding ONLY these
 # keys) without ever touching its Python-sourced visual identity.
-MECHANICS_KEYS = ("blocks_movement", "cell_modes", "interactable", "capabilities")
+MECHANICS_KEYS = ("blocks_movement", "cell_modes", "interactable", "capabilities", "stats", "effects")
 DOORWAY_MECHANICS_KEYS = ("linkable", "blocks_until_open")
 OVERRIDE_MARKER = "__override_of_builtin__"
 
@@ -460,7 +467,7 @@ def _build_visual_fields(name, tileset, rect, size, archetype, frame_rects=None)
 
 
 def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
-                             interactable=False, lockable=False, capabilities=None):
+                             interactable=False, lockable=False, capabilities=None, stats=None, effects=None):
     """Construction pure (aucune I/O) des champs mecaniques/gameplay d'une
     entree OBJECT_TYPES -- partagee par register_custom_type et
     update_type_mechanics (custom ET builtin, voir plus bas). `cell_modes`,
@@ -479,7 +486,20 @@ def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
     meme vocabulaire que ITEM_DEFINITIONS' propre champ "capabilities" --
     voir update_item_overrides -- rendu disponible ici aussi pour qu'un
     objet du monde (pas seulement un item d'inventaire) puisse un jour
-    porter la meme capacite (ex: un vase explosif)."""
+    porter la meme capacite (ex: un vase explosif).
+
+    `stats` (health/move_speed/aggro_range/attack_range/active_attack_frames/
+    loot/item_loot -- voir _BUILTIN_OBJECT_TYPES["skeleton1"]) n'a de sens
+    que pour un mob enemy aujourd'hui (aucun animal n'en a) -- deliberement
+    PAS valide/restreint ici, meme philosophie que `capabilities` : un
+    vocabulaire generique que n'importe quel type peut porter, l'appelant
+    (MechanicsPanelUI) decide seul ce qu'il affiche/calcule pour quel type
+    de carte.
+
+    `effects` (meme forme que ITEM_DEFINITIONS' propre champ "effects" --
+    une LISTE de {"kind": ..., ...params}, voir core.data.cards.Card) est
+    le pendant "effets" de `capabilities` -- meme raisonnement, rendu
+    disponible pour n'importe quel type."""
     fields = {}
     if cell_modes is not None:
         fields["cell_modes"] = [list(row) for row in cell_modes]
@@ -492,6 +512,10 @@ def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
         fields["blocks_until_open"] = True
     if capabilities:
         fields["capabilities"] = dict(capabilities)
+    if effects:
+        fields["effects"] = list(effects)
+    if stats:
+        fields["stats"] = dict(stats)
     return fields
 
 
@@ -615,18 +639,26 @@ def update_type_visual(type_id, name, tileset, rect, size, archetype, frame_rect
 
 
 def update_type_mechanics(type_id, blocks_movement=False, cell_modes=None,
-                           interactable=False, lockable=False, capabilities=None):
+                           interactable=False, lockable=False, capabilities=None, stats=None, effects=None):
     """Edite UNIQUEMENT les mecaniques/gameplay d'un type DEJA enregistre --
     contrairement a update_type_visual, fonctionne sur N'IMPORTE QUEL type
     existant, builtin OU custom (c'est le point d'entree qui rend un
     builtin editable sans jamais toucher a son identite visuelle -- voir
     _write_builtin_mechanics_override). Efface d'abord les cles mecaniques
     existantes (jamais un merge naif : sinon desactiver un flag deja actif
-    ne ferait jamais rien) puis reapplique celles calculees pour cet appel."""
+    ne ferait jamais rien) puis reapplique celles calculees pour cet appel.
+
+    `stats`/`effects` n'ont de sens aujourd'hui que pour certains types
+    (stats : mob enemy seulement ; effects : n'importe lequel, mais rien
+    ne le consomme encore cote OBJECT_TYPES hors interpretation manuelle,
+    voir cards.py) -- deliberement PAS valides/restreints ici, meme
+    philosophie que `capabilities` : un vocabulaire generique que
+    N'IMPORTE QUEL type peut porter, l'UI appelante (MechanicsPanelUI)
+    decide seule ce qu'elle affiche/calcule pour quel type de carte."""
     existing = OBJECT_TYPES.get(type_id)
     if existing is None:
         raise ValueError(f"'{type_id}' n'existe pas")
-    fields = _build_mechanics_fields(existing, blocks_movement, cell_modes, interactable, lockable, capabilities)
+    fields = _build_mechanics_fields(existing, blocks_movement, cell_modes, interactable, lockable, capabilities, stats, effects)
     if not isinstance(existing.get("asset"), dict):
         _write_builtin_mechanics_override(type_id, fields)
         return OBJECT_TYPES[type_id]
