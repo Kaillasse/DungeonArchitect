@@ -533,3 +533,20 @@ def load_tileset_region(filename: str, rect) -> pygame.Surface:
     if clipped.width <= 0 or clipped.height <= 0:
         return pygame.Surface((max(1, w), max(1, h)), pygame.SRCALPHA)
     return tileset.subsurface(clipped).copy()
+
+
+def save_tileset_png(surface: pygame.Surface, relative_path: str) -> None:
+    """Ecrit `surface` en PNG sous assets/<relative_path> (creant les
+    dossiers parents au besoin) puis invalide l'entree correspondante de
+    _named_tileset_cache -- sans ca, tout load_tileset_by_name(relative_path)
+    ulterieur (une autre carte qui partage cette feuille, ou l'editeur de
+    sprite lui-meme en rouvrant le fichier) reservirait la Surface pre-
+    edition mise en cache, silencieusement. Seul point d'ecriture PNG du
+    projet (core.editor.ui.sprite_editor's mode "pixel", voir son propre
+    _px_save) -- centralise ici plutot que d'appeler pygame.image.save
+    directement depuis l'UI pour que ce correctif de cache ne puisse pas
+    etre oublie a un futur appelant."""
+    path = PROJECT_ROOT / "assets" / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pygame.image.save(surface, str(path))
+    _named_tileset_cache.pop(relative_path, None)
