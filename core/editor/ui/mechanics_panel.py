@@ -43,6 +43,18 @@ cell_modes/interactable/lockable rows -- those don't apply to a mob at all
 before this branch existed). Shows Etats (its fixed animation set) and, for
 an enemy, its stats/loot -- nothing editable yet, since no register_mob_type
 write API exists.
+
+A PNJ (config["npc"]) OBJECT_TYPES card gets its own read-only branch too
+(is_pnj/_render_pnj_info): tabs for whichever wander_actions role is
+configured, a LIVE looping preview of that role's tagged sprite (see
+object_manager.load_npc_frames/NPC_DIRECTIONS), and click-drag directly on
+the preview to cycle through directions (_pnj_dragging_direction/
+_update_pnj_drag) -- the one interactive, non-editing feature in this
+panel. This needs real elapsed time to animate, unlike everything else
+here (state only ever changes on a discrete click): see update(dt), called
+every frame from Creator.run() regardless of what's loaded (a no-op unless
+is_pnj). No write API exists for entity_pack/wander_actions here either --
+still SpriteEditorPanelUI's job.
 """
 
 import pygame
@@ -51,6 +63,7 @@ from core.editor.ui.mixins import _ResizableCornerMixin
 from core.ui.widgets import BorderManager, Stepper
 from core.world.object_manager import (
     OBJECT_TYPES, ITEM_DEFINITIONS, ARCHETYPES, CELL_MODES, ENEMY_ANIMATIONS,
+    NPC_DIRECTIONS, load_npc_frames, action_direction_coverage,
     update_type_mechanics, update_item_overrides, update_item, is_builtin_item,
 )
 from core.data.cards import resolve_card_sprite
@@ -67,6 +80,14 @@ class MechanicsPanelUI(_ResizableCornerMixin):
     GRID_MAX_PX = 140
     STEP_BUTTON_SIZE = 24
     COUNT_DISPLAY_WIDTH = 50
+    # Canonical role order for the PNJ preview's tabs -- only roles actually
+    # present in a given PNJ's own wander_actions are shown (see
+    # _pnj_available_roles), same "idle"/"move" mandatory + "sitting"/
+    # "laying"/"run" independently optional split as core.world.entities.Npc
+    # itself documents.
+    PNJ_ROLES = ("idle", "move", "sitting", "laying", "run")
+    PNJ_ANIMATION_SPEED = 0.2  # matches core.world.entities.Npc.ANIMATION_SPEED
+    PNJ_DRAG_STEP_PX = 24  # horizontal pixels dragged per direction step
 
     def __init__(self, x, y):
         self.x = x
@@ -112,6 +133,26 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.mob_kind = None
         self.mob_states = ()
         self.mob_stats = {}
+
+        # PNJ cards get their own live-preview branch (see is_pnj/open/
+        # _render_pnj_info) -- animation playback (pnj_frame/
+        # pnj_animation_timer, advanced by update(dt), see Creator.run())
+        # of whichever wander_actions role is selected (pnj_action_role),
+        # for whichever NPC_DIRECTIONS entry is selected (pnj_direction) --
+        # changed by click-dragging on the preview itself, see
+        # _pnj_dragging_direction/handle_event. Read-only, like mob info:
+        # no write API exists here for entity_pack/wander_actions, that
+        # stays SpriteEditorPanelUI's job.
+        self.is_pnj = False
+        self.pnj_entity_pack = None
+        self.pnj_wander_actions = {}
+        self.pnj_frames = {}
+        self.pnj_action_role = None
+        self.pnj_direction = NPC_DIRECTIONS[0]
+        self.pnj_frame = 0
+        self.pnj_animation_timer = 0.0
+        self._pnj_dragging_direction = False
+        self._pnj_drag_last_pos = None
 
         # Capacites/Effets -- ITEM cards only (self.item_id), see module
         # docstring for why. "capabilities"/"effects" vocabulary is the
@@ -204,6 +245,22 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self.mob_states = ()
             self.mob_stats = {}
 
+        self.is_pnj = bool(config.get("npc"))
+        if self.is_pnj:
+            self.pnj_entity_pack = config.get("entity_pack")
+            self.pnj_wander_actions = dict(config.get("wander_actions", {}))
+            self.pnj_frames = load_npc_frames(self.pnj_entity_pack) if self.pnj_entity_pack else {}
+            self.pnj_action_role = self._pnj_available_roles()[0] if self._pnj_available_roles() else None
+            self.pnj_direction = NPC_DIRECTIONS[0]
+            self.pnj_frame = 0
+            self.pnj_animation_timer = 0.0
+            self._pnj_dragging_direction = False
+        else:
+            self.pnj_entity_pack = None
+            self.pnj_wander_actions = {}
+            self.pnj_frames = {}
+            self.pnj_action_role = None
+
         asset = config["asset"]
         if isinstance(asset, dict):
             if "rects" in asset:
@@ -263,6 +320,74 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.heal_enabled = heal is not None
         self.heal_amount = (heal or {}).get("amount", 1)
 
+    def _pnj_available_roles(self):
+        """PNJ_ROLES filtered to the ones this PNJ's own wander_actions
+        actually names (an optional role like "run" simply isn't in the
+        dict if never configured) -- these are the only tabs shown, same
+        "don't offer what isn't there" spirit as CELL_MODES_ARCHETYPES'
+        own per-archetype gating above."""
+        return [role for role in self.PNJ_ROLES if role in self.pnj_wander_actions]
+
+    def _pnj_current_frames(self):
+        """Frames for the selected role/direction, with the same cascading
+        fallback core.world.entities.Npc._action_frames_for uses (exact
+        direction -> any direction of the same action -> any direction of
+        any action) -- simplified slightly (no need to search every OTHER
+        action once the selected one has nothing, a preview can just say
+        so) since this is a preview, not gameplay."""
+        action_name = self.pnj_wander_actions.get(self.pnj_action_role)
+        action_frames = self.pnj_frames.get(action_name, {}) if action_name else {}
+        if self.pnj_direction in action_frames:
+            return action_frames[self.pnj_direction]
+        if action_frames:
+            return next(iter(action_frames.values()))
+        return []
+
+    def _pnj_role_rects(self):
+        roles = self._pnj_available_roles()
+        content_x = self.x + 20
+        width = (self.width - 40 - 8 * (len(roles) - 1)) / len(roles) if roles else 0
+        rects = {}
+        for index, role in enumerate(roles):
+            rects[role] = pygame.Rect(content_x + index * (width + 8), self.y + 88, width, 28)
+        return rects
+
+    def _select_pnj_role(self, role):
+        self.pnj_action_role = role
+        self.pnj_frame = 0
+        self.pnj_animation_timer = 0.0
+
+    def _update_pnj_drag(self, event):
+        dx = event.pos[0] - self._pnj_drag_last_pos[0]
+        if abs(dx) < self.PNJ_DRAG_STEP_PX:
+            return
+        steps = int(dx / self.PNJ_DRAG_STEP_PX)
+        self._pnj_drag_last_pos = (
+            self._pnj_drag_last_pos[0] + steps * self.PNJ_DRAG_STEP_PX, event.pos[1],
+        )
+        index = NPC_DIRECTIONS.index(self.pnj_direction)
+        self.pnj_direction = NPC_DIRECTIONS[(index + steps) % len(NPC_DIRECTIONS)]
+        self.pnj_frame = 0
+        self.pnj_animation_timer = 0.0
+
+    def update(self, dt):
+        """Advances the PNJ preview's animation -- a no-op for every other
+        card kind. Called every frame from Creator.run(), unlike every
+        other piece of this panel's state, which only ever changes on a
+        real event -- animation playback is the one thing here that needs
+        real time to pass. Pure looping preview (always plays the selected
+        action/direction forever) -- no state-machine transitions like the
+        real core.world.entities.Npc, this is a viewer, not a simulation."""
+        if not self.is_pnj:
+            return
+        frames = self._pnj_current_frames()
+        if not frames:
+            return
+        self.pnj_animation_timer += dt
+        if self.pnj_animation_timer >= self.PNJ_ANIMATION_SPEED:
+            self.pnj_animation_timer -= self.PNJ_ANIMATION_SPEED
+            self.pnj_frame = (self.pnj_frame + 1) % len(frames)
+
     def clear(self):
         """"Vider" -- returns to the empty placeholder state without
         touching disk, so the player can back out of a card they dropped by
@@ -289,6 +414,10 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self._explosive_rect = pygame.Rect(content_x, self.y + 344, self.width - 40, 28)
         self._heal_rect = pygame.Rect(content_x, self.y + 432, self.width - 40, 28)
         self._save_rect = pygame.Rect(content_x, self.y + self.height - 56, self.width - 40, 40)
+        # PNJ preview -- role tabs computed on demand (_pnj_role_rects,
+        # variable count) sit just above this at y+88; click-drag on the
+        # square below rotates pnj_direction (see _update_pnj_drag).
+        self._pnj_preview_rect = pygame.Rect(content_x, self.y + 130, 160, 160)
 
     def _throw_speed_stepper(self):
         return Stepper(self.x + 40, self.y + 308, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 20, 800)
@@ -378,6 +507,20 @@ class MechanicsPanelUI(_ResizableCornerMixin):
     def handle_event(self, event):
         if self._handle_resize_event(event):
             return None
+
+        # The PNJ preview's click-drag-to-rotate gesture spans multiple
+        # event types (unlike everything else in this panel, which only
+        # ever reacts to a single MOUSEBUTTONDOWN) -- handled first, before
+        # the MOUSEBUTTONDOWN-only gate below short-circuits every other
+        # event type.
+        if self.is_pnj and self._pnj_dragging_direction:
+            if event.type == pygame.MOUSEMOTION:
+                self._update_pnj_drag(event)
+                return None
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._pnj_dragging_direction = False
+                return None
+
         if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
             return None
 
@@ -386,6 +529,17 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
         if self._clear_rect.collidepoint(event.pos):
             self.clear()
+            return None
+
+        if self.is_pnj:
+            for role, rect in self._pnj_role_rects().items():
+                if rect.collidepoint(event.pos):
+                    self._select_pnj_role(role)
+                    return None
+            if self._pnj_preview_rect.collidepoint(event.pos):
+                self._pnj_dragging_direction = True
+                self._pnj_drag_last_pos = event.pos
+                return None
             return None
 
         if self.type_id is not None and not self.is_mob:
@@ -440,7 +594,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                     self.heal_amount = new_amount
                     return None
 
-        if not self.is_mob and self._save_rect.collidepoint(event.pos):
+        if not self.is_mob and not self.is_pnj and self._save_rect.collidepoint(event.pos):
             return self._try_save()
 
         return None
@@ -467,6 +621,8 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         if self.type_id is not None:
             if self.is_mob:
                 self._render_mob_info(screen)
+            elif self.is_pnj:
+                self._render_pnj_info(screen)
             else:
                 type_label = self.small_font.render(f"Archetype : {ARCHETYPES.get(self.archetype, {}).get('label', self.archetype)}", True, (200, 200, 200))
                 screen.blit(type_label, (self.x + 80, self.y + 60))
@@ -491,7 +647,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self._render_capabilities(screen)
             self._render_effects(screen)
 
-        if not self.is_mob:
+        if not self.is_mob and not self.is_pnj:
             self.border.draw_centered_label(screen, self._save_rect, self.font, "Enregistrer")
 
         if self.status_text:
@@ -581,6 +737,46 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             "Lecture seule -- pas encore de creation/edition de mob custom.", True, (150, 150, 150)
         )
         screen.blit(no_edit, (self.x + 20, next_y + 8))
+
+    def _render_pnj_info(self, screen):
+        """Live PNJ preview -- role tabs (only the ones actually configured
+        in wander_actions), a looping animation of the selected role's
+        sprite for the selected direction (advanced by update(dt), see its
+        own docstring), and click-drag-to-rotate on the sprite itself. Read
+        only, same reasoning as _render_mob_info -- no write API exists
+        here for entity_pack/wander_actions."""
+        type_label = self.small_font.render("Type : PNJ", True, (200, 200, 200))
+        screen.blit(type_label, (self.x + 80, self.y + 60))
+        pack_label = self.small_font.render(f"Pack : {self.pnj_entity_pack}", True, (150, 150, 150))
+        screen.blit(pack_label, (self.x + 80, self.y + 76))
+
+        for role, rect in self._pnj_role_rects().items():
+            label = f"[{role}]" if role == self.pnj_action_role else role
+            self.border.draw_centered_label(screen, rect, self.small_font, label)
+
+        pygame.draw.rect(screen, (28, 28, 32), self._pnj_preview_rect)
+        pygame.draw.rect(screen, (70, 70, 78), self._pnj_preview_rect, 1)
+        frames = self._pnj_current_frames()
+        if frames:
+            sprite = frames[self.pnj_frame % len(frames)]
+            pad = 8
+            box = self._pnj_preview_rect.inflate(-pad * 2, -pad * 2)
+            scale = min(box.width / sprite.get_width(), box.height / sprite.get_height())
+            sw = max(1, round(sprite.get_width() * scale))
+            sh = max(1, round(sprite.get_height() * scale))
+            scaled = pygame.transform.scale(sprite, (sw, sh))
+            screen.blit(scaled, (box.centerx - sw / 2, box.centery - sh / 2))
+        else:
+            hint = self.small_font.render("Aucun sprite tague pour cette action", True, (150, 150, 150))
+            screen.blit(hint, (self._pnj_preview_rect.x + 8, self._pnj_preview_rect.centery))
+
+        tagged, _missing = action_direction_coverage(self.pnj_entity_pack, self.pnj_wander_actions.get(self.pnj_action_role))
+        coverage = f"{len(tagged)}/{len(NPC_DIRECTIONS)} directions taguees"
+        direction_label = self.small_font.render(
+            f"Direction : {self.pnj_direction} ({coverage}) -- glisser sur le sprite pour tourner",
+            True, (200, 200, 200),
+        )
+        screen.blit(direction_label, (self.x + 20, self._pnj_preview_rect.bottom + 8))
 
     def _render_cell_modes_grid(self, screen):
         """Same 3-state grid as SpriteEditorPanelUI's own (see that

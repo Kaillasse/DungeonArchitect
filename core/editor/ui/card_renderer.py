@@ -5,6 +5,7 @@ from pathlib import Path
 import pygame
 
 from core.data.cards import CardManager, resolve_card_sprite, room_card_properties, card_completeness
+from core.world.object_manager import OBJECT_TYPES, ENEMY_ANIMATIONS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -146,16 +147,32 @@ class CardRenderer:
             surface.blit(scaled_sprite, (width / 2 - sw / 2, box_top + box_size / 2 - sh / 2))
 
         type_surface = self._render_fitted(label_font, card.card_type, (50, 50, 50), text_max_width)
-        surface.blit(type_surface, (width / 2 - type_surface.get_width() / 2, pixel_height * 0.70))
+        surface.blit(type_surface, (width / 2 - type_surface.get_width() / 2, pixel_height * 0.68))
 
-        # card.effects is empty for virtually every card today -- no effect
-        # engine exists yet (see core.data.cards module docstring), so this
-        # almost always reads "Aucun effet". Kept generic (not hardcoded)
-        # so a future hand-authored card with real effects renders them
-        # here for free.
+        # One extra line, whichever applies -- a card has at most one of
+        # these today (capabilities XOR being a mob), never both, so no
+        # stacking/priority logic is needed beyond "capabilities first".
+        # Mirrors CardPanelUI's own "Capacites : .../Etats : ..." detail
+        # lines -- this composited image used to lag behind those (only
+        # Type/Effets were ever baked in), leaving capabilities/mob states
+        # invisible anywhere in the collection's actual card art.
+        extra_text = None
+        if card.capabilities:
+            extra_text = "Capacites : " + ", ".join(card.capabilities)
+        elif card.card_type == "mob":
+            config = OBJECT_TYPES.get(card.card_id, {})
+            states = ENEMY_ANIMATIONS if config.get("enemy") else ("idle", "move")
+            extra_text = "Etats : " + ", ".join(states)
+        if extra_text:
+            extra_surface = self._render_fitted(label_font, extra_text, (60, 60, 95), text_max_width)
+            surface.blit(extra_surface, (width / 2 - extra_surface.get_width() / 2, pixel_height * 0.77))
+
+        # card.effects is empty for most cards -- "Aucun effet" then. Kept
+        # generic (not hardcoded) so any card with real effects (e.g. the
+        # Potion de soin's "heal") renders them here for free.
         effects_text = ", ".join(effect.get("kind", "?") for effect in card.effects) if card.effects else "Aucun effet"
         effects_surface = self._render_fitted(label_font, effects_text, (70, 70, 70), text_max_width)
-        surface.blit(effects_surface, (width / 2 - effects_surface.get_width() / 2, pixel_height * 0.84))
+        surface.blit(effects_surface, (width / 2 - effects_surface.get_width() / 2, pixel_height * 0.86))
 
         return surface
 

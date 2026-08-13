@@ -1242,7 +1242,12 @@ class Creator:
             # -------------------------------------------------
             # Render
             # -------------------------------------------------
-            clock.tick(60)
+            dt = clock.tick(60) / 1000
+            # The one piece of this static editor that needs real elapsed
+            # time to animate -- MechanicsPanelUI's PNJ preview (see its own
+            # update() docstring). A no-op call for every other card kind/
+            # when nothing is loaded, so unconditional here is simplest.
+            self.mechanics_panel.update(dt)
             if self.object_tool.dragging:
 
                 grid_x, grid_y = self._mouse_to_grid(
