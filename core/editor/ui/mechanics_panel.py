@@ -2,12 +2,13 @@
 
 Where SpriteEditorPanelUI owns a custom type's visual/identity data (asset/
 name/size/frames), this panel owns its gameplay flags (blocks_movement/
-cell_modes/interactable/lockable) AND capacities (throwable/explosive) --
-confirmed split with the user, framed as the long-term "Artiste" (sprite
-editor) vs "Forgeron" (this panel) divide, though no NPC/dialogue gating
-exists yet: reachable today by dragging an owned card from CardPanelUI
-directly onto this panel's own body (wrapped in a PanelFrame titled "Forge"
--- see Creator.__init__/the drop handling in Creator.run()).
+cell_modes/interactable/lockable), capacites (throwable/explosive), and
+effets (heal today) -- confirmed split with the user, framed as the
+long-term "Artiste" (sprite editor) vs "Forgeron" (this panel) divide,
+though no NPC/dialogue gating exists yet: reachable today by dragging an
+owned card from CardPanelUI directly onto this panel's own body (wrapped in
+a PanelFrame titled "Forge" -- see Creator.__init__/the drop handling in
+Creator.run()).
 
 Docked/draggable/resizable exactly like CardPanelUI/GeneratorPanelUI, NOT
 modal -- a dropped card stays loaded and editable at leisure, without
@@ -16,14 +17,24 @@ is read directly off self.type_id/self.item_id (mutually exclusive -- a
 dropped card is either an OBJECT_TYPES entry or an ITEM_DEFINITIONS entry,
 never both), no separate open/active flag.
 
-Built-in OBJECT_TYPES entries are now fully in scope for the gameplay-flag
-half (see object_manager.update_type_mechanics -- the dict-asset guard only
+Built-in OBJECT_TYPES entries are fully in scope for the gameplay-flag half
+(see object_manager.update_type_mechanics -- the dict-asset guard only
 applies to the VISUAL half, SpriteEditorPanelUI's domain): open() only
 refuses a room card or an unknown id. Persists through update_type_mechanics
-(OBJECT_TYPES entries) or update_item_capabilities (ITEM_DEFINITIONS
-entries) -- never touches asset/name/size/frames/archetype, which stay
-whatever SpriteEditorPanelUI (or, for a builtin, the Python source) already
-set.
+(OBJECT_TYPES entries), or -- for an ITEM_DEFINITIONS entry -- either
+update_item_overrides (a builtin item like dynamite: mechanics-only, same
+split as OBJECT_TYPES) or update_item (a custom item like a Potion de soin:
+full entry, the item equivalent of update_custom_type). Never touches
+asset/name/size/frames/archetype/icon, which stay whatever SpriteEditorPanelUI
+(or, for a builtin, the Python source) already set.
+
+Capacites/Effets are ITEM cards only (self.item_id) -- no OBJECT_TYPES-side
+consumer reads a world object's "capabilities"/"effects" yet, so showing
+either section for an object card would be a control that silently does
+nothing. The data model stays symmetric (object_manager still lets
+"capabilities" be set on any type, cards.py still bridges "effects" for
+OBJECT_TYPES cards too) for when a consumer eventually exists -- just no UI
+for it here yet.
 """
 
 import pygame
@@ -32,7 +43,7 @@ from core.editor.ui.mixins import _ResizableCornerMixin
 from core.ui.widgets import BorderManager, Stepper
 from core.world.object_manager import (
     OBJECT_TYPES, ITEM_DEFINITIONS, ARCHETYPES, CELL_MODES,
-    update_type_mechanics, update_item_capabilities,
+    update_type_mechanics, update_item_overrides, update_item, is_builtin_item,
 )
 from core.data.cards import resolve_card_sprite
 
@@ -41,7 +52,7 @@ CELL_MODES_ARCHETYPES = ("sol", "mur", "porte")
 
 class MechanicsPanelUI(_ResizableCornerMixin):
     STANDARD_WIDTH = 420
-    STANDARD_HEIGHT = 500
+    STANDARD_HEIGHT = 600
     MAX_WIDTH = 900
     MAX_HEIGHT = 700
     CELL_MODE_COLORS = {"block": (190, 90, 90), "behind": (110, 190, 110), "front": (100, 150, 220)}
@@ -63,14 +74,19 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.icon = None
 
         # Reconstructed from the loaded config, passed straight through to
-        # update_type_mechanics unchanged -- this panel never edits any of
-        # these, only the mechanical flags/capacities below. Stay at their
-        # defaults for an item card (self.item_id set) -- meaningless there.
+        # update_type_mechanics/update_item unchanged -- this panel never
+        # edits any of these, only the mechanical flags/capacites/effets
+        # below. item_slot/icon_path/icon_rect only ever populated for an
+        # item card (self.item_id set); tileset/rect/frame_rects/size/
+        # archetype only for an object card (self.type_id set).
         self.tileset = None
         self.rect = None
         self.frame_rects = None
         self.size = (1, 1)
         self.archetype = "sol"
+        self.item_slot = None
+        self.icon_path = None
+        self.icon_rect = None
 
         # The actual editable state -- OBJECT_TYPES cards only (self.type_id).
         self.blocks_movement = False
@@ -78,14 +94,16 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.interactable = False
         self.lockable = False
 
-        # Capacites -- available on BOTH OBJECT_TYPES and ITEM_DEFINITIONS
-        # cards (see _build_mechanics_fields/update_item_capabilities), same
-        # "throwable"/"explosive" vocabulary either way.
+        # Capacites/Effets -- ITEM cards only (self.item_id), see module
+        # docstring for why. "capabilities"/"effects" vocabulary is the
+        # same one object_manager/cards.py already use.
         self.throwable_enabled = False
         self.throw_speed = 220
         self.explosive_enabled = False
         self.blast_radius_tiles = 2
         self.blast_damage = 1
+        self.heal_enabled = False
+        self.heal_amount = 1
 
         self.status_text = ""
         self.border = BorderManager()
@@ -97,6 +115,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self._lockable_rect = None
         self._throwable_rect = None
         self._explosive_rect = None
+        self._heal_rect = None
         self._save_rect = None
         self._clear_rect = None
         self._layout()
@@ -126,6 +145,9 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self.type_id = None
             self.name = item_def.get("name", card_id)
             self.icon = resolve_card_sprite(card_id)
+            self.item_slot = item_def.get("slot", "interact")
+            self.icon_path = item_def.get("icon_path")
+            self.icon_rect = item_def.get("icon_rect")
             self.tileset = None
             self.rect = None
             self.frame_rects = None
@@ -136,6 +158,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self.interactable = False
             self.lockable = False
             self._load_capabilities(item_def.get("capabilities", {}))
+            self._load_effects(item_def.get("effects", []))
             self.status_text = ""
             return
 
@@ -190,6 +213,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self.cell_modes_grid = [["behind"] * width_tiles for _ in range(height_tiles)]
 
         self._load_capabilities(config.get("capabilities", {}))
+        self._load_effects(config.get("effects", []))
         self.status_text = ""
 
     def _load_capabilities(self, capabilities):
@@ -200,6 +224,11 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.explosive_enabled = explosive is not None
         self.blast_radius_tiles = (explosive or {}).get("radius_tiles", 2)
         self.blast_damage = (explosive or {}).get("damage", 1)
+
+    def _load_effects(self, effects):
+        heal = next((effect for effect in effects if effect.get("kind") == "heal"), None)
+        self.heal_enabled = heal is not None
+        self.heal_amount = (heal or {}).get("amount", 1)
 
     def clear(self):
         """"Vider" -- returns to the empty placeholder state without
@@ -216,14 +245,16 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self._blocks_rect = pygame.Rect(content_x, self.y + 140, self.width - 40, 32)
         self._interactable_rect = pygame.Rect(content_x, self.y + 180, self.width - 40, 32)
         self._lockable_rect = pygame.Rect(content_x, self.y + 220, self.width - 40, 32)
-        # Capacites -- fixed rows below the OBJECT_TYPES-only ones above
-        # (unused/not hit-tested for an item card, see render/handle_event),
-        # each with its own Stepper row (label drawn above it, same idiom
-        # as ChestPanelUI's loot rows) directly beneath it, shown only
-        # while that capacity's checkbox is enabled -- same "always laid
-        # out, conditionally shown" style as blocks/interactable/lockable.
+        # Capacites/Effets -- ITEM cards only (see module docstring), fixed
+        # rows below the OBJECT_TYPES-only ones above (unused/not
+        # hit-tested for an item card, and vice versa), each with its own
+        # Stepper row (label drawn above it, same idiom as ChestPanelUI's
+        # loot rows) directly beneath it, shown only while that row's own
+        # checkbox is enabled -- same "always laid out, conditionally
+        # shown" style as blocks/interactable/lockable.
         self._throwable_rect = pygame.Rect(content_x, self.y + 256, self.width - 40, 28)
         self._explosive_rect = pygame.Rect(content_x, self.y + 344, self.width - 40, 28)
+        self._heal_rect = pygame.Rect(content_x, self.y + 432, self.width - 40, 28)
         self._save_rect = pygame.Rect(content_x, self.y + self.height - 56, self.width - 40, 40)
 
     def _throw_speed_stepper(self):
@@ -234,6 +265,9 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
     def _blast_damage_stepper(self):
         return Stepper(self.x + 260, self.y + 398, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 10)
+
+    def _heal_amount_stepper(self):
+        return Stepper(self.x + 40, self.y + 464, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 10)
 
     def _cell_mode_grid_rects(self):
         width_tiles, height_tiles = self.size
@@ -261,24 +295,38 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         return self.cell_modes_grid if self._is_multi_cell() else None
 
     def _try_save(self):
-        """"Enregistrer" -- update_type_mechanics (OBJECT_TYPES cards) or
-        update_item_capabilities (ITEM_DEFINITIONS cards), never anything
-        touching visual/identity data (SpriteEditorPanelUI's domain).
-        Returns the saved id on success (Creator credits nothing new -- the
-        card already exists -- but does refresh CardPanelUI so a
-        completeness badge/detail line picks up the change immediately),
-        None on failure. Stays populated after saving (unlike the old modal
-        version's auto-close) -- this is a docked panel now, closing would
-        just mean re-dropping the same card."""
+        """"Enregistrer" -- update_type_mechanics (OBJECT_TYPES cards), or
+        for an ITEM_DEFINITIONS card, update_item_overrides (a builtin item
+        like dynamite -- mechanics-only, same split as update_type_mechanics)
+        or update_item (a custom item like a Potion de soin -- full entry,
+        passing name/slot/icon_path/icon_rect straight through unchanged,
+        same "own the mechanics, pass the identity through" split
+        SpriteEditorPanelUI/this panel already use for OBJECT_TYPES).
+        Never touches visual/identity data. Returns the saved id on success
+        (Creator credits nothing new -- the card already exists -- but does
+        refresh CardPanelUI so a completeness badge/detail line picks up
+        the change immediately), None on failure. Stays populated after
+        saving (unlike the old modal version's auto-close) -- this is a
+        docked panel now, closing would just mean re-dropping the same
+        card."""
         capabilities = {}
         if self.throwable_enabled:
             capabilities["throwable"] = {"speed": self.throw_speed}
         if self.explosive_enabled:
             capabilities["explosive"] = {"radius_tiles": self.blast_radius_tiles, "damage": self.blast_damage}
+        effects = []
+        if self.heal_enabled:
+            effects.append({"kind": "heal", "amount": self.heal_amount})
 
         try:
             if self.item_id is not None:
-                update_item_capabilities(self.item_id, capabilities)
+                if is_builtin_item(self.item_id):
+                    update_item_overrides(self.item_id, capabilities, effects)
+                else:
+                    update_item(
+                        self.item_id, self.name, self.item_slot, self.icon_path, self.icon_rect,
+                        capabilities=capabilities, effects=effects,
+                    )
             else:
                 update_type_mechanics(
                     self.type_id,
@@ -327,27 +375,37 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                 self.lockable = not self.lockable
                 return None
 
-        if self._throwable_rect.collidepoint(event.pos):
-            self.throwable_enabled = not self.throwable_enabled
-            return None
-        if self.throwable_enabled:
-            new_speed = self._throw_speed_stepper().handle_click(event.pos, self.throw_speed)
-            if new_speed is not None:
-                self.throw_speed = new_speed
+        if self.item_id is not None:
+            if self._throwable_rect.collidepoint(event.pos):
+                self.throwable_enabled = not self.throwable_enabled
                 return None
+            if self.throwable_enabled:
+                new_speed = self._throw_speed_stepper().handle_click(event.pos, self.throw_speed)
+                if new_speed is not None:
+                    self.throw_speed = new_speed
+                    return None
 
-        if self._explosive_rect.collidepoint(event.pos):
-            self.explosive_enabled = not self.explosive_enabled
-            return None
-        if self.explosive_enabled:
-            new_radius = self._blast_radius_stepper().handle_click(event.pos, self.blast_radius_tiles)
-            if new_radius is not None:
-                self.blast_radius_tiles = new_radius
+            if self._explosive_rect.collidepoint(event.pos):
+                self.explosive_enabled = not self.explosive_enabled
                 return None
-            new_damage = self._blast_damage_stepper().handle_click(event.pos, self.blast_damage)
-            if new_damage is not None:
-                self.blast_damage = new_damage
+            if self.explosive_enabled:
+                new_radius = self._blast_radius_stepper().handle_click(event.pos, self.blast_radius_tiles)
+                if new_radius is not None:
+                    self.blast_radius_tiles = new_radius
+                    return None
+                new_damage = self._blast_damage_stepper().handle_click(event.pos, self.blast_damage)
+                if new_damage is not None:
+                    self.blast_damage = new_damage
+                    return None
+
+            if self._heal_rect.collidepoint(event.pos):
+                self.heal_enabled = not self.heal_enabled
                 return None
+            if self.heal_enabled:
+                new_amount = self._heal_amount_stepper().handle_click(event.pos, self.heal_amount)
+                if new_amount is not None:
+                    self.heal_amount = new_amount
+                    return None
 
         if self._save_rect.collidepoint(event.pos):
             return self._try_save()
@@ -394,8 +452,8 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         else:
             item_label = self.small_font.render("Item d'inventaire", True, (200, 200, 200))
             screen.blit(item_label, (self.x + 80, self.y + 60))
-
-        self._render_capabilities(screen)
+            self._render_capabilities(screen)
+            self._render_effects(screen)
 
         self.border.draw_centered_label(screen, self._save_rect, self.font, "Enregistrer")
 
@@ -407,11 +465,10 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
     def _render_capabilities(self, screen):
         """Capacites section -- "Lançable"/"Explosif" toggles, each backed
-        by ITEM_DEFINITIONS/OBJECT_TYPES' own "capabilities" dict (see
-        _load_capabilities/_try_save). Available for both an item card and
-        an OBJECT_TYPES card (a decorative object could become explosive
-        too, not just an inventory item) -- unlike the rows above, never
-        gated on self.type_id/self.archetype."""
+        by ITEM_DEFINITIONS' own "capabilities" dict (see
+        _load_capabilities/_try_save). Item cards only (see module
+        docstring for why) -- caller (render) only invokes this in the
+        item branch."""
         throw_label = "[x] Lancable" if self.throwable_enabled else "[ ] Lancable"
         self.border.draw_centered_label(screen, self._throwable_rect, self.font, throw_label)
         if self.throwable_enabled:
@@ -432,6 +489,19 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             damage_label = self.small_font.render("Degats", True, (200, 200, 200))
             screen.blit(damage_label, (damage_stepper.minus_rect.x, damage_stepper.minus_rect.y - damage_label.get_height() - 2))
             damage_stepper.render(screen, self.border, self.small_font, self.blast_damage)
+
+    def _render_effects(self, screen):
+        """Effets section -- "Soin" toggle, backed by ITEM_DEFINITIONS' own
+        "effects" list (see _load_effects/_try_save -- a list of
+        {"kind": ..., ...params} dicts, "Soin" is the only kind built so
+        far). Item cards only, same reasoning as _render_capabilities."""
+        heal_label = "[x] Soin" if self.heal_enabled else "[ ] Soin"
+        self.border.draw_centered_label(screen, self._heal_rect, self.font, heal_label)
+        if self.heal_enabled:
+            stepper = self._heal_amount_stepper()
+            amount_label = self.small_font.render("Montant (PV)", True, (200, 200, 200))
+            screen.blit(amount_label, (stepper.minus_rect.x, stepper.minus_rect.y - amount_label.get_height() - 2))
+            stepper.render(screen, self.border, self.small_font, self.heal_amount)
 
     def _render_cell_modes_grid(self, screen):
         """Same 3-state grid as SpriteEditorPanelUI's own (see that

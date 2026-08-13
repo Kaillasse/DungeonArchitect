@@ -1,0 +1,20 @@
+{
+  "potion_soin": {
+    "name": "Potion de soin",
+    "icon_path": "item/BlueCoin Sheet.png",
+    "icon_rect": [
+      0,
+      0,
+      16,
+      16
+    ],
+    "slot": "interact",
+    "card_type": "item",
+    "effects": [
+      {
+        "kind": "heal",
+        "amount": 1
+      }
+    ]
+  }
+}

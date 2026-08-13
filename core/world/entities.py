@@ -206,6 +206,12 @@ class Player:
         self.health = max(0, self.health - amount)
         print(f"[combat] Player took {amount} damage (health: {self.health}/{self.MAX_HEALTH})")
 
+    def heal(self, amount):
+        """Applies a "heal" card effect (see ITEM_DEFINITIONS' "effects" list
+        / Explorator._use_interact_item) -- clamped at MAX_HEALTH, same
+        clamp direction as take_damage's own floor at 0."""
+        self.health = min(self.MAX_HEALTH, self.health + amount)
+
     def play_action(self, name):
         """Trigger a one-shot action animation (attack/interact/jump) --
         ignored while another action is already mid-playback, and while a
@@ -1340,7 +1346,7 @@ class PickupManager:
 
 
 class ThrownDynamite:
-    """A player-thrown dynamite stick (see Explorator._throw_interact_item):
+    """A player-thrown dynamite stick (see Explorator._use_interact_item):
     flies in a straight line at `speed` in the direction the player was
     facing at throw time, playing through its 4 frames once -- reaching the
     last frame is literally what triggers detonation (see `exploded`,
@@ -1447,7 +1453,7 @@ class ProjectileManager:
 
     def throw_dynamite(self, world_x, world_y, direction, capabilities=None):
         """`capabilities` is the throwing card's own capabilities dict (see
-        ITEM_DEFINITIONS["dynamite"]/Explorator._throw_interact_item) --
+        ITEM_DEFINITIONS["dynamite"]/Explorator._use_interact_item) --
         this manager stays free of any object_manager/ITEM_DEFINITIONS
         dependency, it just reads whichever "throwable"/"explosive" params
         the caller resolved. Missing/empty falls back to ThrownDynamite's

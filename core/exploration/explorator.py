@@ -738,13 +738,13 @@ class Explorator(NetworkSessionMixin):
     def _trigger_action(self, session, action_id):
         """Fires action_id's one-shot behavior for `session` -- normally just
         Player.play_action, but "interact" is intercepted first for a chest
-        the player is facing (see _interact_with_chest), then for a
-        throwable item equipped in the interact slot (see
-        _throw_interact_item), either of which repurposes the interact input
-        instead of just playing the plain interact animation. A facing chest
-        wins over a held item -- interacting with the world takes priority
-        over the player's own inventory."""
-        if action_id == "interact" and (self._interact_with_chest(session) or self._throw_interact_item(session)):
+        the player is facing (see _interact_with_chest), then for a usable
+        item equipped in the interact slot (see _use_interact_item), either
+        of which repurposes the interact input instead of just playing the
+        plain interact animation. A facing chest wins over a held item --
+        interacting with the world takes priority over the player's own
+        inventory."""
+        if action_id == "interact" and (self._interact_with_chest(session) or self._use_interact_item(session)):
             return
         session.player.play_action(action_id)
 
@@ -754,42 +754,70 @@ class Explorator(NetworkSessionMixin):
         to convert a player's (always-global) position/hitbox into that
         room's own local coordinates, the same way every other per-room live
         entity's position already works (see
-        _throw_interact_item/_interact_with_chest)."""
+        _use_interact_item/_interact_with_chest)."""
         if self.assembly is not None:
             room = session.current_placed_room
             return room.dungeon, room.offset_x, room.offset_y
         return self.dungeon, 0, 0
 
-    def _throw_interact_item(self, session):
-        """Returns True if session's interact slot held an item with a
-        "throwable" capability (see ITEM_DEFINITIONS' "capabilities" dict --
-        currently just dynamite, which also carries "explosive") and it was
-        thrown: consumes the item, spawns a live ThrownDynamite in the
-        current room (converted to that room's local coordinates, same
-        convention as every other per-room live entity) at the player's
-        position, in the direction they're currently facing, and plays the
-        interact animation for visual feedback. Returns False (no-op) if the
-        slot is empty or holds a non-throwable item, leaving _trigger_action
-        to fall back to the plain interact animation."""
+    def _use_interact_item(self, session):
+        """Returns True if session's interact slot held a usable item and it
+        was used: consumes the item, applies whichever behavior it defines,
+        and plays the interact animation for visual feedback. Two kinds of
+        "usable" exist today, checked in this priority order:
+        - "throwable" capability (see ITEM_DEFINITIONS' "capabilities" dict
+          -- currently just dynamite, which also carries "explosive"):
+          spawns a live ThrownDynamite in the current room (converted to
+          that room's local coordinates, same convention as every other
+          per-room live entity) at the player's position, in the direction
+          they're currently facing.
+        - "effects" list (see ITEM_DEFINITIONS' "effects" -- currently just
+          the "heal" kind, e.g. a Potion de soin): applies each recognized
+          effect immediately to session.player. An unrecognized "kind" is
+          silently skipped rather than raising -- the same "degrade, don't
+          crash, on unknown data" spirit as is_cell_walkable's handling of
+          a missing type.
+        Throwable wins if an item somehow carries both -- throwing already
+        has its own "spawn a projectile" mechanic that doesn't compose with
+        "apply effects instantly". Returns False (no-op) if the slot is
+        empty or the item defines neither, leaving _trigger_action to fall
+        back to the plain interact animation."""
         item = session.inventory.main_slots["interact"]
-        capabilities = ITEM_DEFINITIONS.get(item.item_id, {}).get("capabilities", {}) if item is not None else {}
-        if "throwable" not in capabilities:
+        if item is None:
             return False
+        definition = ITEM_DEFINITIONS.get(item.item_id, {})
 
-        session.inventory.main_slots["interact"] = None
+        capabilities = definition.get("capabilities", {})
+        if "throwable" in capabilities:
+            session.inventory.main_slots["interact"] = None
 
-        dx, dy = Player.DIRECTION_VECTORS.get(session.player.direction, (0, 1))
-        direction = pygame.Vector2(dx, dy)
+            dx, dy = Player.DIRECTION_VECTORS.get(session.player.direction, (0, 1))
+            direction = pygame.Vector2(dx, dy)
 
-        dungeon, offset_x, offset_y = self._current_room_and_offset(session)
-        tile_size = dungeon.tile_size
-        local_x = session.player.position.x - offset_x * tile_size
-        local_y = session.player.position.y - offset_y * tile_size
-        dungeon.projectile_manager.throw_dynamite(local_x, local_y, direction, capabilities)
-        SoundManager().play("dynamite_interact")
+            dungeon, offset_x, offset_y = self._current_room_and_offset(session)
+            tile_size = dungeon.tile_size
+            local_x = session.player.position.x - offset_x * tile_size
+            local_y = session.player.position.y - offset_y * tile_size
+            dungeon.projectile_manager.throw_dynamite(local_x, local_y, direction, capabilities)
+            SoundManager().play("dynamite_interact")
 
-        session.player.play_action("interact")
-        return True
+            session.player.play_action("interact")
+            return True
+
+        effects = definition.get("effects", [])
+        if effects:
+            for effect in effects:
+                if effect.get("kind") == "heal":
+                    session.player.heal(effect.get("amount", 1))
+            session.inventory.main_slots["interact"] = None
+            # Reused placeholder -- no dedicated "item consumed" sound
+            # exists yet, "blue_collect" (currency pickup chime) is the
+            # closest existing positive-feedback cue.
+            SoundManager().play("blue_collect")
+            session.player.play_action("interact")
+            return True
+
+        return False
 
     def _interact_with_chest(self, session):
         """Returns True if session's player was facing an unopened chest

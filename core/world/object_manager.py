@@ -477,7 +477,7 @@ def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
 
     `capabilities` ({"throwable": {...}, "explosive": {...}, ...}) est le
     meme vocabulaire que ITEM_DEFINITIONS' propre champ "capabilities" --
-    voir update_item_capabilities -- rendu disponible ici aussi pour qu'un
+    voir update_item_overrides -- rendu disponible ici aussi pour qu'un
     objet du monde (pas seulement un item d'inventaire) puisse un jour
     porter la meme capacite (ex: un vase explosif)."""
     fields = {}
@@ -822,10 +822,16 @@ def load_currency_frames(currency_type):
 # which main_slots key it belongs in. "capabilities" ({"throwable": {...},
 # "explosive": {...}, ...}) replaces the old bare "throwable": True boolean --
 # same vocabulary/shape as a world-object's own optional "capabilities" (see
-# _build_mechanics_fields), read generically by Explorator._throw_interact_item/
+# _build_mechanics_fields), read generically by Explorator._use_interact_item/
 # ProjectileManager instead of a hardcoded dynamite-only path, so a future
 # second throwable+explosive item works numerically for free (only its own
-# sprite/visual would need wiring up).
+# sprite/visual would need wiring up). "effects" (a LIST of {"kind": ...,
+# ...params} dicts, e.g. [{"kind": "heal", "amount": 1}] -- note this is a
+# list, not a dict like "capabilities": core.editor.ui.card_renderer already
+# anticipated this exact shape (`effect.get("kind") for effect in
+# card.effects`) before any real effect existed, and a list allows more than
+# one effect of the same kind on a card, which a dict keyed by kind name
+# couldn't) is read generically by Explorator._use_interact_item too.
 _BUILTIN_ITEM_DEFINITIONS = {
     "dynamite": {
         "name": "Dynamite",
@@ -840,68 +846,167 @@ _BUILTIN_ITEM_DEFINITIONS = {
     },
 }
 
-# Items have no creation API (no register_item -- ITEM_DEFINITIONS is a
-# short hand-authored list, unlike OBJECT_TYPES), only their capabilities
-# are editable in-game (see MechanicsPanelUI's "Capacites" section) --
-# so unlike custom_object_types.json, an entry here is always a full
-# capabilities override for an EXISTING item id, never a new item, and
-# needs no OVERRIDE_MARKER to disambiguate the two.
-CUSTOM_ITEM_CAPABILITIES_PATH = PROJECT_ROOT / "assets" / "tiles" / "custom_item_capabilities.json"
+# Two-part item registry, same spirit as OBJECT_TYPES' builtin+custom split:
+# `custom_items.json` holds full, brand-new item entries (register_item/
+# update_item, the ITEM_DEFINITIONS equivalent of register_custom_type),
+# while `custom_items_overrides.json` holds a mechanics-only override
+# (capabilities and/or effects) of an EXISTING builtin item id (dynamite
+# today) -- update_item_overrides, the equivalent of
+# update_type_mechanics/_write_builtin_mechanics_override. The two files
+# stay separate because they answer different questions ("does this id
+# exist at all" vs "should this id's mechanics differ from its Python
+# defaults") and a custom item is always complete, never a partial diff.
+CUSTOM_ITEMS_PATH = PROJECT_ROOT / "assets" / "tiles" / "custom_items.json"
+CUSTOM_ITEMS_OVERRIDES_PATH = PROJECT_ROOT / "assets" / "tiles" / "custom_items_overrides.json"
 
 
-def _load_custom_item_capabilities():
+def _load_custom_items():
     """Absent/vide/corrompu -> dict vide, meme tolerance que
     _load_custom_object_types."""
-    if not CUSTOM_ITEM_CAPABILITIES_PATH.exists():
+    if not CUSTOM_ITEMS_PATH.exists():
         return {}
     try:
-        with CUSTOM_ITEM_CAPABILITIES_PATH.open("r", encoding="utf-8") as handle:
+        with CUSTOM_ITEMS_PATH.open("r", encoding="utf-8") as handle:
             raw = json.load(handle)
     except (OSError, ValueError):
         return {}
     return raw if isinstance(raw, dict) else {}
 
 
-def _persist_custom_item_capabilities(overrides):
-    CUSTOM_ITEM_CAPABILITIES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CUSTOM_ITEM_CAPABILITIES_PATH.open("w", encoding="utf-8") as handle:
+def _persist_custom_items(custom):
+    CUSTOM_ITEMS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CUSTOM_ITEMS_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(custom, handle, indent=2, ensure_ascii=False)
+
+
+def _load_custom_item_overrides():
+    if not CUSTOM_ITEMS_OVERRIDES_PATH.exists():
+        return {}
+    try:
+        with CUSTOM_ITEMS_OVERRIDES_PATH.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _persist_custom_item_overrides(overrides):
+    CUSTOM_ITEMS_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CUSTOM_ITEMS_OVERRIDES_PATH.open("w", encoding="utf-8") as handle:
         json.dump(overrides, handle, indent=2, ensure_ascii=False)
 
 
+def _build_item_entry(name, slot, icon_path, icon_rect, capabilities=None, effects=None):
+    """Construction pure (aucune I/O) d'une entree ITEM_DEFINITIONS custom --
+    partagee par register_item/update_item. `card_type` toujours "item" --
+    aucun autre type de carte n'utilise ce registre."""
+    entry = {
+        "name": name,
+        "icon_path": icon_path,
+        "icon_rect": list(icon_rect),
+        "slot": slot,
+        "card_type": "item",
+    }
+    if capabilities:
+        entry["capabilities"] = dict(capabilities)
+    if effects:
+        entry["effects"] = list(effects)
+    return entry
+
+
 def _merged_item_definitions():
-    overrides = _load_custom_item_capabilities()
+    overrides = _load_custom_item_overrides()
     merged = {}
     for item_id, base in _BUILTIN_ITEM_DEFINITIONS.items():
         entry = dict(base)
-        if item_id in overrides:
-            entry["capabilities"] = dict(overrides[item_id])
+        entry.update(overrides.get(item_id, {}))
         merged[item_id] = entry
+    for item_id, entry in _load_custom_items().items():
+        merged[item_id] = dict(entry)
     return merged
 
 
 ITEM_DEFINITIONS = _merged_item_definitions()
 
 
-def update_item_capabilities(item_id, capabilities):
-    """Persiste un override de capacites pour un item EXISTANT (la dynamite
-    aujourd'hui -- il n'existe aucune API de creation d'item). Un dict vide
-    retire l'override (retour aux capacites Python par defaut) plutot que
-    de persister une entree no-op. Leve ValueError si item_id n'est pas un
-    item reel."""
-    if item_id not in _BUILTIN_ITEM_DEFINITIONS:
-        raise ValueError(f"'{item_id}' n'existe pas")
-    overrides = _load_custom_item_capabilities()
-    if capabilities:
-        overrides[item_id] = dict(capabilities)
-    else:
-        overrides.pop(item_id, None)
-    _persist_custom_item_capabilities(overrides)
+def is_builtin_item(item_id):
+    return item_id in _BUILTIN_ITEM_DEFINITIONS
 
-    entry = dict(_BUILTIN_ITEM_DEFINITIONS[item_id])
-    if capabilities:
-        entry["capabilities"] = dict(capabilities)
+
+def register_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, effects=None):
+    """Valide et persiste un NOUVEL item -- l'equivalent register_custom_type
+    pour ITEM_DEFINITIONS. Leve ValueError sur un id invalide/deja pris ou
+    un slot inconnu."""
+    if not item_id or not all(c.isalnum() or c == "_" for c in item_id):
+        raise ValueError("Identifiant invalide (lettres/chiffres/_ uniquement)")
+    if item_id in ITEM_DEFINITIONS:
+        raise ValueError(f"'{item_id}' existe deja")
+    if slot not in ("attack", "interact", "passive"):
+        raise ValueError(f"Slot inconnu : {slot}")
+    entry = _build_item_entry(name, slot, icon_path, icon_rect, capabilities, effects)
+    custom = _load_custom_items()
+    custom[item_id] = entry
+    _persist_custom_items(custom)
     ITEM_DEFINITIONS[item_id] = entry
     return entry
+
+
+def update_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, effects=None):
+    """Edite un item custom DEJA enregistre -- jamais un item integre au jeu
+    (dynamite) comme register_item/update_item ne peuvent jamais l'ecraser :
+    voir update_item_overrides pour editer les mecaniques d'un builtin."""
+    if item_id not in ITEM_DEFINITIONS:
+        raise ValueError(f"'{item_id}' n'existe pas")
+    if is_builtin_item(item_id):
+        raise ValueError(f"'{item_id}' est un item integre au jeu, non modifiable (voir update_item_overrides)")
+    if slot not in ("attack", "interact", "passive"):
+        raise ValueError(f"Slot inconnu : {slot}")
+    entry = _build_item_entry(name, slot, icon_path, icon_rect, capabilities, effects)
+    custom = _load_custom_items()
+    custom[item_id] = entry
+    _persist_custom_items(custom)
+    ITEM_DEFINITIONS[item_id] = entry
+    return entry
+
+
+def update_item_overrides(item_id, capabilities, effects):
+    """Persiste un override mecanique (capacites ET/OU effets, toujours
+    l'etat complet, jamais un diff partiel -- desactiver l'un ne necessite
+    pas un appel separe) pour un item EXISTANT INTEGRE AU JEU (dynamite
+    aujourd'hui -- les items custom passent par update_item ci-dessus).
+
+    Compare toujours contre les valeurs mecaniques REELLES du builtin (pas
+    juste "est-ce vide ?") avant de decider si l'override est un no-op a
+    retirer -- meme piege que _write_builtin_mechanics_override a evite
+    pour OBJECT_TYPES : dynamite a "capabilities" actif par defaut, donc un
+    override vide (tout desactive) DIFFERE bel et bien du builtin et doit
+    etre persiste, pas silencieusement ignore."""
+    base = _BUILTIN_ITEM_DEFINITIONS.get(item_id)
+    if base is None:
+        raise ValueError(f"'{item_id}' n'existe pas ou n'est pas un item integre au jeu")
+
+    entry = {}
+    if capabilities:
+        entry["capabilities"] = dict(capabilities)
+    if effects:
+        entry["effects"] = list(effects)
+    base_state = {key: base[key] for key in ("capabilities", "effects") if key in base}
+
+    overrides = _load_custom_item_overrides()
+    if entry == base_state:
+        overrides.pop(item_id, None)
+        merged = dict(base)
+    else:
+        overrides[item_id] = entry
+        merged = dict(base)
+        for key in ("capabilities", "effects"):
+            if key in entry:
+                merged[key] = entry[key]
+            else:
+                merged.pop(key, None)
+    _persist_custom_item_overrides(overrides)
+    ITEM_DEFINITIONS[item_id] = merged
+    return merged
 
 DYNAMITE_FRAME_SIZE = 16
 DYNAMITE_FRAME_COUNT = 4

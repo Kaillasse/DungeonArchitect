@@ -100,8 +100,12 @@ class Card:
         self.name = name
         self.images = list(images) if images else []
         self.card_type = card_type
-        # Stored/round-tripped, never interpreted yet -- no effect engine
-        # exists in this slice (see module docstring).
+        # A list of {"kind": ..., ...params} dicts (e.g. [{"kind": "heal",
+        # "amount": 1}], see ITEM_DEFINITIONS' own "effects") -- a list
+        # rather than a dict keyed by kind, since a card could plausibly
+        # carry more than one effect of the same kind. Interpreted by
+        # Explorator._use_interact_item for an item card; nothing consumes
+        # it yet for an OBJECT_TYPES-bridged card (see default_card_for).
         self.effects = list(effects) if effects else []
 
 
@@ -136,11 +140,14 @@ def default_card_for(card_id):
         # preferred over the auto-titlecased id every hand-authored
         # OBJECT_TYPES entry still falls back to (none of those set "name").
         name = config.get("name") or card_id.replace("_", " ").title()
-        return Card(card_id, name, images, config.get("card_type", "tile_decor"))
+        return Card(card_id, name, images, config.get("card_type", "tile_decor"), effects=config.get("effects"))
 
     definition = ITEM_DEFINITIONS.get(card_id)
     if definition is not None:
-        return Card(card_id, definition["name"], [definition["icon_path"]], definition.get("card_type", "item"))
+        return Card(
+            card_id, definition["name"], [definition["icon_path"]],
+            definition.get("card_type", "item"), effects=definition.get("effects"),
+        )
 
     return None
 
