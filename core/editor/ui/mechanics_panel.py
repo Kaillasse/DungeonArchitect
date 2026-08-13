@@ -17,6 +17,12 @@ is read directly off self.type_id/self.item_id (mutually exclusive -- a
 dropped card is either an OBJECT_TYPES entry or an ITEM_DEFINITIONS entry,
 never both), no separate open/active flag.
 
+self.card_kind ("object"/"item"/"mob"/"pnj") is the one thing that actually
+decides how this panel behaves, set once by open() -- is_mob/is_pnj are
+read-only properties derived from it (kept for readability at their many
+existing call sites) rather than their own independently-tracked booleans,
+so the two can never drift out of sync with each other or with card_kind.
+
 Built-in OBJECT_TYPES entries are fully in scope for the gameplay-flag half
 (see object_manager.update_type_mechanics -- the dict-asset guard only
 applies to the VISUAL half, SpriteEditorPanelUI's domain): open() only
@@ -129,13 +135,22 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.interactable = False
         self.lockable = False
 
+        # The one thing that actually decides how this panel behaves --
+        # "object" (plain decorative/special OBJECT_TYPES), "item"
+        # (ITEM_DEFINITIONS), "mob" or "pnj" (both OBJECT_TYPES too). Set
+        # once by open(), never written anywhere else -- is_mob/is_pnj
+        # below are read-only properties derived from it instead of their
+        # own independently-tracked booleans, so the two can't drift out
+        # of sync with each other or with card_kind (they used to be 2
+        # separate flags set at 5 different call sites across open()).
+        self.card_kind = None
+
         # Mob (animal/enemy) cards are OBJECT_TYPES entries too, but none of
         # the fields above apply to one (a mob was showing the exact same
         # "Bloque le mouvement"/"Interagible" checkboxes as a decorative
         # floor object, which made no sense) -- Type/Etats info instead
         # (_render_mob_info), plus real stats editing for an enemy (see
         # mob_health and friends below, _render_mob_stats_editing).
-        self.is_mob = False
         self.mob_kind = None
         self.mob_states = ()
         self.mob_stats = {}
@@ -165,7 +180,6 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         # direction (_pnj_dragging_direction/_update_pnj_drag). No write API
         # exists here for entity_pack/wander_actions, that stays
         # SpriteEditorPanelUI's job.
-        self.is_pnj = False
         self.pnj_entity_pack = None
         self.pnj_wander_actions = {}
         self.pnj_frames = {}
@@ -212,6 +226,14 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.preview_rect = None
         self._layout()
 
+    @property
+    def is_mob(self):
+        return self.card_kind == "mob"
+
+    @property
+    def is_pnj(self):
+        return self.card_kind == "pnj"
+
     def move(self, dx, dy):
         """See PanelFrame, which drives this via drag/restore -- _layout()
         is already a full re-derivation from self.x/self.y/self.width, so
@@ -252,8 +274,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self.cell_modes_grid = None
             self.interactable = False
             self.lockable = False
-            self.is_mob = False
-            self.is_pnj = False
+            self.card_kind = "item"
             self.preview_state = None
             self._preview_frames = [self.icon] if self.icon else []
             self._load_capabilities(item_def.get("capabilities", {}))
@@ -270,8 +291,8 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.name = config.get("name", card_id)
         self.icon = resolve_card_sprite(card_id)
 
-        self.is_mob = bool(config.get("animal") or config.get("enemy"))
-        if self.is_mob:
+        is_mob = bool(config.get("animal") or config.get("enemy"))
+        if is_mob:
             self.mob_kind = "enemy" if config.get("enemy") else "animal"
             # Fixed sets -- animal/enemy are always fully hand-authored
             # Python entries, never partially registered like a custom
@@ -297,8 +318,8 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self.mob_states = ()
             self.mob_stats = {}
 
-        self.is_pnj = bool(config.get("npc"))
-        if self.is_pnj:
+        is_pnj = bool(config.get("npc"))
+        if is_pnj:
             self.pnj_entity_pack = config.get("entity_pack")
             self.pnj_wander_actions = dict(config.get("wander_actions", {}))
             self.pnj_frames = load_npc_frames(self.pnj_entity_pack) if self.pnj_entity_pack else {}
@@ -311,7 +332,12 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self.pnj_wander_actions = {}
             self.pnj_frames = {}
 
-        if not self.is_mob and not self.is_pnj:
+        if is_mob:
+            self.card_kind = "mob"
+        elif is_pnj:
+            self.card_kind = "pnj"
+        else:
+            self.card_kind = "object"
             self.preview_state = None
             self._preview_frames = load_object_frames(card_id)
 
@@ -566,6 +592,48 @@ class MechanicsPanelUI(_ResizableCornerMixin):
     def _current_cell_modes(self):
         return self.cell_modes_grid if self._is_multi_cell() else None
 
+    def _shows_capabilities_and_effects(self):
+        """Capacites/Effets are editable for item, mob, and PNJ cards --
+        not a plain decorative/special object (nothing reads a world
+        object's "capabilities"/"effects" yet). One dispatch point instead
+        of re-testing the 3-way flag combination separately in
+        handle_event and render."""
+        return self.card_kind in ("item", "mob", "pnj")
+
+    def _build_mob_stats(self):
+        """The stats dict to persist for an enemy mob, or None for
+        anything else (animal/object/item/pnj have no stats concept) --
+        pulled out of _try_save so that method's own item-vs-object
+        dispatch doesn't have this whole computation sitting inline in the
+        middle of it."""
+        if not (self.is_mob and self.mob_kind == "enemy"):
+            return None
+        # Pass the exact original float through UNCHANGED whenever the
+        # user never actually moved that stepper (the rounded editable
+        # value still matches round(raw)) -- see mob_aggro_range's own
+        # comment in __init__ for why: otherwise saving for any unrelated
+        # reason would silently truncate 1.2 to 1 every time.
+        aggro_range = (
+            self._mob_aggro_range_raw if self.mob_aggro_range == round(self._mob_aggro_range_raw)
+            else self.mob_aggro_range
+        )
+        attack_range = (
+            self._mob_attack_range_raw if self.mob_attack_range == round(self._mob_attack_range_raw)
+            else self.mob_attack_range
+        )
+        stats = {
+            "health": self.mob_health,
+            "move_speed": self.mob_move_speed,
+            "aggro_range": aggro_range,
+            "attack_range": attack_range,
+            "loot": dict(self.mob_loot),
+            "item_loot": dict(self.mob_item_loot),
+        }
+        active_attack_frames = self.mob_stats.get("active_attack_frames")
+        if active_attack_frames is not None:
+            stats["active_attack_frames"] = list(active_attack_frames)
+        return stats
+
     def _try_save(self):
         """"Enregistrer" -- update_type_mechanics (OBJECT_TYPES cards --
         plain object, mob, or PNJ alike), or for an ITEM_DEFINITIONS card,
@@ -591,7 +659,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             effects.append({"kind": "heal", "amount": self.heal_amount})
 
         try:
-            if self.item_id is not None:
+            if self.card_kind == "item":
                 if is_builtin_item(self.item_id):
                     update_item_overrides(self.item_id, capabilities, effects)
                 else:
@@ -600,33 +668,6 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                         capabilities=capabilities, effects=effects,
                     )
             else:
-                stats = None
-                if self.is_mob and self.mob_kind == "enemy":
-                    # Pass the exact original float through UNCHANGED
-                    # whenever the user never actually moved that stepper
-                    # (the rounded editable value still matches round(raw))
-                    # -- see mob_aggro_range's own comment in __init__ for
-                    # why: otherwise saving for any unrelated reason would
-                    # silently truncate 1.2 to 1 every time.
-                    aggro_range = (
-                        self._mob_aggro_range_raw if self.mob_aggro_range == round(self._mob_aggro_range_raw)
-                        else self.mob_aggro_range
-                    )
-                    attack_range = (
-                        self._mob_attack_range_raw if self.mob_attack_range == round(self._mob_attack_range_raw)
-                        else self.mob_attack_range
-                    )
-                    stats = {
-                        "health": self.mob_health,
-                        "move_speed": self.mob_move_speed,
-                        "aggro_range": aggro_range,
-                        "attack_range": attack_range,
-                        "loot": dict(self.mob_loot),
-                        "item_loot": dict(self.mob_item_loot),
-                    }
-                    active_attack_frames = self.mob_stats.get("active_attack_frames")
-                    if active_attack_frames is not None:
-                        stats["active_attack_frames"] = list(active_attack_frames)
                 update_type_mechanics(
                     self.type_id,
                     blocks_movement=self.blocks_movement,
@@ -634,7 +675,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                     interactable=self.interactable,
                     lockable=self.lockable,
                     capabilities=capabilities,
-                    stats=stats,
+                    stats=self._build_mob_stats(),
                     effects=effects,
                 )
         except ValueError as exc:
@@ -685,7 +726,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self._pnj_drag_last_pos = event.pos
             return None
 
-        if self.type_id is not None and not self.is_mob and not self.is_pnj:
+        if self.card_kind == "object":
             if self.archetype in CELL_MODES_ARCHETYPES:
                 if not self._is_multi_cell():
                     if self.archetype == "sol" and self._blocks_rect.collidepoint(event.pos):
@@ -705,7 +746,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                 self.lockable = not self.lockable
                 return None
 
-        if self.is_mob or self.is_pnj or self.item_id is not None:
+        if self._shows_capabilities_and_effects():
             if self._throwable_rect.collidepoint(event.pos):
                 self.throwable_enabled = not self.throwable_enabled
                 return None
@@ -776,34 +817,17 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
         self._render_preview(screen)
 
-        if self.type_id is not None:
-            if self.is_mob:
-                self._render_mob_info(screen)
-            elif self.is_pnj:
-                self._render_pnj_info(screen)
-            else:
-                type_label = self.small_font.render(f"Archetype : {ARCHETYPES.get(self.archetype, {}).get('label', self.archetype)}", True, (200, 200, 200))
-                screen.blit(type_label, (self.x + 20, self.y + 244))
-
-                if self.archetype in CELL_MODES_ARCHETYPES:
-                    if not self._is_multi_cell():
-                        if self.archetype == "sol":
-                            check_label = "[x] Bloque le mouvement" if self.blocks_movement else "[ ] Bloque le mouvement"
-                            self.border.draw_centered_label(screen, self._blocks_rect, self.font, check_label)
-                    else:
-                        self._render_cell_modes_grid(screen)
-
-                interact_label = "[x] Interagible" if self.interactable else "[ ] Interagible"
-                self.border.draw_centered_label(screen, self._interactable_rect, self.font, interact_label)
-
-                if self.archetype == "porte":
-                    lock_label = "[x] Porte verrouillable" if self.lockable else "[ ] Porte verrouillable"
-                    self.border.draw_centered_label(screen, self._lockable_rect, self.font, lock_label)
+        if self.card_kind == "mob":
+            self._render_mob_info(screen)
+        elif self.card_kind == "pnj":
+            self._render_pnj_info(screen)
+        elif self.card_kind == "object":
+            self._render_object_info(screen)
         else:
             item_label = self.small_font.render("Item d'inventaire", True, (200, 200, 200))
             screen.blit(item_label, (self.x + 20, self.y + 244))
 
-        if self.is_mob or self.is_pnj or self.item_id is not None:
+        if self._shows_capabilities_and_effects():
             self._render_capabilities(screen)
             self._render_effects(screen)
 
@@ -880,6 +904,30 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             amount_label = self.small_font.render("Montant (PV)", True, (200, 200, 200))
             screen.blit(amount_label, (stepper.minus_rect.x, stepper.minus_rect.y - amount_label.get_height() - 2))
             stepper.render(screen, self.border, self.small_font, self.heal_amount)
+
+    def _render_object_info(self, screen):
+        """Archetype label + mechanics checkboxes (blocks_movement/
+        cell_modes/interactable/lockable) -- plain decorative/special
+        OBJECT_TYPES cards only (card_kind == "object"), extracted out of
+        render()'s own kind dispatch for symmetry with _render_mob_info/
+        _render_pnj_info."""
+        type_label = self.small_font.render(f"Archetype : {ARCHETYPES.get(self.archetype, {}).get('label', self.archetype)}", True, (200, 200, 200))
+        screen.blit(type_label, (self.x + 20, self.y + 244))
+
+        if self.archetype in CELL_MODES_ARCHETYPES:
+            if not self._is_multi_cell():
+                if self.archetype == "sol":
+                    check_label = "[x] Bloque le mouvement" if self.blocks_movement else "[ ] Bloque le mouvement"
+                    self.border.draw_centered_label(screen, self._blocks_rect, self.font, check_label)
+            else:
+                self._render_cell_modes_grid(screen)
+
+        interact_label = "[x] Interagible" if self.interactable else "[ ] Interagible"
+        self.border.draw_centered_label(screen, self._interactable_rect, self.font, interact_label)
+
+        if self.archetype == "porte":
+            lock_label = "[x] Porte verrouillable" if self.lockable else "[ ] Porte verrouillable"
+            self.border.draw_centered_label(screen, self._lockable_rect, self.font, lock_label)
 
     def _render_mob_info(self, screen):
         """Type + Etats -- always informational (a mob's animation set is
