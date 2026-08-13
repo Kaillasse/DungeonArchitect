@@ -1,7 +1,5 @@
 
 import pygame
-from core.world.object_manager import OBJECT_LIST
-from core.data.ressources import DEFAULT_ANIM_SPEED
 
 class ObjectTool:
 
@@ -9,13 +7,8 @@ class ObjectTool:
 
         self.object_type = None
 
-        self.origin = pygame.Vector2(100,230)
-        self.position = self.origin.copy()
+        self.position = pygame.Vector2(100, 230)
         self.dragging = False
-
-        self.timer = 0
-        self.speed = DEFAULT_ANIM_SPEED
-        self.available_objects = OBJECT_LIST
 
     def start_drag(self, object_type, mouse_pos):
 
@@ -33,10 +26,3 @@ class ObjectTool:
         if event.type == pygame.MOUSEMOTION:
 
             self.position.update(event.pos)
-
-    def update(self, dt, mouse_pos):
-
-        if not self.dragging:
-            return
-
-        self.position.update(mouse_pos)

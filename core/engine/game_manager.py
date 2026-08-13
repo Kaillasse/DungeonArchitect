@@ -9,6 +9,7 @@ from core.ui.menu import Menu
 from core.engine.gamestate import GameState
 from core.data.settings import Settings
 from core.ui.widgets import BorderManager
+from core.ui.settings_panel import SettingsPanelUI
 
 class GameManager:
     def __init__(self, screen, settings=None):
@@ -58,6 +59,12 @@ class GameManager:
         self.menu = Menu(self)
         self.creator = Creator(self)
         self.explorator = Explorator(self)
+        # One shared instance -- opened from either Creator's UI or
+        # Explorator's inventory panel, so both reach the exact same
+        # is_open/mode state and the exact same underlying Settings
+        # object, rather than each state owning an independent copy of
+        # this whole screen (see settings_panel.py's own docstring).
+        self.settings_panel = SettingsPanelUI(self)
 
         # BorderManager is a singleton first-initialized by whichever of the
         # above constructed it first (Menu, in practice) -- apply the
@@ -82,6 +89,7 @@ class GameManager:
         self.menu.screen = screen
         self.creator.screen = screen
         self.explorator.screen = screen
+        self.settings_panel.screen = screen
 
         self.settings.save()
 

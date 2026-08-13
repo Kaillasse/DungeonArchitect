@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pygame
 
-from core.data.cards import CardManager, resolve_card_sprite, room_card_properties
+from core.data.cards import CardManager, resolve_card_sprite, room_card_properties, card_completeness
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -35,6 +35,7 @@ class CardRenderer:
         # clear_cache() below, same as _cache/_sprite_cache.
         self._card_cache = {}
         self._properties_cache = {}
+        self._completeness_cache = {}
 
     def clear_cache(self):
         """Called by CardPanelUI.refresh() -- a freshly reloaded card's
@@ -44,6 +45,7 @@ class CardRenderer:
         self._sprite_cache.clear()
         self._card_cache.clear()
         self._properties_cache.clear()
+        self._completeness_cache.clear()
 
     def get_surface(self, card, pixel_height):
         key = (card.card_id, pixel_height)
@@ -83,6 +85,20 @@ class CardRenderer:
             properties = room_card_properties(room_name)
             self._properties_cache[room_name] = properties
         return properties
+
+    def get_completeness(self, card):
+        """card_completeness(card), cached by card_id -- same reasoning as
+        get_room_properties: a PNJ card's completeness check reads its
+        entity pack's own tagged tiles (object_manager.
+        action_direction_coverage), work worth doing at most once per
+        clear_cache() cycle rather than once per visible frame. Used by
+        CardPanelUI's incomplete badge (_draw_stack) and its standard-mode
+        detail readout."""
+        result = self._completeness_cache.get(card.card_id)
+        if result is None:
+            result = card_completeness(card)
+            self._completeness_cache[card.card_id] = result
+        return result
 
     def _sprite_for(self, card_id):
         if card_id not in self._sprite_cache:

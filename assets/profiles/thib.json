@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "thib",
-  "xp": 1200,
+  "xp": 1375,
   "generator_room_names": [
     "room_001",
     "room_002",
@@ -27,19 +27,19 @@
       "collapsed": false
     },
     "card": {
-      "x": 900,
-      "y": 353,
+      "x": 731,
+      "y": 252,
       "collapsed": false
     }
   },
   "card_collection": {
-    "tile_floor": 0,
-    "tile_wall": 1,
-    "vase": 2,
+    "tile_floor": 122,
+    "tile_wall": 18,
+    "vase": 6,
     "cave_entrance": 1,
-    "torch": 2,
+    "torch": 6,
     "stone": 0,
-    "stone_2": 1,
+    "stone_2": 0,
     "banc": 0,
     "arbre1": 0,
     "tombe1": 0,
@@ -53,7 +53,20 @@
     "totem4": 0,
     "tombe4": 0,
     "bordureporte": 0,
-    "portebois": 1
+    "portebois": 0,
+    "bigstone": 0,
+    "boxsmall": 0,
+    "boxbig": 0,
+    "puit": 0,
+    "tombe5": 0,
+    "pillier": 0,
+    "wall": 2,
+    "big_entrance": 1,
+    "pillar": 6,
+    "button": 2,
+    "gate": 2,
+    "gepeto": 1,
+    "djepeto": 0
   },
   "admingod": false
 }

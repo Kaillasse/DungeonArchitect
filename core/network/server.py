@@ -13,7 +13,15 @@ needed around the simulation or the outgoing broadcast itself. self._clients_
 lock guards every dict that's both mutated by a connection thread (join/
 disconnect) and read or mutated by the main thread: self._clients (write
 sockets), self._connections (raw sockets, Phase 5 -- see _kick), and
-self._flood_strikes (Phase 5 rate-limit bookkeeping).
+self._flood_strikes (Phase 5 rate-limit bookkeeping). self.explorator.players
+itself is NOT one of those -- it's never touched under this lock at all, so
+a connection thread noticing its own disconnect queues the player_id onto
+self._disconnects instead of popping it directly (see _drain_disconnects):
+Explorator.update()/protocol.build_snapshot both iterate self.players on the
+main thread every tick, and a same-dict pop() from another thread mid-
+iteration would raise "dictionary changed size during iteration" -- exactly
+the same shared-queue-drained-on-the-main-thread shape self._incoming already
+uses for incoming messages.
 
 Phase 5 hardening (protocol robustness, not position/damage anti-cheat --
 that's already covered by the server recomputing all of it itself, see
@@ -29,6 +37,7 @@ from __future__ import annotations
 
 import os
 import queue
+import select
 import socket
 import sys
 import threading
@@ -76,6 +85,19 @@ class GameServer:
     # overhead for N idle connections.
     READ_POLL_TIMEOUT = 1.0
 
+    # How long _broadcast/_send_to will wait for a congested client's socket
+    # to become writable before giving up on that one write this tick,
+    # rather than blocking the shared tick thread on it -- writer.write()/
+    # flush() on a client whose TCP send buffer is full can otherwise block
+    # for as long as conn.settimeout(READ_POLL_TIMEOUT) allows, freezing
+    # every other player's snapshot delivery for that whole time too.
+    WRITE_POLL_TIMEOUT = 0.05
+    # Consecutive stalled-write ticks (see _broadcast) tolerated before that
+    # client is treated as genuinely stuck and kicked -- same bounded-
+    # tolerance idiom as FLOOD_STRIKE_LIMIT/INVALID_STRIKE_LIMIT below, so a
+    # single slow tick doesn't cost a legitimate client its connection.
+    WRITE_STALL_STRIKE_LIMIT = 15
+
     # Phase 5 hardening tuning. An honest client sends ~1 "input" message per
     # its own rendered frame (60fps) -- roughly 2 per server tick at 30Hz --
     # so MAX_MESSAGES_PER_TICK leaves generous headroom for jitter/bursts
@@ -118,6 +140,15 @@ class GameServer:
         else:
             self.room_kind, self.room_name = "room", room
             self.explorator.open_room(room)
+            # In-game hosting (Explorator.start_hosting) only ever hosts
+            # from home -- see its own hard requirement -- so this is
+            # exactly the room _return_to_home should fall back to once
+            # self.current_room has drifted to None (entering a generated
+            # dungeon, see _enter_assembly). The standalone dedicated-
+            # server CLI path (--donjon, if kept) has no such "always
+            # starts from home" guarantee, so it's deliberately left alone
+            # above.
+            self.explorator._home_room_name = room
 
         self.max_players = max_players
 
@@ -126,8 +157,10 @@ class GameServer:
         self._connections = {}  # player_id -> raw socket, so _kick() can shut it down (Phase 5)
         self._kick_requested = set()  # player_id set -- see _kick/_handle_connection
         self._flood_strikes = {}  # player_id -> consecutive over-cap ticks (Phase 5)
+        self._write_stalls = {}  # player_id -> consecutive stalled-write ticks (see _broadcast)
         self._clients_lock = threading.Lock()
         self._incoming = queue.Queue()  # (player_id, payload) from every reader thread
+        self._disconnects = queue.Queue()  # player_id from every reader thread -- see _drain_disconnects
         self._admin_commands = queue.Queue()  # raw stdin lines from the admin console thread
         self._terrain_versions = {}
         self._tick = 0
@@ -150,6 +183,7 @@ class GameServer:
 
                 self._drain_incoming()
                 self._drain_admin_commands()
+                self._drain_disconnects()
                 self.explorator.update(self.TICK_DT)
                 self._tick += 1
                 self._broadcast_snapshot()
@@ -424,11 +458,39 @@ class GameServer:
                     self._clients.pop(player_id, None)
                     self._connections.pop(player_id, None)
                     self._flood_strikes.pop(player_id, None)
+                    self._write_stalls.pop(player_id, None)
                     self._kick_requested.discard(player_id)
-                self.explorator.remove_session(player_id)
-                self._broadcast(protocol.encode(protocol.MSG_LEAVE, player_id=player_id))
-                print(f"[server] player {player_id} disconnected")
+                # Queued, not called directly -- see _drain_disconnects for
+                # why remove_session must only ever run on the main tick
+                # thread.
+                self._disconnects.put(player_id)
             conn.close()
+
+    def _drain_disconnects(self):
+        """Runs remove_session (and the resulting MSG_LEAVE broadcast) on
+        the main tick thread only -- _handle_connection's own reader
+        thread just queues the player_id there (see its finally block)
+        instead of calling remove_session directly, since that pops the
+        id straight out of self.explorator.players while THIS thread can
+        simultaneously be iterating that same dict (explorator.update,
+        protocol.build_snapshot inside serve_forever's loop below). A
+        straight cross-thread mutation there could raise "dictionary
+        changed size during iteration" on whichever of those happened to
+        be mid-loop -- uncaught (serve_forever's try/finally has no except
+        around the loop body), which would kill this whole tick thread and
+        permanently freeze every connected client's view of the world at
+        its last successfully broadcast snapshot. From the outside that
+        looks exactly like "the player who just disconnected never
+        disappears" -- nothing ever arrives afterward to say otherwise,
+        for anyone, not just that one player."""
+        while True:
+            try:
+                player_id = self._disconnects.get_nowait()
+            except queue.Empty:
+                break
+            self.explorator.remove_session(player_id)
+            self._broadcast(protocol.encode(protocol.MSG_LEAVE, player_id=player_id))
+            print(f"[server] player {player_id} disconnected")
 
     def _drain_incoming(self):
         """Groups queued messages by player first (rather than applying each
@@ -489,6 +551,20 @@ class GameServer:
                 print(f"[server] PvP {'ON' if self.explorator.pvp_enabled else 'OFF'} (host: player {player_id})")
             elif msg_type == protocol.MSG_CHAT:
                 self._apply_chat(player_id, session, payload)
+            elif msg_type == protocol.MSG_RETURN_HOME:
+                # No host restriction (unlike pvp_toggle) -- victory is
+                # whole-session state every player already sees the same
+                # banner for, so whoever clicks through it first ending it
+                # for everyone is the same "first to act wins" shape the
+                # dungeon_exit interaction that TRIGGERED victory already
+                # has. Guarded on self.explorator.victory so a stray/replayed
+                # message outside a real victory can't teleport everyone
+                # home on a whim. _return_to_home already knows to fall
+                # back to self.explorator._home_room_name (set below, in
+                # __init__) since self.settings is None on this headless
+                # instance.
+                if self.explorator.victory:
+                    self.explorator._return_to_home()
         except (KeyError, ValueError, TypeError) as exc:
             print(f"[server] player {player_id} sent a message that failed to apply ({exc}), ignoring")
 
@@ -559,27 +635,88 @@ class GameServer:
         self._broadcast(protocol.encode_dict(snapshot))
 
     def _broadcast(self, raw_bytes):
+        """Snapshots the client/connection dicts under the lock, then does
+        every actual write OUTSIDE it -- holding _clients_lock across a
+        blocking socket write would stall a connection thread's own
+        join/disconnect bookkeeping on nothing more than "some other client
+        is slow to read," which has nothing to do with what the lock is
+        for. Each write is itself guarded by a short select() writability
+        check (WRITE_POLL_TIMEOUT) so one congested client's full TCP send
+        buffer can't block this call -- and therefore the shared tick loop,
+        and therefore every other player's snapshot delivery -- for up to a
+        full READ_POLL_TIMEOUT; a client stalled for WRITE_STALL_STRIKE_LIMIT
+        consecutive ticks is kicked instead of silently degrading forever."""
         with self._clients_lock:
-            dead = []
-            for player_id, writer in self._clients.items():
+            clients = list(self._clients.items())
+            connections = dict(self._connections)
+
+        dead = []
+        stuck = []
+        for player_id, writer in clients:
+            conn = connections.get(player_id)
+            if conn is not None:
                 try:
-                    writer.write(raw_bytes)
-                    writer.flush()
+                    _, writable, _ = select.select([], [conn], [], self.WRITE_POLL_TIMEOUT)
                 except OSError:
                     dead.append(player_id)
+                    continue
+                if not writable:
+                    strikes = self._write_stalls.get(player_id, 0) + 1
+                    self._write_stalls[player_id] = strikes
+                    if strikes >= self.WRITE_STALL_STRIKE_LIMIT and player_id not in self._kick_requested:
+                        stuck.append(player_id)
+                    continue
+
+            self._write_stalls[player_id] = 0
+            try:
+                writer.write(raw_bytes)
+                writer.flush()
+            except OSError:
+                dead.append(player_id)
+
+        if dead:
+            with self._clients_lock:
+                for player_id in dead:
+                    self._clients.pop(player_id, None)
+            # A dead write only ever stops THIS player's own snapshot
+            # delivery and drops them from self._clients -- it does NOT by
+            # itself remove them from self.explorator.players, which is
+            # what actually decides who's still in every snapshot's
+            # "players" list (and therefore who every OTHER client,
+            # including the host's own loopback render, keeps showing).
+            # That removal only happens inside _handle_connection's finally
+            # block, which runs once its reader thread notices the
+            # connection is gone (EOF, or a kick) -- a write failure here
+            # is exactly as strong a signal of a dead connection as that,
+            # so kick it too instead of leaving remove_session's actual
+            # cleanup to hinge entirely on the read side separately
+            # noticing on its own.
             for player_id in dead:
-                self._clients.pop(player_id, None)
+                if player_id not in self._kick_requested:
+                    self._kick(player_id, "connexion perdue (ecriture en echec)")
+        for player_id in stuck:
+            self._kick(player_id, "connexion trop lente (ecriture bloquee)")
 
     def _send_to(self, player_id, raw_bytes):
         """Same idea as _broadcast, but to exactly one client -- used for a
         chat command's private reply/rejection (see _apply_chat), which
         nobody else needs to see. Silently no-ops if that player has
         already disconnected (a dead-writer race with _broadcast's own
-        cleanup, harmless either way)."""
+        cleanup, harmless either way), or if its socket is currently
+        congested (see _broadcast) -- a single missed private reply isn't
+        worth blocking the tick loop or tracking strikes for."""
         with self._clients_lock:
             writer = self._clients.get(player_id)
+            conn = self._connections.get(player_id)
         if writer is None:
             return
+        if conn is not None:
+            try:
+                _, writable, _ = select.select([], [conn], [], self.WRITE_POLL_TIMEOUT)
+            except OSError:
+                return
+            if not writable:
+                return
         try:
             writer.write(raw_bytes)
             writer.flush()

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from core.data.ressources import ROOMS_DIRECTORY
+from core.editor.autotile import FLOOR, WALL
 
 
 class SaveManager:
@@ -12,11 +13,12 @@ class SaveManager:
 
     def to_json(self, dungeon) -> dict:
         return {
-            "version": 4,
+            "version": 5,
             "width": dungeon.width,
             "height": dungeon.height,
             "objects": dungeon.object_manager.objects,
             "cells": dungeon.logical_grid,
+            "theme_grid": dungeon.theme_grid,
             "floor_theme": dungeon.floor_theme,
             "wall_theme": dungeon.wall_theme,
         }
@@ -51,9 +53,31 @@ class SaveManager:
         ]
         # Additive (absent on any save from before this existed) -- None
         # means exactly today's interior-only behavior, see Dungeon's own
-        # floor_theme/wall_theme docstring.
+        # floor_theme/wall_theme docstring. Now only ever the active BRUSH
+        # (see Dungeon.theme_grid) -- kept in the save purely so reopening a
+        # room resumes painting with whatever pack was last selected.
         dungeon.floor_theme = payload.get("floor_theme")
         dungeon.wall_theme = payload.get("wall_theme")
+
+        theme_grid = payload.get("theme_grid")
+        if theme_grid is not None:
+            dungeon.theme_grid = [list(row) for row in theme_grid]
+        else:
+            # Pre-version-5 save (or a hand-edited payload missing the
+            # field): only a single room-wide floor_theme/wall_theme ever
+            # existed back then, applied uniformly to every FLOOR/WALL cell
+            # -- migrate that into a theme_grid entry per cell so the room
+            # renders exactly as it did before, while becoming paintable
+            # per-cell (a different brush) from the very next edit onward.
+            dungeon.theme_grid = [
+                [
+                    dungeon.floor_theme if cell == FLOOR
+                    else dungeon.wall_theme if cell == WALL
+                    else None
+                    for cell in row
+                ]
+                for row in dungeon.logical_grid
+            ]
         # Not rebuild() -- a load trusts the saved `cells` as-is (walls
         # included) rather than re-deriving them from floor cells, so a
         # runtime-destroyed wall (or a room hand-edited with autotile off)

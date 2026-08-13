@@ -17,6 +17,7 @@ from core.editor.ui.role_panel import RolePanelUI
 from core.editor.ui.chest_panel import ChestPanelUI
 from core.editor.ui.autotile_theme_panel import AutotileThemePanelUI
 from core.editor.ui.sprite_editor import SpriteEditorPanelUI
+from core.editor.ui.mechanics_panel import MechanicsPanelUI
 
 __all__ = [
     "ToolPaletteUI",
@@ -28,4 +29,5 @@ __all__ = [
     "ChestPanelUI",
     "AutotileThemePanelUI",
     "SpriteEditorPanelUI",
+    "MechanicsPanelUI",
 ]

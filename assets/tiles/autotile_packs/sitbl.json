@@ -1,0 +1,97 @@
+{
+  "kind": "entity",
+  "role": null,
+  "tileset": "characters/Animals/blackcat.png",
+  "tiles": [
+    {
+      "index": 0,
+      "rect": [
+        0,
+        224,
+        32,
+        32
+      ],
+      "action": "Assis",
+      "direction": "back_left",
+      "order": 0
+    },
+    {
+      "index": 1,
+      "rect": [
+        32,
+        224,
+        32,
+        32
+      ],
+      "action": "Assis",
+      "direction": "back_left",
+      "order": 1
+    },
+    {
+      "index": 2,
+      "rect": [
+        64,
+        224,
+        32,
+        32
+      ],
+      "action": "Assis",
+      "direction": "back_left",
+      "order": 2
+    },
+    {
+      "index": 3,
+      "rect": [
+        96,
+        224,
+        32,
+        32
+      ],
+      "action": "Assis",
+      "direction": "back_left",
+      "order": 3
+    },
+    {
+      "index": 4,
+      "rect": [
+        0,
+        256,
+        32,
+        32
+      ],
+      "action": "Assis",
+      "direction": "back_left",
+      "order": 4
+    },
+    {
+      "index": 5,
+      "rect": [
+        32,
+        256,
+        32,
+        32
+      ],
+      "action": "Assis",
+      "direction": "back_left",
+      "order": 5
+    },
+    {
+      "index": 6,
+      "rect": [
+        64,
+        256,
+        32,
+        32
+      ]
+    },
+    {
+      "index": 7,
+      "rect": [
+        96,
+        256,
+        32,
+        32
+      ]
+    }
+  ]
+}

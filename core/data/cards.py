@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pygame
 
-from core.world.object_manager import OBJECT_TYPES, ITEM_DEFINITIONS, load_object_frames, make_item
+from core.world.object_manager import OBJECT_TYPES, ITEM_DEFINITIONS, load_object_frames, make_item, npc_completeness
 from core.data.ressources import load_tileset, get_tile_surface, list_rooms, ROOMS_DIRECTORY
 from core.editor.autotile import DEFAULT_FLOOR_SPRITE, DEFAULT_WALL_SPRITE, FLOOR, WALL
 
@@ -121,7 +121,17 @@ def default_card_for(card_id):
 
     config = OBJECT_TYPES.get(card_id)
     if config is not None:
-        card_type = "mob" if (config.get("animal") or config.get("enemy")) else "tile"
+        # "pnj" checked before "mob" -- a PNJ type (config["npc"] is True,
+        # see object_manager.register_npc_type) is its own CARD_TYPES entry,
+        # not a mob (no health/damage, see core.world.entities.Npc's own
+        # class docstring for why it's deliberately not chased like an
+        # Animal/Enemy).
+        if config.get("npc"):
+            card_type = "pnj"
+        elif config.get("animal") or config.get("enemy"):
+            card_type = "mob"
+        else:
+            card_type = "tile"
         images = [config["asset"]] + list(config.get("variants", {}).values())
         # A custom type registered via the sprite editor carries its own
         # chosen display name (see object_manager.register_custom_type) --
@@ -135,6 +145,29 @@ def default_card_for(card_id):
         return Card(card_id, definition["name"], [definition["icon_path"]], "item")
 
     return None
+
+
+def card_completeness(card):
+    """(is_complete, missing_summary: list[str]) for `card` -- dispatches
+    by card_type. Only "pnj" has a real completeness notion today: a PNJ
+    can be registered from a single tagged tile (object_manager.
+    register_npc_type), so idle/move/sitting/laying/running direction
+    coverage is routinely still a work in progress right after
+    registration (see object_manager.npc_completeness). Every other
+    card_type is unconditionally complete -- none of them support
+    partial/staged content yet (register_custom_type always takes a
+    fully-formed rect in one call, a room either exists or doesn't). A
+    future card_type that gains its own staged-authoring flow should add
+    its own branch here rather than touching Card itself, which stays the
+    plain data holder it already is."""
+    if card.card_type != "pnj":
+        return True, []
+    result = npc_completeness(card.card_id)
+    missing = [
+        f"{role} ({len(directions)} direction{'s' if len(directions) > 1 else ''})"
+        for role, directions in result["missing"].items()
+    ]
+    return result["complete"], missing
 
 
 def resolve_card_sprite(card_id):

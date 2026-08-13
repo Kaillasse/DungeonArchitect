@@ -11,7 +11,11 @@ as "last_input_seq" so the client knows which of its own predicted inputs are
 now confirmed), "pvp_toggle" (F4 -- must be server-authoritative since it
 gates real damage), "chat" (a "text" string -- plain chat if it doesn't start
 with "/", a command otherwise; see GameServer._dispatch_command for the
-host-only gating on privileged commands like level/kick/stop).
+host-only gating on privileged commands like level/kick/stop), "return_home"
+(clicking through the victory banner -- must be server-authoritative since
+victory/the world reset it triggers are shared, whole-session state, not
+something a client can just decide locally; see Explorator._return_to_home
+and GameServer._apply_message).
 
 Server -> client: "welcome" (assigned player_id + which room/donjon to load
 locally), "snapshot" (every tick -- see build_snapshot), "leave" (a session
@@ -30,13 +34,14 @@ MSG_JOIN = "join"
 MSG_INPUT = "input"
 MSG_PVP_TOGGLE = "pvp_toggle"
 MSG_CHAT = "chat"
+MSG_RETURN_HOME = "return_home"
 
 MSG_WELCOME = "welcome"
 MSG_SNAPSHOT = "snapshot"
 MSG_LEAVE = "leave"
 MSG_SERVER_FULL = "server_full"
 
-_KNOWN_MESSAGE_TYPES = (MSG_JOIN, MSG_INPUT, MSG_PVP_TOGGLE, MSG_CHAT)
+_KNOWN_MESSAGE_TYPES = (MSG_JOIN, MSG_INPUT, MSG_PVP_TOGGLE, MSG_CHAT, MSG_RETURN_HOME)
 
 # Phase 5 hardening: a client's raw axis input is never meant to exceed ~1.4
 # (two keys held at once, unnormalized -- see read_local_keyboard_input).

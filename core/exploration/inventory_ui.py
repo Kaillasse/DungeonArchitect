@@ -90,6 +90,25 @@ class InventoryPanel:
         self._render_main_slots(screen, panel_rect)
         self._render_currency(screen, panel_rect)
         self._render_grid_slots(screen, panel_rect)
+        self._render_settings_button(screen, panel_rect)
+
+    SETTINGS_BUTTON_SIZE = (130, 34)
+
+    def _settings_button_rect(self, panel_rect):
+        width, height = self.SETTINGS_BUTTON_SIZE
+        return pygame.Rect(panel_rect.right - width - 14, panel_rect.bottom - height - 14, width, height)
+
+    def _render_settings_button(self, screen, panel_rect):
+        self.border.draw_centered_label(screen, self._settings_button_rect(panel_rect), self.label_font, "Parametres")
+
+    def handle_click(self, screen, pos, region=None):
+        """True if `pos` hit the Parametres button -- the only clickable
+        thing this otherwise purely-decorative overlay has (see this
+        module's own docstring: no drag/drop exists here yet). Recomputes
+        panel_rect itself from the same (screen, region) render() was just
+        given, rather than making every caller keep its own copy of that
+        rect around just for this one hit-test."""
+        return self._settings_button_rect(self._panel_rect(screen, region)).collidepoint(pos)
 
     def _render_player_preview(self, screen, panel_rect, player):
         frames = player.sprites.get("idle", {}).get("front")

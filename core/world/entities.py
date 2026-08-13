@@ -11,6 +11,7 @@ from core.data.sound_manager import SoundManager
 from core.world.object_manager import (
     ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, ENEMY_STATS, load_enemy_frames, load_currency_frames,
     load_dynamite_frames, load_explosion_frames,
+    OBJECT_TYPES, load_npc_frames, npc_types, NPC_DIRECTIONS,
 )
 
 def _draw_cached_sprite(screen, camera, cache, key_prefix, sprite, position, frame_w, frame_h, flip=False, anchor_feet=False):
@@ -380,13 +381,28 @@ class _WanderingEntity:
         if is_walkable(self._hitbox_at(self.position.x, candidate_y)):
             self.position.y = candidate_y
 
+    def _current_frames(self):
+        """Hook: the current animation's frame list. Default is exactly
+        `self.frames[self.state]` -- Animal/Enemy both store a flat
+        {state: [...]} dict and never override this. Npc overrides it
+        instead, since its own frames are nested by (action, direction)
+        rather than a flat state key -- see Npc._current_frames."""
+        return self.frames[self.state]
+
     def _advance_animation(self, dt):
         """Looping states wrap forever (Animal's idle/move both do); a
         non-looping state advances toward its last frame and then calls a
         hook once it gets there instead of wrapping -- Animal has no
         non-looping states so these hooks are never reached for it, Enemy
         overrides them for its attack/damaged/death states."""
-        frames = self.frames[self.state]
+        frames = self._current_frames()
+        if not frames:
+            # Only reachable for an Npc whose entity pack has nothing
+            # tagged at all for the current (action, direction) or any
+            # fallback (see Npc._current_frames) -- Animal/Enemy's frame
+            # dicts are always fully populated at import time and never
+            # hit this. Nothing to animate yet, not a crash.
+            return
         self.animation_timer += dt
         if self.animation_timer < self.ANIMATION_SPEED:
             return
@@ -411,7 +427,9 @@ class _WanderingEntity:
         last frame forever); Enemy overrides it for "damaged" -> "idle"."""
 
     def draw(self, screen, camera):
-        frames = self.frames[self.state]
+        frames = self._current_frames()
+        if not frames:
+            return
         sprite = frames[min(self.frame, len(frames) - 1)]
         _draw_cached_sprite(
             screen, camera, self._render_cache,
@@ -480,6 +498,299 @@ class Animal(_WanderingEntity):
         self._advance_animation(dt)
 
 
+def _bucket_direction(vector):
+    """The nearest of Player.DIRECTION_VECTORS' 8 unit vectors to `vector`
+    (already a unit vector itself -- see _WanderingEntity._enter_wander_state),
+    by dot product -- the entity-pack equivalent of Player.get_sprite_
+    direction, but for a real (non-mirrored) 8-way lookup: an entity pack's
+    regions already have all 8 real directions hand-drawn and tagged (see
+    object_manager.NPC_DIRECTIONS/build_entity_pack_lookup), so there's no
+    need for Player's own 5-row-plus-horizontal-flip storage trick here."""
+    best_direction = None
+    best_dot = -2.0  # lower than any possible dot product of two unit vectors
+    for direction, (dx, dy) in Player.DIRECTION_VECTORS.items():
+        dot = vector.x * dx + vector.y * dy
+        if dot > best_dot:
+            best_dot = dot
+            best_direction = direction
+    return best_direction
+
+
+class Npc(_WanderingEntity):
+    """A PNJ -- vagabonde par un etat "move" en boucle et un repos qui,
+    selon ce qui est tague dans son entity pack, va d'un simple "idle" en
+    boucle (comportement d'origine, PNJ minimal move+idle) jusqu'a une
+    vraie chaine de postures reversibles :
+
+        move <-> [sitting] <-> sit <-> [laying] <-> lie
+
+    "sitting"/"laying" sont des transitions A UN SEUL passage (pas des
+    boucles) : jouees en avant, elles font s'asseoir/s'allonger ; jouees a
+    l'envers (meme frames, ordre inverse), elles font se relever -- voir
+    _enter_transition/_advance_transition. "sit"/"lie" sont des poses
+    figees sur la derniere frame de la transition qui y a mene (pas de
+    boucle propre). "run" (optionnel) est un second etat de vagabondage
+    choisi aleatoirement a la place de "move" a chaque nouvelle entree en
+    mouvement -- voir _enter_move/RUN_CHANCE. wander_actions ne DOIT
+    fournir que "idle"/"move" (comportement minimal) ; "sitting"/"laying"/
+    "run" sont chacun individuellement optionnels et n'activent leur
+    portion de la chaine que s'ils sont presents ET reellement tagues dans
+    le pack (voir _has_action).
+
+    Son jeu de frames est indexe par (action, direction) plutot qu'un
+    simple etat plat (voir _current_frames), et il n'a ni vie ni degats :
+    pas de "alive"/"take_damage" du tout, ce qui fait deja bloquer le
+    passage en permanence via _entity_rect_is_free's propre
+    `getattr(other, "alive", True)` -- confirme avec l'utilisateur, un PNJ
+    n'est pas un mob qu'on chasse (voir aussi
+    ProjectileManager._apply_blast_damage, qui n'a delibrement PAS de
+    boucle PNJ)."""
+
+    FRAME_SIZE = 32
+    MOVE_SPEED = 30  # pixels/second -- un peu plus lent qu'un Animal
+    RUN_SPEED = 55  # utilise seulement si "run" est tague (voir _enter_move)
+    ANIMATION_SPEED = 0.2
+    IDLE_DURATION = (2.0, 4.5)
+    MOVE_DURATION = (1.5, 3.0)
+    REST_DURATION = (2.0, 4.5)  # combien de temps "sit"/"lie" tiennent avant la prochaine decision
+    LIE_CHANCE = 0.35  # probabilite que "sit" s'approfondisse vers "lie" plutot que de repartir vers "move"
+    RUN_CHANCE = 0.4  # probabilite que "move" choisisse "run" plutot que "move" quand les deux sont tagues
+    # Etats a un seul passage, avances par _advance_transition (jamais par
+    # le minuteur state_timer -- voir update()) : "to_sit"/"to_move" jouent
+    # l'action "sitting" (en avant / a l'envers), "to_lie"/
+    # "to_sit_from_lie" jouent "laying" (en avant / a l'envers).
+    _TRANSITION_STATES = ("to_sit", "to_lie", "to_sit_from_lie", "to_move")
+    # Inerte pour Npc (voir draw(), toujours flip=False) -- une feuille de
+    # PNJ a deja ses 8 vraies directions dessinees, contrairement aux
+    # sheets Animal/Enemy qui n'ont qu'un sens et se retournent. Laisse a
+    # False plutot que de retoucher _move_toward pour un seul type.
+    FACES_RIGHT_BY_DEFAULT = False
+
+    HITBOX_WIDTH = 14
+    HITBOX_HEIGHT = 8
+
+    def __init__(self, npc_type, grid_x, grid_y, dungeon):
+        config = OBJECT_TYPES[npc_type]
+        self.npc_type = npc_type
+        self.frames = load_npc_frames(config["entity_pack"])
+        self.wander_actions = config["wander_actions"]
+
+        self.position = pygame.Vector2(*dungeon.grid_to_world(grid_x, grid_y))
+
+        self.state = "idle"
+        self.direction = pygame.Vector2()
+        self.flip = False
+        # Direction affichee tant qu'aucun mouvement n'a encore eu lieu --
+        # arbitraire mais stable (voir _enter_move ci-dessous, seul point
+        # qui la recalcule -- le chat garde la direction de son dernier
+        # deplacement pendant tout repos, quelle que soit sa profondeur).
+        self.current_direction = NPC_DIRECTIONS[0]
+        self._move_action = "move"  # "move" ou "run", choisi a chaque _enter_move
+        self._transition_role = None  # "sitting" ou "laying" pendant un etat _TRANSITION_STATES
+        self._transition_reverse = False
+
+        self.frame = 0
+        self.animation_timer = 0
+        self.state_timer = random.uniform(*self.IDLE_DURATION)
+
+        self._render_cache = {}
+
+    # -- lookups d'action --------------------------------------------------
+
+    def _has_action(self, role):
+        """True si wander_actions[role] pointe vers une action REELLEMENT
+        taguee dans ce pack -- une entree wander_actions peut nommer une
+        action jamais effectivement taguee (PNJ enregistre puis pack
+        modifie depuis), donc ce n'est pas juste `role in wander_actions`."""
+        action = self.wander_actions.get(role)
+        return bool(action) and action in self.frames
+
+    def _action_frames_for(self, action_name):
+        """Frames de `action_name` (un nom d'action brut, pas un role) pour
+        self.current_direction, avec repli en cascade au lieu de planter
+        si la direction exacte n'est pas encore taguee -- voir le
+        commentaire de classe : un PNJ n'a besoin que d'UNE tuile taguee
+        pour s'enregistrer, remplir les 8 directions de chaque action
+        reste couramment en cours. Essaie : la direction exacte : une
+        autre direction de la MEME action ; une direction de N'IMPORTE
+        QUELLE action du pack. Ne renvoie [] que si rien n'est tague du
+        tout (voir les gardes vides de update()/draw())."""
+        action_frames = self.frames.get(action_name, {}) if action_name else {}
+        if self.current_direction in action_frames:
+            return action_frames[self.current_direction]
+        if action_frames:
+            return next(iter(action_frames.values()))
+        for other_action_frames in self.frames.values():
+            if self.current_direction in other_action_frames:
+                return other_action_frames[self.current_direction]
+            if other_action_frames:
+                return next(iter(other_action_frames.values()))
+        return []
+
+    def _action_frames(self, role):
+        return self._action_frames_for(self.wander_actions.get(role))
+
+    def _current_action_name(self):
+        if self.state in self._TRANSITION_STATES:
+            return self.wander_actions.get(self._transition_role)
+        if self.state == "sit":
+            return self.wander_actions.get("sitting")
+        if self.state == "lie":
+            return self.wander_actions.get("laying")
+        if self.state == "move":
+            return self.wander_actions.get(self._move_action)
+        return self.wander_actions.get("idle")
+
+    def _current_frames(self):
+        return self._action_frames_for(self._current_action_name())
+
+    # -- machine a etats -----------------------------------------------
+
+    def _enter_move(self):
+        angle = random.uniform(0, 2 * math.pi)
+        self.direction = pygame.Vector2(math.cos(angle), math.sin(angle))
+        self.current_direction = _bucket_direction(self.direction)
+        self._move_action = "run" if self._has_action("run") and random.random() < self.RUN_CHANCE else "move"
+        self.state = "move"
+        self.frame = 0
+        self.animation_timer = 0
+        self.state_timer = random.uniform(*self.MOVE_DURATION)
+
+    def _enter_idle(self):
+        """Le repos simple de secours -- utilise tant que "sitting" n'est
+        pas tague du tout pour ce PNJ, pour qu'un PNJ minimal (juste move
+        + idle, comme avant cette fonctionnalite) continue de se comporter
+        exactement comme avant."""
+        self.direction = pygame.Vector2()
+        self.state = "idle"
+        self.frame = 0
+        self.animation_timer = 0
+        self.state_timer = random.uniform(*self.IDLE_DURATION)
+
+    def _enter_sit(self):
+        self.direction = pygame.Vector2()
+        self.state = "sit"
+        frames = self._action_frames("sitting")
+        self.frame = max(0, len(frames) - 1)  # fige sur la pose "assis" complete
+        self.animation_timer = 0
+        self.state_timer = random.uniform(*self.REST_DURATION)
+
+    def _enter_lie(self):
+        self.direction = pygame.Vector2()
+        self.state = "lie"
+        frames = self._action_frames("laying")
+        self.frame = max(0, len(frames) - 1)  # fige sur la pose "allonge" complete
+        self.animation_timer = 0
+        self.state_timer = random.uniform(*self.REST_DURATION)
+
+    def _enter_transition(self, state, role, reverse):
+        """Un etat a un seul passage, reversible : en avant, part de la
+        frame 0 et avance vers la derniere ; a l'envers, part de la
+        derniere frame et decompte vers 0. `role` nomme quelle entree de
+        wander_actions ("sitting" ou "laying") fournit les frames."""
+        self.direction = pygame.Vector2()
+        self.state = state
+        self._transition_role = role
+        self._transition_reverse = reverse
+        frames = self._action_frames(role)
+        self.frame = max(0, len(frames) - 1) if reverse else 0
+        self.animation_timer = 0
+
+    def _advance_state(self):
+        """Appele quand state_timer arrive a 0 -- choisit la suite dans
+        move <-> [sitting] <-> sit <-> [laying] <-> lie. Si "sitting"
+        n'est pas tague du tout, retombe sur la simple alternance idle
+        <-> move d'origine. Jamais appele pendant un etat de
+        _TRANSITION_STATES -- ceux-la se terminent via
+        _advance_transition atteignant leur derniere frame, pas via ce
+        minuteur (voir update())."""
+        if self.state == "move":
+            if self._has_action("sitting"):
+                self._enter_transition("to_sit", "sitting", reverse=False)
+            else:
+                self._enter_idle()
+        elif self.state == "idle":
+            self._enter_move()
+        elif self.state == "sit":
+            if self._has_action("laying") and random.random() < self.LIE_CHANCE:
+                self._enter_transition("to_lie", "laying", reverse=False)
+            else:
+                self._enter_transition("to_move", "sitting", reverse=True)
+        elif self.state == "lie":
+            self._enter_transition("to_sit_from_lie", "laying", reverse=True)
+
+    def _advance_transition(self, dt):
+        """Fait avancer image par image l'etat _TRANSITION_STATES actif,
+        dans le bon sens, et bascule vers l'etat suivant une fois arrive
+        au bout."""
+        frames = self._action_frames(self._transition_role)
+        self.animation_timer += dt
+        if self.animation_timer < self.ANIMATION_SPEED or not frames:
+            return
+        self.animation_timer = 0
+
+        if self._transition_reverse:
+            if self.frame > 0:
+                self.frame -= 1
+                return
+        elif self.frame < len(frames) - 1:
+            self.frame += 1
+            return
+
+        # Arrive au bout -- passe la main a l'etat reel suivant.
+        if self.state == "to_sit":
+            self._enter_sit()
+        elif self.state == "to_lie":
+            self._enter_lie()
+        elif self.state == "to_sit_from_lie":
+            self._enter_sit()
+        elif self.state == "to_move":
+            self._enter_move()
+
+    def _advance_loop_animation(self, dt):
+        """Boucle l'animation pour "idle"/"move" (les deux seuls etats qui
+        boucle reellement) -- "sit"/"lie" restent figes sur la frame ou
+        leur transition d'entree les a laisses, pas de boucle propre pour
+        eux."""
+        if self.state not in ("idle", "move"):
+            return
+        frames = self._current_frames()
+        if not frames:
+            return
+        self.animation_timer += dt
+        if self.animation_timer < self.ANIMATION_SPEED:
+            return
+        self.animation_timer = 0
+        self.frame = (self.frame + 1) % len(frames)
+
+    def draw(self, screen, camera):
+        frames = self._current_frames()
+        if not frames:
+            return
+        sprite = frames[min(self.frame, len(frames) - 1)]
+        _draw_cached_sprite(
+            screen, camera, self._render_cache,
+            (self._current_action_name(), self.current_direction, self.frame),
+            sprite, self.position, self.FRAME_SIZE, self.FRAME_SIZE,
+            flip=False, anchor_feet=True,
+        )
+
+    def update(self, dt, is_walkable):
+        if self.state in self._TRANSITION_STATES:
+            self._advance_transition(dt)
+            return
+
+        self.state_timer -= dt
+        if self.state_timer <= 0:
+            self._advance_state()
+
+        if self.state == "move":
+            speed = self.RUN_SPEED if self._move_action == "run" else self.MOVE_SPEED
+            self._move_toward(dt, is_walkable, self.direction, speed)
+
+        self._advance_loop_animation(dt)
+
+
 PlayerRef = namedtuple("PlayerRef", ("player", "hitbox"))
 
 
@@ -538,16 +849,30 @@ class _EntityManager:
     def _entities(self, value):
         raise NotImplementedError
 
+    def _entity_types(self):
+        """Hook: which OBJECT_TYPES ids this manager spawns. Default is
+        exactly ENTITY_TYPES -- AnimalManager/EnemyManager never override
+        this, since ANIMAL_TYPES/ENEMY_TYPES are both hand-authored in
+        object_manager.py and never change at runtime, so freezing them
+        once costs nothing. NpcManager overrides this to call
+        object_manager.npc_types() fresh instead, since an NPC type is
+        created entirely in-session via the sprite editor -- a frozen
+        tuple would never see one registered after this module's own
+        import time (see npc_types' own docstring for why it's a function
+        and not a tuple, for exactly this reason)."""
+        return self.ENTITY_TYPES
+
     def spawn(self):
         """(Re)build the live entity list from the dungeon's currently-placed
         objects of ENTITY_TYPES. Only called by Explorator when it loads a
         room -- never during editing, which would reset wandering/chase state
         on every paint stroke, and never by Creator, whose static preview
         only ever shows placed objects' frame-0 icon."""
+        entity_types = self._entity_types()
         self._entities = [
             self.ENTITY_CLASS(obj["type"], obj["x"], obj["y"], self.dungeon)
             for obj in self.dungeon.object_manager.objects
-            if obj["type"] in self.ENTITY_TYPES
+            if obj["type"] in entity_types
         ]
 
     def _is_free(self, rect, moving_entity, player_refs):
@@ -596,6 +921,40 @@ class AnimalManager(_EntityManager):
         self.animals = [
             animal for animal in self.animals if animal.alive and not _is_over_void(self.dungeon, animal)
         ]
+
+
+class NpcManager(_EntityManager):
+    """Owns the live Npc entities wandering a room -- mirrors AnimalManager
+    exactly, minus the "alive" filter in update() (a Npc has no such
+    attribute at all, see Npc's own docstring for why), and _entity_types()
+    is overridden to call object_manager.npc_types() fresh every spawn()
+    instead of reading a frozen ENTITY_TYPES tuple (see that hook's own
+    docstring on _EntityManager)."""
+
+    ENTITY_CLASS = Npc
+
+    def __init__(self, dungeon):
+        super().__init__(dungeon)
+        self.npcs = []
+
+    def _entity_types(self):
+        return npc_types()
+
+    @property
+    def _entities(self):
+        return self.npcs
+
+    @_entities.setter
+    def _entities(self, value):
+        self.npcs = value
+
+    def update(self, dt, player_refs=()):
+        for npc in self.npcs:
+            npc.update(
+                dt,
+                lambda rect, _npc=npc: self._is_free(rect, _npc, player_refs),
+            )
+        self.npcs = [npc for npc in self.npcs if not _is_over_void(self.dungeon, npc)]
 
 
 class Enemy(_WanderingEntity):

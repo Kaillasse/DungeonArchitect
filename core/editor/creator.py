@@ -17,7 +17,7 @@ from core.data.cards import room_name_from_card_id, room_card_manifest
 from core.world.home import home_room_name, wants_exploration
 from core.editor.ui import (
     GeneratorPanelUI, RoomPanelUI, ChestPanelUI, RolePanelUI, CardPanelUI, CardRenderer,
-    SpriteEditorPanelUI, AutotileThemePanelUI,
+    SpriteEditorPanelUI, AutotileThemePanelUI, MechanicsPanelUI,
 )
 from core.editor.tools import ObjectTool
 
@@ -97,6 +97,13 @@ class Creator:
         self.sprite_editor_button_rect = pygame.Rect(730, 10, 220, 32)
         self._sprite_editor_border = BorderManager()
         self.sprite_editor_button_font = pygame.font.SysFont("arial", 15)
+        # Same one-off "always-visible button opening a centered modal
+        # panel" shape as sprite_editor_button_rect just above -- Parametres
+        # used to live only in the main Menu, which has no real purpose
+        # once a session is already running (see GameManager.settings_panel/
+        # Explorator's own inventory-panel button for the other entry
+        # point this same shared panel is opened from).
+        self.settings_button_rect = pygame.Rect(730, 50, 220, 32)
         # Small preview size for the sprite that follows the mouse while
         # dragging a card to place it or relocating an already-placed
         # object -- see run()'s render section.
@@ -122,7 +129,17 @@ class Creator:
         self.room_frame = PanelFrame(self.room_panel, "Sauvegarder / Charger", on_change=self._on_panel_frame_change)
         self.generator_frame = PanelFrame(self.generator_panel, "Generation procedurale", on_change=self._on_panel_frame_change)
         self.card_frame = PanelFrame(self.card_panel, "Cartes", on_change=self._on_panel_frame_change)
-        self.panel_frames = [self.tools_frame, self.room_frame, self.generator_frame, self.card_frame]
+        # Mechanical counterpart to sprite_editor_panel (visual/identity vs.
+        # gameplay flags -- see MechanicsPanelUI's own module docstring) --
+        # docked/draggable/resizable like every other panel here, not
+        # modal. Reached only by dragging an owned card onto its own body
+        # (see the object_tool.dragging handling in run()), never a
+        # dedicated open button.
+        self.mechanics_panel = MechanicsPanelUI(x=460, y=460)
+        self.mechanics_frame = PanelFrame(self.mechanics_panel, "Forge", on_change=self._on_panel_frame_change)
+        self.panel_frames = [
+            self.tools_frame, self.room_frame, self.generator_frame, self.card_frame, self.mechanics_frame,
+        ]
         # name -> frame, purely for _refresh_panel_layout/_on_panel_frame_change's
         # own round-trip through Profile.panel_layout (see those methods).
         self._panel_frames_by_name = {
@@ -130,6 +147,7 @@ class Creator:
             "room": self.room_frame,
             "generator": self.generator_frame,
             "card": self.card_frame,
+            "mechanics": self.mechanics_frame,
         }
 
         # See _refresh_generator_panel/_refresh_panel_layout -- seeded
@@ -141,6 +159,20 @@ class Creator:
 
         self.painting = False
         self.erasing = False
+        # Set from a MOUSEBUTTONDOWN's own position (see run()'s panel_click
+        # computation) and reused as-is on the matching MOUSEBUTTONUP --
+        # fixes a real bug: dragging a panel's own slider (e.g. the card
+        # panel's enlarged-grid scrollbar) released fine, since MOUSEMOTION/
+        # MOUSEBUTTONUP both still reach the panel's handle_event, but
+        # panel_click used to be recomputed fresh from the CURRENT event's
+        # position on every event -- always False for a MOUSEBUTTONUP (only
+        # ever computed for MOUSEBUTTONDOWN) -- so releasing the slider fell
+        # through to the generic left-click-up handling below (which flushes
+        # the profile and calls _refresh_card_panel(), silently resetting
+        # the card panel's own scroll position back to 0 on every release).
+        # Remembering which press this drag started from fixes it for good,
+        # not just for the card panel.
+        self._panel_owns_drag = False
 
         # Vision produit v0.05 -- Sol/Mur tools connected to the card
         # collection (core.data.cards "tile_floor"/"tile_wall"). Both True
@@ -156,6 +188,13 @@ class Creator:
         self.floor_tool_active = True
         self.wall_tool_active = True
         self._active_profile = None
+        # Set by _consume_card/_refund_card whenever a card's stock actually
+        # changed -- lets the MOUSEBUTTONUP handlers below only pay for
+        # _refresh_card_panel() (which wipes CardRenderer's whole cache and
+        # rescans the card/room directories, see CardPanelUI.refresh) when a
+        # stroke genuinely spent or refunded something, instead of on every
+        # single paint/erase stroke regardless of outcome.
+        self._card_stock_dirty = False
 
         self.link_source = None
         self.link_drag_pos = None
@@ -420,10 +459,12 @@ class Creator:
             return False
         if self._active_profile.admingod:
             self._active_profile.card_collection[card_id] = ADMINGOD_STOCK
+            self._card_stock_dirty = True
             return True
         if self._active_profile.card_collection.get(card_id, 0) <= 0:
             return False
         self._active_profile.card_collection[card_id] -= 1
+        self._card_stock_dirty = True
         return True
 
     def _refund_card(self, card_id):
@@ -440,6 +481,7 @@ class Creator:
         if self._active_profile is None or card_id is None or self._active_profile.admingod:
             return
         self._active_profile.card_collection[card_id] = self._active_profile.card_collection.get(card_id, 0) + 1
+        self._card_stock_dirty = True
 
     def _flush_active_profile(self):
         """Persists the cached profile's card_collection to disk -- called
@@ -612,8 +654,15 @@ class Creator:
         if not admingod and self._active_profile.card_collection.get(object_type, 0) <= 0:
             return False
 
+        # object_tool.position is where the cursor is, which is now treated
+        # as the anchor cell (bottom-center of the footprint -- see
+        # ObjectManager._anchor_cell/origin_for_anchor), not the object's
+        # top-left origin -- otherwise a multi-cell object's terrain check
+        # lands size_x/size_y cells away from wherever the player is
+        # actually pointing.
         world = self.camera.screen_to_world(*self.object_tool.position)
-        grid_x, grid_y = self.dungeon.world_to_grid(*world)
+        anchor_x, anchor_y = self.dungeon.world_to_grid(*world)
+        grid_x, grid_y = self.dungeon.object_manager.origin_for_anchor(object_type, anchor_x, anchor_y)
 
         if not self.dungeon.object_manager.add_object(object_type, grid_x, grid_y):
             return False
@@ -727,6 +776,16 @@ class Creator:
         }
         ProfileManager().save(profile)
 
+    def _is_quit_event(self, event):
+        """QUIT must always work even while a modal panel (chest/role/
+        autotile_theme/sprite_editor) has swallowed every other event type
+        in run()'s loop below -- every modal branch there needs this exact
+        same reaction, previously copy-pasted at each one."""
+        if event.type != pygame.QUIT:
+            return False
+        self.game_manager.running = False
+        return True
+
     def run(self):
 
         pygame.display.set_caption("DungeonArchitect - Dungeon Editor")
@@ -762,9 +821,8 @@ class Creator:
                     # belongs to, so letting painting/saving/etc. run
                     # "underneath" it would be confusing at best. QUIT must
                     # still always work.
-                    if event.type == pygame.QUIT:
+                    if self._is_quit_event(event):
                         running = False
-                        self.game_manager.running = False
                         break
                     if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
                         if self.chest_panel.is_open:
@@ -781,20 +839,24 @@ class Creator:
                             role = self.autotile_theme_panel.role
                             changed, pack_name = self.autotile_theme_panel.handle_event(event)
                             if changed:
+                                # Only changes the active BRUSH -- never
+                                # resyncs the whole grid anymore, since that
+                                # would retroactively repaint every already-
+                                # placed floor/wall cell with the new pack
+                                # instead of just future strokes (see
+                                # Dungeon.theme_grid/paint_cell).
                                 if role == "floor":
                                     self.dungeon.floor_theme = pack_name
                                 else:
                                     self.dungeon.wall_theme = pack_name
-                                self.dungeon.resync_sprite_grid()
                     continue
 
                 if self.sprite_editor_panel.is_open:
                     # Same fully-modal treatment as chest_panel/role_panel
                     # above, kept as its own block since this one also needs
                     # KEYDOWN (the name field) -- QUIT must still work.
-                    if event.type == pygame.QUIT:
+                    if self._is_quit_event(event):
                         running = False
-                        self.game_manager.running = False
                         break
                     if event.type in (
                         pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION, pygame.KEYDOWN,
@@ -810,6 +872,19 @@ class Creator:
                             self._refund_card(new_type_id)
                             self._flush_active_profile()
                             self._refresh_card_panel()
+                    continue
+
+                if self.game_manager.settings_panel.is_open:
+                    # Same fully-modal treatment as the other panels above
+                    # -- QUIT must still work. Shared with Explorator (see
+                    # its own copy of this same check), not Creator-only,
+                    # so this deliberately calls the panel's own
+                    # handle_event directly rather than routing through
+                    # anything Creator-specific.
+                    if self._is_quit_event(event):
+                        running = False
+                        break
+                    self.game_manager.settings_panel.handle_event(event)
                     continue
 
                 # Draggable/collapsible panel title bars -- topmost frame
@@ -837,11 +912,26 @@ class Creator:
 
                 if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP):
 
-                    panel_click = event.type == pygame.MOUSEBUTTONDOWN and (
-                        self.room_frame.contains(event.pos)
-                        or self.generator_frame.contains(event.pos)
-                        or self.card_frame.contains(event.pos)
-                    )
+                    if event.type == pygame.MOUSEBUTTONDOWN:
+                        # Decided once, from THIS press's own position --
+                        # see self._panel_owns_drag's own comment in
+                        # __init__ for why the matching MOUSEBUTTONUP must
+                        # reuse this instead of recomputing from wherever
+                        # the mouse happens to be at release time.
+                        self._panel_owns_drag = (
+                            self.room_frame.contains(event.pos)
+                            or self.generator_frame.contains(event.pos)
+                            or self.card_frame.contains(event.pos)
+                            or self.mechanics_frame.contains(event.pos)
+                        )
+                    panel_click = self._panel_owns_drag
+                    if event.type == pygame.MOUSEBUTTONUP:
+                        # The drag (if any) is over -- clear it now so a
+                        # later idle MOUSEMOTION (hovering with no button
+                        # held) doesn't keep inheriting a stale True from
+                        # this press and wrongly skip its own hover/preview
+                        # handling below.
+                        self._panel_owns_drag = False
 
                     if not self.room_frame.collapsed:
                         room_action = self.room_panel.handle_event(event)
@@ -864,6 +954,11 @@ class Creator:
                         drag_card_id = self.card_panel.handle_event(event)
                         if drag_card_id is not None:
                             self.object_tool.start_drag(drag_card_id, event.pos)
+
+                    if not self.mechanics_frame.collapsed:
+                        saved_type_id = self.mechanics_panel.handle_event(event)
+                        if saved_type_id is not None:
+                            self._refresh_card_panel()
 
                     if panel_click:
                         continue
@@ -898,6 +993,10 @@ class Creator:
 
                         if self.sprite_editor_button_rect.collidepoint(event.pos):
                             self.sprite_editor_panel.open()
+                            continue
+
+                        if self.settings_button_rect.collidepoint(event.pos):
+                            self.game_manager.settings_panel.open()
                             continue
 
                         if not self.tools_frame.collapsed and self.palette.hit_floor_toggle(event.pos):
@@ -982,7 +1081,9 @@ class Creator:
                         # successful placement -- a second, cheap no-op-ish
                         # save here for that case is harmless.
                         self._flush_active_profile()
-                        self._refresh_card_panel()
+                        if self._card_stock_dirty:
+                            self._refresh_card_panel()
+                            self._card_stock_dirty = False
 
                         if self.link_source is not None:
 
@@ -996,7 +1097,14 @@ class Creator:
 
                         elif self.moving_object is not None:
 
-                            grid_x, grid_y = self._mouse_to_grid(event.pos)
+                            # Same anchor-based conversion as _try_place_object
+                            # -- the cursor's grid cell is where the object's
+                            # anchor (bottom-center) should land, not its
+                            # top-left origin.
+                            anchor_x, anchor_y = self._mouse_to_grid(event.pos)
+                            grid_x, grid_y = self.dungeon.object_manager.origin_for_anchor(
+                                self.moving_object["type"], anchor_x, anchor_y
+                            )
                             self.dungeon.object_manager.move_object(self.moving_object, grid_x, grid_y)
 
                             self.moving_object = None
@@ -1015,8 +1123,24 @@ class Creator:
                                 # as any other drag that misses its target.
                                 if self.generator_frame.contains(event.pos):
                                     self._toggle_room_in_pool(room_name)
-                            else:
+                            elif self.mechanics_frame.contains(event.pos):
+                                # MechanicsPanelUI.open() already refuses
+                                # (stays empty) for anything that isn't a
+                                # custom type -- no extra guard needed here.
+                                self.mechanics_panel.open(self.object_tool.object_type)
+                            elif not any(frame.contains(event.pos) for frame in self.panel_frames):
+                                # Only attempt world placement if the drop
+                                # isn't sitting over ANY docked panel --
+                                # without this, a drop on e.g. tools_frame/
+                                # room_frame (which can visually overlap the
+                                # grid) would silently "pass through" to
+                                # whatever world cell happens to be behind
+                                # it. Covers every current AND future panel
+                                # in panel_frames, not a hardcoded list.
                                 self._try_place_object()
+                            # else: dropped on some other docked panel --
+                            # clean cancel, nothing placed/consumed, same
+                            # as any other drag that misses its target.
 
                             self.object_tool.dragging = False
 
@@ -1027,7 +1151,9 @@ class Creator:
                         # stock (see _paint_at_mouse's erase branch), so the
                         # collection panel needs a chance to show it again.
                         self._flush_active_profile()
-                        self._refresh_card_panel()
+                        if self._card_stock_dirty:
+                            self._refresh_card_panel()
+                            self._card_stock_dirty = False
 
                     elif event.button == 2:
 
@@ -1061,8 +1187,14 @@ class Creator:
                         self._paint_at_mouse(event.pos, erase=True)
 
                 elif event.type == pygame.MOUSEWHEEL:
-                    mouse_x, mouse_y = pygame.mouse.get_pos()
-                    self.camera.zoom_at(mouse_x, mouse_y, event.y, self.screen.get_width(), self.screen.get_height())
+                    mouse_pos = pygame.mouse.get_pos()
+                    # Hovering the card panel scrolls IT instead of zooming
+                    # the grid underneath -- confirmed with the user: they
+                    # want wheel-scroll to work anywhere over the panel, not
+                    # just by precisely grabbing the thin slider thumb.
+                    if not self.card_frame.collapsed and self.card_panel.handle_wheel(mouse_pos, event.y):
+                        continue
+                    self.camera.zoom_at(mouse_pos[0], mouse_pos[1], event.y, self.screen.get_width(), self.screen.get_height())
                     self.grid_zoom = self.camera.zoom
 
                 elif event.type == pygame.KEYDOWN:
@@ -1166,18 +1298,13 @@ class Creator:
 
                     sprite = self._drag_sprite(self.moving_object["type"])
 
+                    # midbottom, not center -- the cursor is where the
+                    # object's anchor (bottom-center of its footprint) will
+                    # land (see the MOUSEBUTTONUP handler's origin_for_anchor
+                    # call above), so the preview should show that same
+                    # point under the cursor instead of the sprite's middle.
                     rect = sprite.get_rect(
-                        center=self.move_drag_pos
-                    )
-
-                    self.screen.blit(sprite, rect)
-
-                if self.object_tool.dragging:
-
-                    sprite = self._drag_sprite(self.object_tool.object_type)
-
-                    rect = sprite.get_rect(
-                        center=self.object_tool.position
+                        midbottom=self.move_drag_pos
                     )
 
                     self.screen.blit(sprite, rect)
@@ -1194,6 +1321,12 @@ class Creator:
                         wall_active=self.wall_tool_active,
                         floor_stock=stock.get("tile_floor", 0),
                         wall_stock=stock.get("tile_wall", 0),
+                        floor_preview=self.dungeon.renderer.get_theme_preview_surface(
+                            self.dungeon.floor_theme, "floor", self.palette.PREVIEW_SIZE,
+                        ),
+                        wall_preview=self.dungeon.renderer.get_theme_preview_surface(
+                            self.dungeon.wall_theme, "wall", self.palette.PREVIEW_SIZE,
+                        ),
                     )
                 else:
                     frame.render(self.screen)
@@ -1203,7 +1336,27 @@ class Creator:
             self._sprite_editor_border.draw_centered_label(
                 self.screen, self.sprite_editor_button_rect, self.sprite_editor_button_font, "Editeur de sprite",
             )
+            self._sprite_editor_border.draw_centered_label(
+                self.screen, self.settings_button_rect, self.sprite_editor_button_font, "Parametres",
+            )
             self.sprite_editor_panel.render(self.screen)
+
+            if self.game_manager.settings_panel.is_open:
+                self.game_manager.settings_panel.render(self.screen)
+
+            # Drawn dead last, after every panel above -- fixes a real bug:
+            # this used to render before the panel_frames loop, so the
+            # dragged card's own preview sprite drew UNDER card_frame (or
+            # any other panel) whenever the mouse hovered its bounds,
+            # vanishing until the cursor left it. Rendering last guarantees
+            # it's always on top, regardless of which panel it's hovering.
+            # Same "no assembly preview" guard as before (self.last_assembly
+            # is checked by the enclosing if/else this block used to live
+            # inside).
+            if self.last_assembly is None and self.object_tool.dragging:
+                sprite = self._drag_sprite(self.object_tool.object_type)
+                rect = sprite.get_rect(midbottom=self.object_tool.position)
+                self.screen.blit(sprite, rect)
 
             pygame.display.flip()
 

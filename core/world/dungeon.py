@@ -1,11 +1,11 @@
 from core.world.object_manager import ObjectManager
-from core.world.entities import AnimalManager, EnemyManager, PickupManager, ProjectileManager
+from core.world.entities import AnimalManager, EnemyManager, NpcManager, PickupManager, ProjectileManager
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
 from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
 from core.editor.autotile import (
     EMPTY, FLOOR, WALL, build_walls_around, unbuild_walls_around, erase_at,
-    resolve_sprite_grid, resolve_sprite_grid_region,
+    resolve_sprite_grid, resolve_sprite_grid_region, LOCAL_EDIT_SPRITE_RADIUS,
 )
 
 
@@ -45,6 +45,15 @@ class Dungeon:
         self.logical_grid = [[EMPTY for _ in range(width)] for _ in range(height)]
         self.sprite_grid = [[-1 for _ in range(width)] for _ in range(height)]
 
+        # Per-cell autotile pack name (or None -- the built-in interior
+        # tileset), same shape as logical_grid. Unlike floor_theme/wall_theme
+        # below (which are only ever the CURRENT brush from here on), this is
+        # what actually gets read at render/resolve time -- see paint_cell's
+        # own stamping and core.editor.autotile._resolve_cell_sprite. Lets
+        # two cells of the same room paint with two different tilesets,
+        # which a single room-wide floor_theme/wall_theme could never do.
+        self.theme_grid = [[None for _ in range(width)] for _ in range(height)]
+
         # Bumped by anything that mutates logical_grid's actual cell values
         # -- paint_cell (Creator painting/erasing) and destroy_area
         # (exploration-time destruction) -- lets a cache keyed on it (see
@@ -76,6 +85,7 @@ class Dungeon:
         self.object_manager = ObjectManager(self)
         self.animal_manager = AnimalManager(self)
         self.enemy_manager = EnemyManager(self)
+        self.npc_manager = NpcManager(self)
         self.pickup_manager = PickupManager(self)
         self.projectile_manager = ProjectileManager(self)
         self.renderer = WorldRenderer()
@@ -90,11 +100,11 @@ class Dungeon:
         touching it (no wall regeneration) -- used after loading, so a save's
         already-correct `cells` (walls included) is trusted as-is instead of
         being re-derived from its floor cells every time a room opens.
-        Reads self.floor_theme/wall_theme -- also the method Creator calls
-        right after changing either (see AutotileThemePanelUI/the bitmap
-        editor) so an already-open room re-resolves against the new theme
-        immediately."""
-        self.sprite_grid = resolve_sprite_grid(self.logical_grid, self.floor_theme, self.wall_theme)
+        Reads self.theme_grid, the per-cell pack each cell was actually
+        painted with -- see paint_cell's own stamping below. floor_theme/
+        wall_theme are only ever the CURRENT brush from here on, never
+        re-applied to already-painted cells by this method."""
+        self.sprite_grid = resolve_sprite_grid(self.logical_grid, self.theme_grid)
 
     def paint_cell(self, grid_x: int, grid_y: int, erase: bool = False, cell_type: int = FLOOR, wall_gate=None) -> None:
         """Autotile (when enabled) is purely incremental -- only the clicked
@@ -118,6 +128,8 @@ class Dungeon:
         if not (0 <= grid_x < self.width and 0 <= grid_y < self.height):
             return
 
+        before = self._snapshot_local(grid_x, grid_y, LOCAL_EDIT_SPRITE_RADIUS)
+
         if erase:
             if self.autotile_enabled:
                 was_wall = self.logical_grid[grid_y][grid_x] == WALL
@@ -135,6 +147,16 @@ class Dungeon:
             else:
                 self.logical_grid[grid_y][grid_x] = cell_type
 
+        # Stamps the CURRENT brush (self.floor_theme/wall_theme) onto every
+        # cell that actually changed logical type in this call -- the
+        # clicked cell itself, plus any halo cell build_walls_around/
+        # unbuild_walls_around walled or unwalled as a side effect. A
+        # neighbor that was already FLOOR/WALL before this click and stays
+        # that way is untouched, which is the whole point: repainting one
+        # spot with a different brush never retouches cells painted earlier
+        # with another one. See _snapshot_local/_stamp_theme_changes.
+        self._stamp_theme_changes(before, grid_x, grid_y, LOCAL_EDIT_SPRITE_RADIUS)
+
         # Bounded to the clicked cell's own neighborhood (see
         # resolve_sprite_grid_region/LOCAL_EDIT_SPRITE_RADIUS) instead of a
         # full-grid rescan -- this runs on every cell of a click-drag paint
@@ -143,15 +165,46 @@ class Dungeon:
         # the room is.
         resolve_sprite_grid_region(
             self.logical_grid, self.sprite_grid, grid_x, grid_y,
-            floor_pack=self.floor_theme, wall_pack=self.wall_theme,
+            theme_grid=self.theme_grid,
         )
         self.object_manager.prune_invalid()
         self.terrain_version += 1
+
+    def _snapshot_local(self, center_x: int, center_y: int, radius: int):
+        """Copy of logical_grid's values in the (clamped) Chebyshev-`radius`
+        box around (center_x, center_y), taken right before a terrain edit --
+        paired with _stamp_theme_changes below to know exactly which cells a
+        paint/erase call actually changed, without paint_cell/build_walls_
+        around/unbuild_walls_around needing to report that themselves."""
+        y0, y1 = max(0, center_y - radius), min(self.height, center_y + radius + 1)
+        x0, x1 = max(0, center_x - radius), min(self.width, center_x + radius + 1)
+        return (y0, x0, [row[x0:x1] for row in self.logical_grid[y0:y1]])
+
+    def _stamp_theme_changes(self, before, center_x: int, center_y: int, radius: int) -> None:
+        """Sets theme_grid[y][x] to the current brush (floor_theme/
+        wall_theme) for every cell in `before`'s box whose logical value
+        changed to FLOOR/WALL since the snapshot -- a cell that changed to
+        EMPTY (erased) is left as-is (orphaned, never read while EMPTY, see
+        Dungeon.theme_grid's own docstring); a cell that didn't change at
+        all keeps whatever pack it was already painted with."""
+        y0, x0, before_rows = before
+        for row_offset, y in enumerate(range(y0, y0 + len(before_rows))):
+            before_row = before_rows[row_offset]
+            for col_offset, x in enumerate(range(x0, x0 + len(before_row))):
+                old = before_row[col_offset]
+                new = self.logical_grid[y][x]
+                if new == old:
+                    continue
+                if new == FLOOR:
+                    self.theme_grid[y][x] = self.floor_theme
+                elif new == WALL:
+                    self.theme_grid[y][x] = self.wall_theme
 
     def update(self, dt: float, player_refs=()) -> None:
         self.object_manager.update(dt)
         self.animal_manager.update(dt, player_refs=player_refs)
         self.enemy_manager.update(dt, player_refs=player_refs)
+        self.npc_manager.update(dt, player_refs=player_refs)
         self.pickup_manager.update(dt)
         self.projectile_manager.update(dt, player_refs=player_refs)
 
@@ -177,7 +230,7 @@ class Dungeon:
         # sprite dependency (see resolve_sprite_grid_region).
         resolve_sprite_grid_region(
             self.logical_grid, self.sprite_grid, center_x, center_y, radius=radius_tiles + 1,
-            floor_pack=self.floor_theme, wall_pack=self.wall_theme,
+            theme_grid=self.theme_grid,
         )
         self.object_manager.prune_invalid()
         self.terrain_version += 1
@@ -193,6 +246,10 @@ class Dungeon:
         """Same rule as spawn_animals -- EnemyManager.spawn(), only ever
         called by Explorator after loading a room."""
         self.enemy_manager.spawn()
+
+    def spawn_npcs(self) -> None:
+        """Same rule as spawn_animals/spawn_enemies -- NpcManager.spawn()."""
+        self.npc_manager.spawn()
 
     # ------------------------------------------------------------------
     # Sauvegarde
@@ -260,8 +317,8 @@ class Dungeon:
     # ------------------------------------------------------------------
 
     def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
-               skip_foreground_objects=False, skip_animals=False, skip_enemies=False, show_grid=True,
-               hide_border_cells=None):
+               skip_foreground_objects=False, skip_animals=False, skip_enemies=False, skip_npcs=False,
+               show_grid=True, hide_border_cells=None):
         self.renderer.render(
             screen, self, camera,
             spawn_preview=spawn_preview,
@@ -275,6 +332,8 @@ class Dungeon:
             self.animal_manager.draw(screen, camera)
         if not skip_enemies:
             self.enemy_manager.draw(screen, camera)
+        if not skip_npcs:
+            self.npc_manager.draw(screen, camera)
         self.pickup_manager.draw(screen, camera)
         self.projectile_manager.draw(screen, camera)
 

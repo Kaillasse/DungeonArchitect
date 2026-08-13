@@ -41,7 +41,6 @@ class GeneratorPanelUI(_ResizableCornerMixin):
 
         self.border = BorderManager()
         self.font = pygame.font.SysFont("arial", 16)
-        self.title_font = pygame.font.SysFont("arial", 18)
 
         self.room_count = 3
 
@@ -199,9 +198,6 @@ class GeneratorPanelUI(_ResizableCornerMixin):
         return None
 
     def render(self, screen):
-
-        title = self.title_font.render("Generation procedurale", True, (255, 255, 255))
-        screen.blit(title, (self.x, self.y))
 
         if self._enlarged:
             self._render_card_grid(screen)

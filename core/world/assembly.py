@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections import deque
 
 import pygame
 
@@ -17,7 +18,6 @@ from core.world.entities import PlayerRef
 from core.world.object_manager import OBJECT_TYPES
 from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DONJONS_DIRECTORY
-from core.data.sound_manager import SoundManager
 
 OPPOSITE_SIDE = {"north": "south", "south": "north", "east": "west", "west": "east"}
 
@@ -43,7 +43,13 @@ def _valid_entry_exits(dungeon):
         obj for obj in dungeon.object_manager.objects
         if dungeon.object_manager.is_es_type(obj["type"])
         and dungeon.object_manager.get_role(obj) == "connector"
-        and dungeon.object_manager.is_valid_doorway(obj["x"], obj["y"])
+        # The object's own anchor cell (bottom-center of its footprint), not
+        # just its stored origin -- same check placement itself already
+        # went through (see ObjectManager._valid_doorway_anchor's own
+        # docstring), so a multi-cell E/S (a 2-wide "wall"/"big_entrance",
+        # or a custom "porte" of any size) is validated identically here
+        # and at placement time.
+        and dungeon.object_manager._valid_doorway_anchor(obj["type"], obj["x"], obj["y"])
     ]
 
 
@@ -306,20 +312,17 @@ class DungeonAssembly:
             return
 
         local_x, local_y = global_x - room.offset_x, global_y - room.offset_y
-        obj = room.dungeon.object_manager.get_object_at(local_x, local_y)
+        object_manager = room.dungeon.object_manager
+        obj = object_manager.get_object_at(local_x, local_y)
 
         if obj is None or obj["type"] != "button" or obj.get("activated"):
             return
 
-        obj["activated"] = True
-        obj["frame"] = 0
-        obj["anim_timer"] = 0.0
-        room.dungeon.object_manager.begin_animation(obj)
-        SoundManager().play("button_pressed")
+        object_manager._activate_button(obj)
 
         for link_target in obj.get("links", []):
-            target = room.dungeon.object_manager.get_object_at(link_target["x"], link_target["y"])
-            self._open_if_blocking(target, room.dungeon.object_manager)
+            target = object_manager.get_object_at(link_target["x"], link_target["y"])
+            object_manager._open_if_blocking(target, object_manager)
 
         for link_target in obj.get("assembly_links", []):
             # "room" (a room index, added at generation time -- see
@@ -344,15 +347,7 @@ class DungeonAssembly:
                 link_target["x"] - target_room.offset_x,
                 link_target["y"] - target_room.offset_y,
             )
-            self._open_if_blocking(target, target_room.dungeon.object_manager)
-
-    @staticmethod
-    def _open_if_blocking(target, object_manager):
-        if target is not None and OBJECT_TYPES[target["type"]].get("blocks_until_open") and not target.get("open"):
-            target["open"] = True
-            target["frame"] = 0
-            target["anim_timer"] = 0.0
-            object_manager.begin_animation(target)
+            target_room.dungeon.object_manager._open_if_blocking(target, target_room.dungeon.object_manager)
 
     def update(self, dt, player_refs_by_floor=None):
         """player_refs_by_floor ({floor: [PlayerRef, ...]}) only ever gets
@@ -438,7 +433,7 @@ class DungeonAssembly:
 
     def render(self, screen, camera, active_floor, player_world_pos=None, hide_object_types=None,
                skip_active_floor_foreground=False, skip_active_floor_animals=False,
-               skip_active_floor_enemies=False, show_grid=True):
+               skip_active_floor_enemies=False, skip_active_floor_npcs=False, show_grid=True):
         """Draw every floor relative to active_floor: floors below first
         (flat-tinted shadow, no hole), the active floor with full detail,
         floors above last (shadow with a soft hole around player_world_pos --
@@ -449,12 +444,13 @@ class DungeonAssembly:
         sprite (Explorator) leave out active_floor's foreground objects (an
         L/R torch) here and draw them afterwards via
         render_active_floor_foreground(), so the player ends up behind them.
-        skip_active_floor_animals/skip_active_floor_enemies work the same way
-        for active_floor's live Animals/Enemies, letting Explorator draw them
-        together with the player via render_active_floor_entities() instead,
-        sorted by feet position so whichever is lower on screen draws in
-        front. Creator, which draws no player sprite, leaves all three off
-        and gets everything in one pass.
+        skip_active_floor_animals/skip_active_floor_enemies/
+        skip_active_floor_npcs work the same way for active_floor's live
+        Animals/Enemies/Npcs, letting Explorator draw them together with the
+        player via render_active_floor_entities() instead, sorted by feet
+        position so whichever is lower on screen draws in front. Creator,
+        which draws no player sprite, leaves all of them off and gets
+        everything in one pass.
         """
         for floor in self.floors():
             if floor < active_floor:
@@ -466,6 +462,7 @@ class DungeonAssembly:
             skip_foreground=skip_active_floor_foreground,
             skip_animals=skip_active_floor_animals,
             skip_enemies=skip_active_floor_enemies,
+            skip_npcs=skip_active_floor_npcs,
             show_grid=show_grid,
         )
 
@@ -481,20 +478,22 @@ class DungeonAssembly:
             room.dungeon.render_foreground(screen, offset_camera, hide_object_types=hide_object_types)
 
     def render_active_floor_entities(self, screen, camera, active_floor, players):
-        """Y-sorted draw of every live Animal/Enemy on active_floor plus every
-        player in `players`: whichever entity's feet (.position.y, in the
-        same world-pixel sense Animal/Enemy/Player.get_hitbox() anchor their
-        hitbox to) sit lower on screen draws in front, matching how a
-        top-down scene actually reads. Call after render(...,
-        skip_active_floor_animals=True, skip_active_floor_enemies=True) and
-        before render_active_floor_foreground() -- same slot a single player
-        used to occupy alone via a plain player.draw().
+        """Y-sorted draw of every live Animal/Enemy/Npc on active_floor plus
+        every player in `players`: whichever entity's feet (.position.y, in
+        the same world-pixel sense Animal/Enemy/Npc/Player.get_hitbox()
+        anchor their hitbox to) sit lower on screen draws in front, matching
+        how a top-down scene actually reads. Call after render(...,
+        skip_active_floor_animals=True, skip_active_floor_enemies=True,
+        skip_active_floor_npcs=True) and before
+        render_active_floor_foreground() -- same slot a single player used
+        to occupy alone via a plain player.draw().
 
-        An animal's/enemy's .position is local to its own room's Dungeon (no
-        offset baked in, unlike a player's, which is already global -- see
-        DungeonAssembly.update's docstring), so it's converted to a global y
-        here purely for comparison; drawing itself still goes through that
-        room's own offset camera, same as every other per-room draw call.
+        An animal's/enemy's/npc's .position is local to its own room's
+        Dungeon (no offset baked in, unlike a player's, which is already
+        global -- see DungeonAssembly.update's docstring), so it's converted
+        to a global y here purely for comparison; drawing itself still goes
+        through that room's own offset camera, same as every other per-room
+        draw call.
         """
         tile_size = Dungeon.TILE_SIZE
         entries = []
@@ -507,6 +506,9 @@ class DungeonAssembly:
             for enemy in room.dungeon.enemy_manager.enemies:
                 global_y = enemy.position.y + room.offset_y * tile_size
                 entries.append((global_y, enemy, offset_camera))
+            for npc in room.dungeon.npc_manager.npcs:
+                global_y = npc.position.y + room.offset_y * tile_size
+                entries.append((global_y, npc, offset_camera))
 
         for player in players:
             entries.append((player.position.y, player, camera))
@@ -516,7 +518,7 @@ class DungeonAssembly:
             entity.draw(screen, entity_camera)
 
     def _render_floor(self, screen, camera, floor, hide_object_types=None, skip_foreground=False,
-                       skip_animals=False, skip_enemies=False, show_grid=True):
+                       skip_animals=False, skip_enemies=False, skip_npcs=False, show_grid=True):
         tile_size = Dungeon.TILE_SIZE
         rooms = self.rooms_on_floor(floor)
         hide_border_cells_by_room = self._border_cells_by_room(floor, rooms)
@@ -529,6 +531,7 @@ class DungeonAssembly:
                 skip_foreground_objects=skip_foreground,
                 skip_animals=skip_animals,
                 skip_enemies=skip_enemies,
+                skip_npcs=skip_npcs,
                 show_grid=show_grid,
                 hide_border_cells=hide_border_cells_by_room.get(room, ()),
             )
@@ -647,13 +650,23 @@ class DungeonAssembly:
         camera's current pan position, then tinted once with
         BLEND_RGBA_MULT. Cached per (room, zoom) -- distance-based fade is
         applied afterwards via set_alpha, not baked in, so one cached surface
-        covers every distance."""
-        key = (room, zoom)
+        covers every distance.
+
+        Keyed on tile_px (the rounded per-tile pixel size zoom actually
+        resolves to), not the raw zoom float -- same reasoning as
+        WorldRenderer._get_scaled_tile's own cache: Camera.zoom_at's
+        *1.2/0.8 steps rarely land on the exact same float twice, so keying
+        on zoom made this cache grow by one full room-sized Surface per
+        room x every distinct zoom float ever visited, for the entire
+        lifetime of the assembly, instead of collapsing every zoom that
+        rounds to the same pixel size onto one entry."""
+        tile_size = Dungeon.TILE_SIZE
+        tile_px = round(tile_size * zoom)
+        key = (room, tile_px)
         cached = self._below_cache.get(key)
         if cached is not None:
             return cached
 
-        tile_size = Dungeon.TILE_SIZE
         size = (
             max(1, round(room.dungeon.width * tile_size * zoom)),
             max(1, round(room.dungeon.height * tile_size * zoom)),
@@ -678,13 +691,20 @@ class DungeonAssembly:
         (room, color, zoom): color is fully determined by floor distance and
         direction (see _render_floor_shadow), so at most 2*SHADOW_MAX_DISTANCE
         variants of a given room's shadow are ever cached, each a single blit
-        per frame afterwards instead of a full tile-by-tile re-render."""
-        key = (room, color, zoom)
+        per frame afterwards instead of a full tile-by-tile re-render.
+
+        Keyed on tile_px, not the raw zoom float -- same reasoning as
+        _get_below_render's own cache (see its docstring): keying on zoom
+        made this grow by one room-sized Surface per room x color x every
+        distinct zoom float ever visited, instead of collapsing every zoom
+        that rounds to the same pixel size onto one entry."""
+        tile_size = Dungeon.TILE_SIZE
+        tile_px = round(tile_size * zoom)
+        key = (room, color, tile_px)
         cached = self._shadow_cache.get(key)
         if cached is not None:
             return cached
 
-        tile_size = Dungeon.TILE_SIZE
         base = pygame.Surface((room.dungeon.width * tile_size, room.dungeon.height * tile_size), pygame.SRCALPHA)
         for y, row in enumerate(room.dungeon.logical_grid):
             for x, cell in enumerate(row):
@@ -902,11 +922,15 @@ def generate_assembly(room_names, room_count, rng=None):
     start_room = PlacedRoom(start_dungeon, start_name, floor=0, offset_x=0, offset_y=0, index=0)
     assembly.add_room(start_room)
 
-    pending = [(start_room, ("exit", exit_obj)) for exit_obj in start_room.entry_exits()]
-    pending += [(start_room, ("border", edge)) for edge in start_room.border_edges()]
+    # deque, not a plain list -- pending.pop(0) on a list is O(len(pending)),
+    # trending the whole generation loop toward O(n^2) in room_count/pool
+    # size as pending keeps growing (every accepted room appends its own new
+    # exits/border-edges below). popleft() is O(1).
+    pending = deque((start_room, ("exit", exit_obj)) for exit_obj in start_room.entry_exits())
+    pending.extend((start_room, ("border", edge)) for edge in start_room.border_edges())
 
     while len(assembly.rooms) < room_count and pending:
-        anchor_room, (kind, item) = pending.pop(0)
+        anchor_room, (kind, item) = pending.popleft()
 
         if kind == "border":
             result = _attach_via_border(rng, room_names, assembly, anchor_room, item)

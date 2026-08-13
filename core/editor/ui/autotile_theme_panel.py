@@ -66,8 +66,10 @@ class AutotileThemePanelUI:
     def handle_event(self, event):
         """(changed, pack_name_or_None) -- changed is True only the frame a
         row/close was actually clicked; Creator applies the selection then
-        (dungeon.floor_theme/wall_theme + resync_sprite_grid()), same
-        "widget reports, caller applies" shape as RolePanelUI."""
+        (just dungeon.floor_theme/wall_theme -- the active brush for
+        whatever gets painted next, see Dungeon.theme_grid/paint_cell; never
+        a resync of already-painted cells), same "widget reports, caller
+        applies" shape as RolePanelUI."""
         if not self.is_open or event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
             return False, None
 

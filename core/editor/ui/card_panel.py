@@ -46,7 +46,6 @@ class CardPanelUI(_ResizableCornerMixin):
 
         self.border = BorderManager()
         self.font = pygame.font.SysFont("arial", 16)
-        self.title_font = pygame.font.SysFont("arial", 18)
         self.badge_font = pygame.font.SysFont("arial", 13, bold=True)
 
         self.browser = RoomBrowser(x, y + 34, width=self.width)
@@ -274,12 +273,28 @@ class CardPanelUI(_ResizableCornerMixin):
             return self._handle_grid_event(event)
         return self._handle_list_event(event)
 
+    def handle_wheel(self, pos, direction):
+        """Scrolls while `pos` (pygame.mouse.get_pos(), Creator's own
+        caller) is anywhere over this panel -- confirmed with the user:
+        hovering the panel should be enough, not just grabbing the thin
+        slider thumb precisely. Enlarged mode scrolls its own row-based
+        _scroll_row directly (no RoomBrowser involved there); standard mode
+        delegates to self.browser's own RoomBrowser.handle_wheel. Returns
+        True if consumed, so Creator knows not to fall through to zooming
+        the world camera instead (see Creator's own MOUSEWHEEL handling)."""
+        if self._enlarged:
+            if not self.contains(pos):
+                return False
+            max_scroll = self._max_scroll_rows()
+            if max_scroll <= 0:
+                return False
+            self._scroll_row = max(0, min(max_scroll, self._scroll_row - direction))
+            return True
+        return self.browser.handle_wheel(pos, direction)
+
     # -- render --
 
     def render(self, screen):
-        title = self.title_font.render("Cartes", True, (255, 255, 255))
-        screen.blit(title, (self.x, self.y))
-
         if self._enlarged:
             self._render_grid(screen)
         else:
@@ -310,6 +325,9 @@ class CardPanelUI(_ResizableCornerMixin):
                     f"Images : {len(card.images)}",
                     f"Effets : {len(card.effects)}",
                 ]
+                if card.card_type == "pnj":
+                    is_complete, missing = self._renderer.get_completeness(card)
+                    lines.append("Complet" if is_complete else "Manque : " + ", ".join(missing))
             for index, line in enumerate(lines):
                 surface = self.font.render(line, True, (220, 220, 220))
                 screen.blit(surface, (self.detail_rect.x + 8, self.detail_rect.y + 6 + index * 20))
@@ -383,6 +401,19 @@ class CardPanelUI(_ResizableCornerMixin):
             badge_bg.bottomright = (base_x + (visible_copies - 1) * offset + surface.get_width(), base_y + surface.get_height())
             pygame.draw.rect(screen, (30, 30, 30), badge_bg, border_radius=4)
             screen.blit(badge, (badge_bg.x + 3, badge_bg.y + 2))
+
+        is_complete, _missing = self._renderer.get_completeness(card)
+        if not is_complete:
+            # Top-left corner, opposite the "xN" stack badge above (bottom-
+            # right) -- no overlap. Orange "!" -- a PNJ registered from a
+            # single tagged tile (see object_manager.register_npc_type) is
+            # a normal, expected in-progress state, not an error, so this
+            # flags rather than alarms.
+            warn = self.badge_font.render("!", True, (30, 20, 0))
+            warn_bg = pygame.Rect(0, 0, warn.get_width() + 8, warn.get_height() + 6)
+            warn_bg.topleft = (base_x, base_y)
+            pygame.draw.rect(screen, (240, 160, 40), warn_bg, border_radius=4)
+            screen.blit(warn, (warn_bg.x + 4, warn_bg.y + 3))
 
 
 # ---------------------------------------------------------------------

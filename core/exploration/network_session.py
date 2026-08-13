@@ -389,8 +389,16 @@ class NetworkSessionMixin:
 
         last_acked = entry.get("last_input_seq", 0)
         session.pending_inputs = [item for item in session.pending_inputs if item[0] > last_acked]
+        # One shared visible-animal/enemy snapshot for the whole replay batch
+        # below (see _resolve_movement_step) instead of every replayed input
+        # redoing the same room-wide scan -- this replay is a synchronous
+        # catch-up over already-buffered inputs, not real elapsed time, so
+        # animals/enemies genuinely haven't moved between iterations.
+        visible_animals = self._visible_animals_global()
+        visible_enemies = self._visible_enemies_global()
         for _seq, direction, running, replay_dt in session.pending_inputs:
-            self._resolve_movement_step(session, direction, running, replay_dt, predicting=True, advance_animation=False)
+            self._resolve_movement_step(session, direction, running, replay_dt, predicting=True, advance_animation=False,
+                                         visible_animals=visible_animals, visible_enemies=visible_enemies)
 
     def _smooth_network_entities(self, dt):
         """Client-side only (Phase 4), called once per render frame from
@@ -579,6 +587,13 @@ class NetworkSessionMixin:
                 if shared_result == "handled":
                     continue
 
+                if self.game_manager.settings_panel.is_open:
+                    # Pure local-settings overlay, no server round-trip
+                    # needed -- works identically here to run()'s own copy
+                    # of this check.
+                    self.game_manager.settings_panel.handle_event(event)
+                    continue
+
                 if self.multiplayer_panel.is_open:
                     if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                         self.multiplayer_panel.close()
@@ -593,6 +608,27 @@ class NetworkSessionMixin:
                             self.game_manager.state = GameState.MENU
                             running = False
                         continue
+                    continue
+
+                if (
+                    local_session.inventory_open
+                    and event.type == pygame.MOUSEBUTTONDOWN
+                    and local_session.inventory_panel.handle_click(self.screen, event.pos)
+                ):
+                    self.game_manager.settings_panel.open()
+                    continue
+
+                if self.victory and event.type == pygame.MOUSEBUTTONDOWN:
+                    # Unlike run()'s own version, this can't just call
+                    # _return_to_home() locally -- victory/the world reset
+                    # it triggers are shared, whole-session state that only
+                    # the server can actually change (this client's own
+                    # self.victory is just a mirror of the server's, set
+                    # fresh every snapshot -- flipping it locally here would
+                    # only last until the very next snapshot set it right
+                    # back). See GameServer._apply_message's MSG_RETURN_HOME
+                    # handling.
+                    client.send(protocol.MSG_RETURN_HOME)
                     continue
 
                 if self.chat_open:
@@ -645,7 +681,7 @@ class NetworkSessionMixin:
                 break
 
             self._smooth_network_entities(dt)
-            self._update_camera()
+            self._update_camera(dt)
             self.render()
 
     def _handle_chat_event(self, event, client):

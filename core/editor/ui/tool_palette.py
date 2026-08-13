@@ -29,7 +29,6 @@ class ToolPaletteUI:
         self.y = 10
 
         self.font = pygame.font.SysFont("arial", 18)
-        self.title_font = pygame.font.SysFont("arial", 20)
 
         self.border = BorderManager()
 
@@ -50,7 +49,18 @@ class ToolPaletteUI:
 
     # -------------------------------------------------------------
 
-    def render(self, screen, floor_active=True, wall_active=True, floor_stock=0, wall_stock=0):
+    PREVIEW_SIZE = 24
+
+    def _floor_preview_rect(self):
+        r = self._floor_rect()
+        return pygame.Rect(r.right - self.PREVIEW_SIZE - 6, r.y + (r.height - self.PREVIEW_SIZE) // 2, self.PREVIEW_SIZE, self.PREVIEW_SIZE)
+
+    def _wall_preview_rect(self):
+        r = self._wall_rect()
+        return pygame.Rect(r.right - self.PREVIEW_SIZE - 6, r.y + (r.height - self.PREVIEW_SIZE) // 2, self.PREVIEW_SIZE, self.PREVIEW_SIZE)
+
+    def render(self, screen, floor_active=True, wall_active=True, floor_stock=0, wall_stock=0,
+               floor_preview=None, wall_preview=None):
 
         panel_rect = pygame.Rect(
             self.x,
@@ -60,11 +70,6 @@ class ToolPaletteUI:
         )
 
         self.border.draw(screen, panel_rect)
-
-        screen.blit(
-            self.title_font.render("Tuile de base", True, (255, 255, 255)),
-            (self.x + 16, self.y + 12),
-        )
 
         floor_rect = self._floor_rect()
         self.border.draw(screen, floor_rect)
@@ -78,6 +83,9 @@ class ToolPaletteUI:
             (floor_rect.x + 12, floor_rect.y + 5),
         )
 
+        if floor_preview is not None:
+            screen.blit(floor_preview, self._floor_preview_rect())
+
         wall_rect = self._wall_rect()
         self.border.draw(screen, wall_rect)
 
@@ -89,6 +97,9 @@ class ToolPaletteUI:
             ),
             (wall_rect.x + 10, wall_rect.y + 4),
         )
+
+        if wall_preview is not None:
+            screen.blit(wall_preview, self._wall_preview_rect())
 
         screen.blit(
             self.font.render(

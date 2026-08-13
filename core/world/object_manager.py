@@ -302,7 +302,10 @@ ARCHETYPES = {
 CELL_MODES = ("block", "behind", "front")
 
 
-def _build_custom_type_entry(name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None, interactable=False):
+def _build_custom_type_entry(
+    name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None,
+    interactable=False, lockable=False, frame_rects=None,
+):
     """Construction pure (aucune I/O) d'un dict au format OBJECT_TYPES --
     partagee par register_custom_type (creer) et update_custom_type
     (editer), pour que les deux produisent toujours exactement la meme
@@ -310,19 +313,48 @@ def _build_custom_type_entry(name, tileset, rect, size, archetype, blocks_moveme
     `blocks_movement` (voisinage ET ordre de dessin par case pour un objet
     multi-cases, voir ObjectManager.is_cell_walkable/cell_draw_mode) -- les
     deux representent la meme idee a des granularites differentes, jamais
-    les deux a la fois sur une entree."""
+    les deux a la fois sur une entree.
+
+    `lockable` (archetype "porte" seulement -- ignore silencieusement
+    ailleurs) ajoute "linkable"/"blocks_until_open", exactement comme gate/
+    wall : la porte devient liable a un bouton et bloque tant qu'elle n'est
+    pas ouverte, au lieu de rester "walkable" en permanence (le flag par
+    defaut de l'archetype "porte", voir ARCHETYPES -- toujours applique en
+    premier via entry.update(preset["flags"]) ci-dessous, mais
+    is_cell_walkable verifie blocks_until_open AVANT walkable, donc les
+    deux flags peuvent coexister sans ambiguite). Par defaut False --
+    n'importe quelle carte "porte" deja enregistree avant l'existence de ce
+    parametre n'a jamais ce champ et reste donc exactement walkable comme
+    avant, aucune regression.
+
+    `frame_rects` (archetype "porte" seulement), s'il est fourni, remplace
+    le `rect` unique par une liste de rects -- une frame d'animation
+    d'ouverture par entree, choisies individuellement dans l'editeur de
+    sprite plutot qu'une bande continue decoupee automatiquement (voir
+    SpriteEditorPanelUI). Sans lui (tout le reste, y compris une "porte" a
+    1 frame), comportement actuel inchange : un seul "rect", frames=1."""
     preset = ARCHETYPES.get(archetype)
     if preset is None:
         raise ValueError(f"Archetype inconnu : {archetype}")
 
+    if frame_rects:
+        asset = {"tileset": tileset, "rects": [list(r) for r in frame_rects]}
+        frames = len(frame_rects)
+    else:
+        asset = {"tileset": tileset, "rect": list(rect)}
+        frames = 1
+
     entry = {
-        "asset": {"tileset": tileset, "rect": list(rect)},
+        "asset": asset,
         "placement": preset["placement"],
         "size": list(size),
-        "frames": 1,
+        "frames": frames,
         "name": name,
     }
     entry.update(preset["flags"])
+    if archetype == "porte" and lockable:
+        entry["linkable"] = True
+        entry["blocks_until_open"] = True
     if cell_modes is not None:
         entry["cell_modes"] = [list(row) for row in cell_modes]
     elif blocks_movement:
@@ -348,7 +380,10 @@ def _write_custom_type(type_id, entry):
         OBJECT_LIST.append(type_id)
 
 
-def register_custom_type(type_id, name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None, interactable=False):
+def register_custom_type(
+    type_id, name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None,
+    interactable=False, lockable=False, frame_rects=None,
+):
     """Valide et persiste une NOUVELLE entree OBJECT_TYPES sourcee depuis une
     region de tileset -- le point d'ecriture que SpriteEditorPanelUI appelle
     une fois la selection confirmee, en mode creation (voir update_custom_type
@@ -359,12 +394,18 @@ def register_custom_type(type_id, name, tileset, rect, size, archetype, blocks_m
         raise ValueError("Identifiant invalide (lettres/chiffres/_ uniquement)")
     if type_id in OBJECT_TYPES:
         raise ValueError(f"'{type_id}' existe deja")
-    entry = _build_custom_type_entry(name, tileset, rect, size, archetype, blocks_movement, cell_modes, interactable)
+    entry = _build_custom_type_entry(
+        name, tileset, rect, size, archetype, blocks_movement, cell_modes,
+        interactable, lockable, frame_rects,
+    )
     _write_custom_type(type_id, entry)
     return entry
 
 
-def update_custom_type(type_id, name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None, interactable=False):
+def update_custom_type(
+    type_id, name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None,
+    interactable=False, lockable=False, frame_rects=None,
+):
     """Edite une carte custom DEJA enregistree (type_id doit deja exister
     ET etre une carte custom -- jamais un type integre au jeu comme "vase",
     identifie par la forme dict de son "asset", voir _build_custom_type_entry
@@ -378,9 +419,42 @@ def update_custom_type(type_id, name, tileset, rect, size, archetype, blocks_mov
         raise ValueError(f"'{type_id}' n'existe pas")
     if not isinstance(existing.get("asset"), dict):
         raise ValueError(f"'{type_id}' est un type integre au jeu, non modifiable")
-    entry = _build_custom_type_entry(name, tileset, rect, size, archetype, blocks_movement, cell_modes, interactable)
+    entry = _build_custom_type_entry(
+        name, tileset, rect, size, archetype, blocks_movement, cell_modes,
+        interactable, lockable, frame_rects,
+    )
     _write_custom_type(type_id, entry)
     return entry
+
+
+def delete_custom_type(type_id):
+    """Supprime definitivement une carte custom OU un type de PNJ (meme
+    stockage, voir _write_custom_type -- register_npc_type/update_npc_type
+    passent aussi par lui) : retire du JSON persiste et de OBJECT_TYPES/
+    OBJECT_LIST en memoire. Meme garde qu'update_custom_type -- jamais un
+    type integre au jeu (identifie par la forme dict de son "asset").
+    Leve ValueError sans rien modifier si absent/non-custom, meme
+    convention d'erreur que register_custom_type. N'a AUCUNE idee de si ce
+    type est encore place quelque part -- c'est a l'appelant (voir
+    core.data.ressources.type_references) de verifier et refuser avant
+    d'appeler ceci, sans quoi une room qui le referencait encore
+    planterait (KeyError) au prochain chargement plutot que de se degrader
+    proprement (voir ObjectManager.is_cell_walkable)."""
+    existing = OBJECT_TYPES.get(type_id)
+    if existing is None:
+        raise ValueError(f"'{type_id}' n'existe pas")
+    if not isinstance(existing.get("asset"), dict):
+        raise ValueError(f"'{type_id}' est un type integre au jeu, non supprimable")
+
+    custom = _load_custom_object_types()
+    custom.pop(type_id, None)
+    CUSTOM_OBJECT_TYPES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CUSTOM_OBJECT_TYPES_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(custom, handle, indent=2, ensure_ascii=False)
+
+    del OBJECT_TYPES[type_id]
+    if type_id in OBJECT_LIST:
+        OBJECT_LIST.remove(type_id)
 
 
 def find_custom_type_by_source(tileset, rect):
@@ -389,11 +463,19 @@ def find_custom_type_by_source(tileset, rect):
     proposer une edition plutot que d'enregistrer un doublon visuellement
     redondant. Une entree custom se reconnait a la forme dict de son
     "asset" (voir _build_custom_type_entry) -- jamais un type integre, qui
-    utilise toujours un chemin de fichier (chaine)."""
+    utilise toujours un chemin de fichier (chaine). Matche soit le "rect"
+    singulier d'une carte a 1 frame, soit n'importe quel element du
+    "rects" pluriel d'une porte multi-frame (voir _build_custom_type_entry)
+    -- une region deja prise comme UNE frame d'une porte doit etre
+    signalee tout autant qu'une carte a 1 frame ordinaire."""
     rect = list(rect)
     for candidate_id, config in OBJECT_TYPES.items():
         asset = config.get("asset")
-        if isinstance(asset, dict) and asset.get("tileset") == tileset and list(asset.get("rect", [])) == rect:
+        if not isinstance(asset, dict) or asset.get("tileset") != tileset:
+            continue
+        if list(asset.get("rect", [])) == rect:
+            return candidate_id
+        if any(list(r) == rect for r in asset.get("rects", [])):
             return candidate_id
     return None
 
@@ -418,6 +500,29 @@ ANIMAL_TYPES = tuple(name for name, config in OBJECT_TYPES.items() if config.get
 
 # Same idea as ANIMAL_TYPES, for core.world.entities.Enemy/EnemyManager.
 ENEMY_TYPES = tuple(name for name, config in OBJECT_TYPES.items() if config.get("enemy"))
+
+# Same idea again, for core.world.entities.Npc/NpcManager (PNJ -- see
+# register_npc_type/load_npc_frames below) -- EXCEPT, unlike ANIMAL_TYPES/
+# ENEMY_TYPES above, this is a FUNCTION, not a tuple frozen at import
+# time. Animal/enemy types are all hand-authored in this file (never
+# created at runtime), so freezing them once at import has never actually
+# mattered; an NPC type is created entirely in-session via the sprite
+# editor's register_npc_type, so a frozen tuple would silently never see
+# a type registered after this module was first imported -- the exact
+# "custom type registered mid-session" gap ObjectManager.is_es_type was
+# already fixed to avoid (it reads config.get("is_es") dynamically
+# instead of a frozen ES_TYPES-style tuple). Call npc_types() fresh at
+# each use instead of caching its result across a session.
+def npc_types():
+    return tuple(name for name, config in OBJECT_TYPES.items() if config.get("npc"))
+
+# The 8 compass directions an entity pack's regions get tagged with (see
+# SpriteEditorPanelUI's entity-pack bitmap-tagging mode) -- deliberately
+# the exact same 8 names core.world.entities.Player.DIRECTION_VECTORS
+# already uses for its own 8-way facing, so there's only ever one
+# direction vocabulary in this codebase, not two equivalent ones that
+# could drift apart.
+NPC_DIRECTIONS = ("front", "front_right", "right", "back_right", "back", "back_left", "left", "front_left")
 
 # Object types that function as an entry/exit (a doorway between rooms, or
 # the boundary of a room's void edge) -- the only types get_role/set_role
@@ -477,8 +582,21 @@ CURRENCY_FILES = {"gold": "item/Coin Sheet.png", "blue": "item/BlueCoin Sheet.pn
 CURRENCY_FRAME_SIZE = 16
 
 
+_currency_frames_cache = {}
+
+
 def load_currency_frames(currency_type):
-    """Returns {"spin": [...], "collect": [...]}, each a list of 16x16 frames."""
+    """Returns {"spin": [...], "collect": [...]}, each a list of 16x16
+    frames. Cached by currency_type -- every dropped/picked-up coin of the
+    same type re-read and re-sliced this sheet from disk with no caching
+    at all before this, unlike WorldRenderer's own _get_object_frames for
+    placed static objects. Frames are only ever read (indexed), never
+    mutated in place -- see _draw_cached_sprite's own separate zoom-scaled
+    cache -- so sharing the same Surface objects across every Pickup of
+    this currency_type is safe."""
+    if currency_type in _currency_frames_cache:
+        return _currency_frames_cache[currency_type]
+
     sheet = pygame.image.load(PROJECT_ROOT / "assets" / CURRENCY_FILES[currency_type]).convert_alpha()
     size = CURRENCY_FRAME_SIZE
     columns = sheet.get_width() // size
@@ -486,7 +604,9 @@ def load_currency_frames(currency_type):
     def _row(row_index):
         return [sheet.subsurface((i * size, row_index * size, size, size)).copy() for i in range(columns)]
 
-    return {"spin": _row(0), "collect": _row(1)}
+    frames = {"spin": _row(0), "collect": _row(1)}
+    _currency_frames_cache[currency_type] = frames
+    return frames
 
 
 # Real inventory items (as opposed to currency, see CURRENCY_FILES above) --
@@ -509,14 +629,22 @@ DYNAMITE_FRAME_SIZE = 16
 DYNAMITE_FRAME_COUNT = 4
 
 
+_dynamite_frames_cache = None
+
+
 def load_dynamite_frames():
     """The 4 throw-animation frames (16x16 each), sliced from the single-row
     64x16 dynamite.png sheet -- used by core.world.entities.ThrownDynamite,
     not by the static ground/inventory icon (that's just frame 0, read
-    directly via ITEM_DEFINITIONS["dynamite"]["icon_rect"])."""
-    sheet = pygame.image.load(PROJECT_ROOT / "assets" / ITEM_DEFINITIONS["dynamite"]["icon_path"]).convert_alpha()
-    size = DYNAMITE_FRAME_SIZE
-    return [sheet.subsurface((i * size, 0, size, size)).copy() for i in range(DYNAMITE_FRAME_COUNT)]
+    directly via ITEM_DEFINITIONS["dynamite"]["icon_rect"]). Cached at
+    module level -- every thrown stick re-read this sheet from disk with
+    no caching before this."""
+    global _dynamite_frames_cache
+    if _dynamite_frames_cache is None:
+        sheet = pygame.image.load(PROJECT_ROOT / "assets" / ITEM_DEFINITIONS["dynamite"]["icon_path"]).convert_alpha()
+        size = DYNAMITE_FRAME_SIZE
+        _dynamite_frames_cache = [sheet.subsurface((i * size, 0, size, size)).copy() for i in range(DYNAMITE_FRAME_COUNT)]
+    return _dynamite_frames_cache
 
 
 # Explosion VFX (assets/effect/smallexplosion/) -- one 48x48 PNG per frame,
@@ -527,11 +655,19 @@ EXPLOSION_FOLDER = "effect/smallexplosion"
 EXPLOSION_FRAME_COUNT = 9
 
 
+_explosion_frames_cache = None
+
+
 def load_explosion_frames():
-    return [
-        pygame.image.load(PROJECT_ROOT / "assets" / EXPLOSION_FOLDER / f"frame{i:04d}.png").convert_alpha()
-        for i in range(EXPLOSION_FRAME_COUNT)
-    ]
+    """Cached at module level -- every dynamite blast previously re-read
+    all 9 individual PNG files from disk with no caching at all."""
+    global _explosion_frames_cache
+    if _explosion_frames_cache is None:
+        _explosion_frames_cache = [
+            pygame.image.load(PROJECT_ROOT / "assets" / EXPLOSION_FOLDER / f"frame{i:04d}.png").convert_alpha()
+            for i in range(EXPLOSION_FRAME_COUNT)
+        ]
+    return _explosion_frames_cache
 
 
 def make_item(item_id):
@@ -563,6 +699,15 @@ def load_object_frames(object_type, variant=None):
         # per-type file. Always a single static frame, same as the
         # "frames": 1 branch below -- a region reference is never sliced
         # into an animation.
+        #
+        # {"tileset": ..., "rects": [[x, y, w, h], ...]} -- a custom "porte"
+        # with its opening animation's frames picked individually (see
+        # SpriteEditorPanelUI), each its own independent tileset region
+        # rather than consecutive cells of one sheet. One frame per rect, in
+        # order -- "frames" (see _build_custom_type_entry) already equals
+        # len(rects), so obj["frame"] indexes straight into this list.
+        if "rects" in asset_path:
+            return [load_tileset_region(asset_path["tileset"], r) for r in asset_path["rects"]]
         return [load_tileset_region(asset_path["tileset"], asset_path["rect"])]
 
     asset = PROJECT_ROOT / "assets" / asset_path
@@ -590,12 +735,22 @@ def load_object_frames(object_type, variant=None):
     return frames
 
 
+_animal_frames_cache = {}
+
+
 def load_animal_frames(object_type):
     """Full idle+move animation set for an animal NPC sheet (a 2x2 grid: row 0
     idle, row 1 move, each row 2 frames of frame_size px). Used by
     core.world.entities.Animal for live wandering during exploration -- the
     static editor palette/placed-object preview keeps using
-    load_object_frames, which only reads the idle row (config["frames"])."""
+    load_object_frames, which only reads the idle row (config["frames"]).
+
+    Cached by object_type -- every wandering animal of the same type
+    re-read and re-sliced this sheet from disk with no caching at all
+    before this."""
+    if object_type in _animal_frames_cache:
+        return _animal_frames_cache[object_type]
+
     config = OBJECT_TYPES[object_type]
     asset = PROJECT_ROOT / "assets" / config["asset"]
     sheet = pygame.image.load(asset).convert_alpha()
@@ -609,10 +764,14 @@ def load_animal_frames(object_type):
             for i in range(2)
         ]
 
-    return {"idle": _row(0), "move": _row(1)}
+    frames = {"idle": _row(0), "move": _row(1)}
+    _animal_frames_cache[object_type] = frames
+    return frames
 
 
 ENEMY_FRAME_SIZE = 32
+
+_enemy_frames_cache = {}
 
 
 def load_enemy_frames(enemy_type):
@@ -621,7 +780,14 @@ def load_enemy_frames(enemy_type):
     sheet is derived from its own pixel width (sheet.get_width() //
     ENEMY_FRAME_SIZE, same approach as Player.cut_sheet) rather than
     assumed -- skeleton1 and skeleton2 don't share frame counts for any of
-    their animations despite sharing a folder layout."""
+    their animations despite sharing a folder layout.
+
+    Cached by enemy_type -- every spawned skeleton of the same type
+    re-read every one of its animation sheets from disk with no caching
+    at all before this."""
+    if enemy_type in _enemy_frames_cache:
+        return _enemy_frames_cache[enemy_type]
+
     folder = ENEMY_FOLDERS[enemy_type]
     frames = {}
     for animation in ENEMY_ANIMATIONS:
@@ -634,7 +800,208 @@ def load_enemy_frames(enemy_type):
             ).copy()
             for i in range(columns)
         ]
+    _enemy_frames_cache[enemy_type] = frames
     return frames
+
+
+_entity_pack_lookup_cache = {}
+
+
+def build_entity_pack_lookup(pack_name):
+    """{action: {direction: [tile_index, ...]}}, ordered by each tile's own
+    saved "order" field -- built from an entity-kind pack's tagged tiles
+    (see core.editor.ui.SpriteEditorPanelUI's batch action/direction
+    tagging, and core.data.ressources.update_autotile_pack_tiles). Sibling
+    of core.editor.autotile.build_pack_lookup, deliberately NOT the same
+    function -- that one's return shape (bitmask -> single tile, plus
+    weighted variants) has no equivalent here; action/direction/order is a
+    different domain entirely. Cached per (pack_name, file mtime), same
+    stat()-not-reparse pattern as build_pack_lookup -- reloaded
+    automatically the moment the sprite editor tags/re-tags a tile."""
+    from core.data.ressources import load_autotile_pack, get_autotile_pack_path
+
+    try:
+        mtime = get_autotile_pack_path(pack_name).stat().st_mtime
+    except OSError:
+        mtime = None
+
+    cached = _entity_pack_lookup_cache.get(pack_name)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    payload = load_autotile_pack(pack_name) or {"tiles": []}
+    lookup = {}
+    for tile in payload.get("tiles", []):
+        index = tile.get("index")
+        action = tile.get("action")
+        direction = tile.get("direction")
+        if index is None or action is None or direction is None:
+            continue
+        lookup.setdefault(action, {}).setdefault(direction, []).append(
+            (tile.get("order", 0), index)
+        )
+
+    for directions in lookup.values():
+        for direction, ordered in directions.items():
+            ordered.sort(key=lambda pair: pair[0])
+            directions[direction] = [index for _order, index in ordered]
+
+    result = lookup
+    _entity_pack_lookup_cache[pack_name] = (mtime, result)
+    return result
+
+
+_npc_frames_cache = {}
+
+
+def load_npc_frames(entity_pack_name):
+    """{action: {direction: [Surface, ...]}} -- the live-entity equivalent
+    of load_animal_frames/load_enemy_frames, but sourced from a
+    sprite-editor-tagged entity pack instead of a fixed grid/folder
+    convention (see build_entity_pack_lookup). Cached by pack name, same
+    convention as its siblings -- an NPC type's pack is never re-tagged
+    while the game itself is running, only from the editor, so this cache
+    never needs to react to a pack changing mid-session the way the
+    editor's own build_entity_pack_lookup does."""
+    if entity_pack_name in _npc_frames_cache:
+        return _npc_frames_cache[entity_pack_name]
+
+    from core.data.ressources import load_autotile_pack
+
+    payload = load_autotile_pack(entity_pack_name)
+    if payload is None:
+        raise ValueError(f"Pack d'entite inconnu : {entity_pack_name}")
+    tileset = payload["tileset"]
+    rects_by_index = {tile["index"]: tile["rect"] for tile in payload.get("tiles", [])}
+
+    lookup = build_entity_pack_lookup(entity_pack_name)
+    frames = {
+        action: {
+            direction: [load_tileset_region(tileset, rects_by_index[index]) for index in indices]
+            for direction, indices in directions.items()
+        }
+        for action, directions in lookup.items()
+    }
+    _npc_frames_cache[entity_pack_name] = frames
+    return frames
+
+
+def action_direction_coverage(entity_pack, action_name):
+    """(tagged: set, missing: set) of NPC_DIRECTIONS for `action_name`
+    within `entity_pack` -- the shared primitive behind npc_completeness
+    (a PNJ type already registered) AND core.editor.ui.SpriteEditorPanelUI's
+    own live coverage preview while still filling the "Enregistrer comme
+    PNJ" form, before anything is registered at all. One source of truth
+    for "how much of this action is tagged" rather than two counting
+    routines that could drift. `action_name` of None/"" (an unset optional
+    role) returns everything as missing -- callers that only care about
+    CONFIGURED roles (see npc_completeness) filter those out themselves
+    rather than this function silently skipping them."""
+    if not action_name:
+        return set(), set(NPC_DIRECTIONS)
+    lookup = build_entity_pack_lookup(entity_pack)
+    tagged = set(lookup.get(action_name, {}).keys())
+    return tagged, set(NPC_DIRECTIONS) - tagged
+
+
+def npc_completeness(type_id):
+    """{"complete": bool, "missing": {role: [direction,...], ...}} for an
+    ALREADY-REGISTERED PNJ type -- only checks roles actually present in
+    its own wander_actions (an optional role like "sitting"/"laying"/"run"
+    left unset is a deliberate choice, not a gap -- see core.world.
+    entities.Npc's own class docstring on why each is independently
+    optional). {"complete": True, "missing": {}} for anything that isn't a
+    registered PNJ type at all, so a caller can call this unconditionally
+    without checking config.get("npc") first."""
+    config = OBJECT_TYPES.get(type_id)
+    if config is None or not config.get("npc"):
+        return {"complete": True, "missing": {}}
+
+    entity_pack = config["entity_pack"]
+    missing = {}
+    for role, action_name in config.get("wander_actions", {}).items():
+        _tagged, gaps = action_direction_coverage(entity_pack, action_name)
+        if gaps:
+            missing[role] = sorted(gaps)
+    return {"complete": not missing, "missing": missing}
+
+
+def _build_npc_type_entry(name, entity_pack, tileset, icon_rect, size, wander_actions):
+    """Construction pure (aucune I/O) d'un dict au format OBJECT_TYPES pour
+    un PNJ -- parallele a _build_custom_type_entry, mais volontairement
+    PAS partagee avec lui : sa signature est pensee pour "un archetype +
+    un rect (ou frame_rects) unique", alors qu'un PNJ n'a aucun rect
+    propre, seulement une reference a tout un pack d'entite. `icon_rect`
+    fournit uniquement l'icone statique (palette/objet pose, voir
+    load_object_frames -- chemin totalement inchange, la forme
+    {"tileset","rect"} est deja ce que ce loader attend). `wander_actions`
+    ({"idle": ..., "move": ...}) nomme lesquelles des actions du pack
+    jouer pendant chacun des deux etats de vagabondage de NpcManager (voir
+    core.world.entities.Npc)."""
+    return {
+        "asset": {"tileset": tileset, "rect": list(icon_rect)},
+        "placement": "floor",
+        "size": list(size),
+        "frames": 1,
+        "name": name,
+        "npc": True,
+        "entity_pack": entity_pack,
+        "wander_actions": dict(wander_actions),
+    }
+
+
+def register_npc_type(type_id, name, entity_pack, tileset, icon_rect, size, wander_actions):
+    """Valide et persiste une NOUVELLE entree OBJECT_TYPES de PNJ -- le
+    pendant de register_custom_type pour ce cas (voir update_npc_type pour
+    l'edition). Meme garde-fou d'id que register_custom_type."""
+    if not type_id or not all(c.isalnum() or c == "_" for c in type_id):
+        raise ValueError("Identifiant invalide (lettres/chiffres/_ uniquement)")
+    if type_id in OBJECT_TYPES:
+        raise ValueError(f"'{type_id}' existe deja")
+    entry = _build_npc_type_entry(name, entity_pack, tileset, icon_rect, size, wander_actions)
+    _write_custom_type(type_id, entry)
+    return entry
+
+
+def update_npc_type(type_id, name, entity_pack, tileset, icon_rect, size, wander_actions):
+    """Edite un PNJ deja enregistre -- pendant de update_custom_type. Meme
+    garde-fou : type_id doit deja exister ET etre un type custom (asset en
+    dict), jamais un type integre au jeu."""
+    existing = OBJECT_TYPES.get(type_id)
+    if existing is None:
+        raise ValueError(f"'{type_id}' n'existe pas")
+    if not isinstance(existing.get("asset"), dict):
+        raise ValueError(f"'{type_id}' est un type integre au jeu, non modifiable")
+    entry = _build_npc_type_entry(name, entity_pack, tileset, icon_rect, size, wander_actions)
+    _write_custom_type(type_id, entry)
+    return entry
+
+
+def npc_types_for_pack(entity_pack):
+    """(type_id, config) pour chaque PNJ deja enregistre depuis
+    `entity_pack` -- pendant de custom_types_for_tileset, pour la liste
+    "PNJ existants" de SpriteEditorPanelUI en mode pack d'entite."""
+    return [
+        (candidate_id, config) for candidate_id, config in OBJECT_TYPES.items()
+        if config.get("npc") and config.get("entity_pack") == entity_pack
+    ]
+
+
+def rename_entity_pack_references(old_pack_name, new_pack_name):
+    """Keeps every registered PNJ's own "entity_pack" field in sync after
+    ressources.rename_autotile_pack has already renamed the pack's file on
+    disk -- a pack rename is only complete once this has run too (call it
+    right after, see SpriteEditorPanelUI's pack-rename callback). Rewrites
+    each affected entry through _build_npc_type_entry (same name/tileset/
+    icon_rect/size/wander_actions, only entity_pack changes) rather than
+    poking the dict in place, so the persisted shape never drifts from
+    what register_npc_type/update_npc_type themselves would have written."""
+    for type_id, config in npc_types_for_pack(old_pack_name):
+        entry = _build_npc_type_entry(
+            config.get("name", type_id), new_pack_name, config["asset"]["tileset"],
+            config["asset"]["rect"], config.get("size", [1, 1]), config.get("wander_actions", {}),
+        )
+        _write_custom_type(type_id, entry)
 
 
 class ObjectManager:
@@ -864,6 +1231,17 @@ class ObjectManager:
             # branch is simply never reached for them -- fully additive.
             cell_mode = self.cell_mode(obj, config, grid_x, grid_y)
             if cell_mode is not None:
+                if cell_mode == "block" and config.get("blocks_until_open"):
+                    # A "block" cell on a lockable custom "porte" follows the
+                    # same open/closed state as any other blocks_until_open
+                    # object instead of being permanently solid -- note this
+                    # is independent of which cell is the object's actual
+                    # placement anchor (see _anchor_cell): the player can
+                    # mark ANY cell(s) "block" here, whether or not that's
+                    # also the anchor. A "block" cell_mode on a plain
+                    # decorative object (no blocks_until_open) stays
+                    # permanently solid as before.
+                    return obj.get("open", False)
                 return cell_mode != "block"
 
             if config.get("blocks_movement"):
@@ -877,6 +1255,33 @@ class ObjectManager:
 
         return self.dungeon.logical_grid[grid_y][grid_x] != WALL
 
+    def _activate_button(self, obj):
+        """Marks `obj` (a "button") pressed -- starts its own animation and
+        plays the trigger sound. Shared by check_button_trigger and
+        DungeonAssembly.check_button_trigger, which both trigger a button
+        but scope "which object is at this cell" differently (a plain
+        local lookup here vs. a room-aware global-coordinate lookup
+        there) -- factored out after a past fix to this exact activation
+        step only ever landed in one of the two copies."""
+        obj["activated"] = True
+        obj["frame"] = 0
+        obj["anim_timer"] = 0.0
+        self.begin_animation(obj)
+        SoundManager().play("button_pressed")
+
+    @staticmethod
+    def _open_if_blocking(target, object_manager):
+        """Opens `target` (a blocks_until_open object, e.g. a linked gate/
+        wall) if it isn't already -- `object_manager` is whichever
+        ObjectManager actually owns `target` (not necessarily the one this
+        was called on), since a cross-room assembly_link's target lives in
+        a different room's own Dungeon/ObjectManager entirely."""
+        if target is not None and OBJECT_TYPES[target["type"]].get("blocks_until_open") and not target.get("open"):
+            target["open"] = True
+            target["frame"] = 0
+            target["anim_timer"] = 0.0
+            object_manager.begin_animation(target)
+
     def check_button_trigger(self, grid_x, grid_y):
         """Call every frame the player occupies (grid_x, grid_y); no-ops unless a fresh button is there."""
         obj = self.get_object_at(grid_x, grid_y)
@@ -884,20 +1289,11 @@ class ObjectManager:
         if obj is None or obj["type"] != "button" or obj.get("activated"):
             return
 
-        obj["activated"] = True
-        obj["frame"] = 0
-        obj["anim_timer"] = 0.0
-        self.begin_animation(obj)
-        SoundManager().play("button_pressed")
+        self._activate_button(obj)
 
         for link_target in obj.get("links", []):
             target = self.get_object_at(link_target["x"], link_target["y"])
-
-            if target is not None and OBJECT_TYPES[target["type"]].get("blocks_until_open") and not target.get("open"):
-                target["open"] = True
-                target["frame"] = 0
-                target["anim_timer"] = 0.0
-                self.begin_animation(target)
+            self._open_if_blocking(target, self)
 
     def update(self, dt):
         """Advance animation for any currently-animating object (see
@@ -979,6 +1375,43 @@ class ObjectManager:
                 if link_target["x"] == old_x and link_target["y"] == old_y:
                     link_target["x"], link_target["y"] = new_x, new_y
 
+    def _anchor_cell(self, object_type, grid_x, grid_y):
+        """The single footprint cell a placement actually validates its
+        terrain against -- bottom-center of the object's own "size", not
+        its stored (grid_x, grid_y) origin (always the top-left corner, see
+        _footprint_cells_of). Confirmed with the user: every OTHER cell of a
+        multi-cell footprint is free to land on anything at all (a wall,
+        void, another object's territory) without blocking placement -- purely
+        a visual overlap onto whatever's already there, drawn front/behind
+        the player exactly as its own cell_modes entry says (unaffected by
+        this -- cell_modes still independently decides walkability/draw
+        order per cell, see is_cell_walkable/cell_mode). This is what lets a
+        tall object (a multi-cell custom "porte", a tree...) stand with its
+        base against a wall while its upper cells visually overlap the wall
+        above it, instead of that overlap rejecting the placement outright.
+        For a 1x1 object this is just (grid_x, grid_y) -- identical to
+        before for the overwhelming majority of existing types, built-in or
+        custom."""
+        size_x, size_y = OBJECT_TYPES[object_type]["size"]
+        return grid_x + (size_x - 1) // 2, grid_y + size_y - 1
+
+    def origin_for_anchor(self, object_type, anchor_x, anchor_y):
+        """Inverts _anchor_cell: given the grid cell the player is actually
+        pointing at (which placement/move validates against -- see
+        _anchor_cell's own docstring), returns the (grid_x, grid_y) origin
+        (top-left) add_object/move_object expect. Lets a caller (Creator's
+        placement-drag/move-drag) work entirely in "where the cursor is"
+        terms instead of separately reasoning about the footprint's
+        top-left corner -- before this, the cursor's own grid cell was
+        used directly AS the origin, so for anything wider/taller than
+        1x1 the cell that actually got terrain-validated (_anchor_cell,
+        bottom-center of THAT origin) landed size_x/size_y cells away from
+        wherever the player was actually pointing, e.g. a multi-cell door
+        failing to "see" the exact wall cell it was being visually aimed
+        at."""
+        size_x, size_y = OBJECT_TYPES[object_type]["size"]
+        return anchor_x - (size_x - 1) // 2, anchor_y - (size_y - 1)
+
     def _resolve_placement(self, object_type, grid_x, grid_y):
         """Returns (is_valid, variant) for placing/moving object_type at this cell."""
         if object_type == "torch":
@@ -990,12 +1423,15 @@ class ObjectManager:
             return False, None
 
         if self.is_es_type(object_type):
-            return self.is_valid_doorway(grid_x, grid_y), None
+            return self._valid_doorway_anchor(object_type, grid_x, grid_y), None
 
         if object_type == "stairs":
             return self._stairs_orientation(grid_x, grid_y)
 
-        is_valid = self.dungeon.logical_grid[grid_y][grid_x] == self._required_cell(object_type)
+        anchor_x, anchor_y = self._anchor_cell(object_type, grid_x, grid_y)
+        if not self._in_bounds(anchor_x, anchor_y):
+            return False, None
+        is_valid = self.dungeon.logical_grid[anchor_y][anchor_x] == self._required_cell(object_type)
         return is_valid, None
 
     def _stairs_orientation(self, grid_x, grid_y):
@@ -1067,12 +1503,43 @@ class ObjectManager:
             return up == WALL and down == WALL
         return False
 
+    def _valid_doorway_anchor(self, object_type, grid_x, grid_y):
+        """True if `object_type`'s own anchor cell (see _anchor_cell) is a
+        valid is_valid_doorway break -- the ONLY cell of a multi-cell E/S's
+        footprint that placement validates; every other cell is free to
+        overlap anything (a wall, void, ...) without blocking placement,
+        see _anchor_cell's own docstring for why. The autotiled walls this
+        game generates are only ever ONE cell thick, so a door taller/wider
+        than 1 cell in the direction perpendicular to the wall could never
+        find a second WALL cell to independently validate against there
+        (that second cell is the room's own interior FLOOR) -- checking
+        only the anchor is what makes a multi-cell custom "porte" placeable
+        at all. A 1x1 E/S (gate/wall/cave_entrance/big_entrance's own
+        origin, or a 1-cell custom "porte") has anchor == its own single
+        cell, so this is identical to a bare is_valid_doorway call for
+        every type that existed before this."""
+        anchor_x, anchor_y = self._anchor_cell(object_type, grid_x, grid_y)
+        return self.is_valid_doorway(anchor_x, anchor_y)
+
     def prune_invalid(self):
-        """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased), and any links left dangling by that."""
-        self.objects = [
+        """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased), and any links left dangling by that.
+
+        Called unconditionally after every single Dungeon.paint_cell edit
+        (potentially dozens of times a second during a drag-paint stroke),
+        so the overwhelmingly common case -- nothing near the painted cell
+        actually needed pruning -- must stay cheap. `filtered` is always a
+        subset of self._objects (a plain filter, nothing added/reordered),
+        so equal lengths means nothing was removed; only then is it worth
+        going through the `objects` property setter, which unconditionally
+        rebuilds the cell index/animating set and bumps objects_version
+        (invalidating WorldRenderer's doorway/spawn/pillar cache) even when
+        the list it's assigned is identical to what's already there."""
+        filtered = [
             obj for obj in self.objects
             if self._resolve_placement(obj["type"], obj["x"], obj["y"])[0]
         ]
+        if len(filtered) != len(self._objects):
+            self.objects = filtered
 
         existing = {(obj["x"], obj["y"]) for obj in self.objects}
         for obj in self.objects:

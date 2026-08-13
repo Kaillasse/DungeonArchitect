@@ -23,7 +23,7 @@
       "tileset": "tileset2.png",
       "rect": [
         160,
-        176,
+        192,
         16,
         16
       ]
@@ -34,7 +34,8 @@
       1
     ],
     "frames": 1,
-    "name": "stone"
+    "name": "stone2",
+    "blocks_movement": true
   },
   "banc": {
     "asset": {
@@ -388,14 +389,14 @@
     "name": "bordureporte",
     "cell_modes": [
       [
+        "block",
         "behind",
-        "behind",
-        "behind"
+        "block"
       ],
       [
+        "block",
         "behind",
-        "behind",
-        "behind"
+        "block"
       ]
     ]
   },
@@ -426,5 +427,217 @@
         "behind"
       ]
     ]
+  },
+  "bigstone": {
+    "asset": {
+      "tileset": "tileset2.png",
+      "rect": [
+        128,
+        176,
+        32,
+        32
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      2,
+      2
+    ],
+    "frames": 1,
+    "name": "bigstone",
+    "cell_modes": [
+      [
+        "front",
+        "front"
+      ],
+      [
+        "block",
+        "block"
+      ]
+    ]
+  },
+  "boxsmall": {
+    "asset": {
+      "tileset": "tileset2.png",
+      "rect": [
+        224,
+        128,
+        16,
+        32
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      2
+    ],
+    "frames": 1,
+    "name": "boxsmall",
+    "cell_modes": [
+      [
+        "front"
+      ],
+      [
+        "block"
+      ]
+    ]
+  },
+  "boxbig": {
+    "asset": {
+      "tileset": "tileset2.png",
+      "rect": [
+        240,
+        128,
+        16,
+        32
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      2
+    ],
+    "frames": 1,
+    "name": "boxbig",
+    "cell_modes": [
+      [
+        "front"
+      ],
+      [
+        "block"
+      ]
+    ]
+  },
+  "puit": {
+    "asset": {
+      "tileset": "tileset2.png",
+      "rect": [
+        208,
+        160,
+        32,
+        32
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      2,
+      2
+    ],
+    "frames": 1,
+    "name": "puit",
+    "cell_modes": [
+      [
+        "front",
+        "front"
+      ],
+      [
+        "block",
+        "block"
+      ]
+    ]
+  },
+  "tombe5": {
+    "asset": {
+      "tileset": "tileset2.png",
+      "rect": [
+        112,
+        256,
+        16,
+        32
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      2
+    ],
+    "frames": 1,
+    "name": "tombe5",
+    "cell_modes": [
+      [
+        "front"
+      ],
+      [
+        "block"
+      ]
+    ]
+  },
+  "pillier": {
+    "asset": {
+      "tileset": "tileset2.png",
+      "rect": [
+        112,
+        192,
+        16,
+        48
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      3
+    ],
+    "frames": 1,
+    "name": "pillier",
+    "cell_modes": [
+      [
+        "front"
+      ],
+      [
+        "front"
+      ],
+      [
+        "block"
+      ]
+    ]
+  },
+  "gepeto": {
+    "asset": {
+      "tileset": "characters/Animals/blackcat.png",
+      "rect": [
+        0,
+        96,
+        32,
+        32
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 1,
+    "name": "Gepeto",
+    "npc": true,
+    "entity_pack": "idlefl",
+    "wander_actions": {
+      "idle": "Assis",
+      "move": "Assis"
+    }
+  },
+  "djepeto": {
+    "asset": {
+      "tileset": "characters/Animals/blackcat.png",
+      "rect": [
+        384,
+        480,
+        32,
+        32
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 1,
+    "name": "Djepeto",
+    "npc": true,
+    "entity_pack": "gepeto",
+    "wander_actions": {
+      "idle": "marche",
+      "move": "marche",
+      "run": "course"
+    }
   }
 }

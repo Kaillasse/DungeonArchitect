@@ -18,6 +18,16 @@ class BorderManager:
     BORDER_SIZE = 64
     CORNER_SIZE = 16
 
+    # Cap on how many distinct (width, height) scaled variants draw() keeps
+    # cached at once (see draw()'s own comment) -- a panel dragged through a
+    # continuous resize would otherwise visit a new pixel size on almost
+    # every frame, growing this dict without bound for the lifetime of the
+    # process. Cleared wholesale rather than evicted LRU-style once hit --
+    # this singleton is shared by every panel in the app, so a resize drag
+    # ending just means the next few draw() calls rebuild a small working
+    # set again, which is still far cheaper than never caching at all.
+    MAX_SCALED_CACHE = 64
+
     def __new__(cls, border_asset_path="assets/UI/allborder.png"):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
@@ -34,6 +44,11 @@ class BorderManager:
         self.rows = 0
         self.cols = 0
         self.current_cell = (0, 0)
+        # (width, height) -> {"center"/"top"/"bottom"/"left"/"right": scaled
+        # Surface} -- see draw()'s own comment for why this exists and
+        # set_tile()/load_border() for why it's cleared whenever self.border
+        # itself changes underneath it.
+        self._scaled_cache = {}
 
         self.load_border()
 
@@ -54,6 +69,7 @@ class BorderManager:
         else:
 
             self.border = self._create_fallback()
+            self._scaled_cache = {}
 
     # -------------------------------------------------------------
 
@@ -73,6 +89,7 @@ class BorderManager:
         tile = self._sheet.subsurface((col * c, row * c, c, c)).copy()
         self.border = self._create_nine_slice(tile)
         self.current_cell = (row, col)
+        self._scaled_cache = {}
 
     # -------------------------------------------------------------
 
@@ -119,39 +136,43 @@ class BorderManager:
 
         b = self.border
 
+        # draw() is the single most-invoked drawing call in the whole UI
+        # layer (every bordered panel/button, every frame it's visible), but
+        # a panel's rect size only actually changes while it's being
+        # resized/dragged -- rescaling all 5 edge/center pieces via
+        # pygame.transform.scale on every single call regardless was pure
+        # waste the overwhelming rest of the time. Cached per (w, h), reused
+        # across frames until the size (or the border tile itself, see
+        # set_tile/load_border) actually changes.
+        scaled = self._scaled_cache.get((w, h))
+        if scaled is None:
+            scaled = {}
+            if w > c * 2 and h > c * 2:
+                scaled["center"] = pygame.transform.scale(b["center"], (w - c * 2, h - c * 2))
+            if w > c * 2:
+                scaled["top"] = pygame.transform.scale(b["top"], (w - c * 2, c))
+                scaled["bottom"] = pygame.transform.scale(b["bottom"], (w - c * 2, c))
+            if h > c * 2:
+                scaled["left"] = pygame.transform.scale(b["left"], (c, h - c * 2))
+                scaled["right"] = pygame.transform.scale(b["right"], (c, h - c * 2))
+
+            if len(self._scaled_cache) >= self.MAX_SCALED_CACHE:
+                self._scaled_cache.clear()
+            self._scaled_cache[(w, h)] = scaled
+
         # Centre
-        if w > c * 2 and h > c * 2:
-            screen.blit(
-                pygame.transform.scale(
-                    b["center"],
-                    (w - c * 2, h - c * 2),
-                ),
-                (x + c, y + c),
-            )
+        if "center" in scaled:
+            screen.blit(scaled["center"], (x + c, y + c))
 
         # Haut / bas
-        if w > c * 2:
-            screen.blit(
-                pygame.transform.scale(b["top"], (w - c * 2, c)),
-                (x + c, y),
-            )
-
-            screen.blit(
-                pygame.transform.scale(b["bottom"], (w - c * 2, c)),
-                (x + c, y + h - c),
-            )
+        if "top" in scaled:
+            screen.blit(scaled["top"], (x + c, y))
+            screen.blit(scaled["bottom"], (x + c, y + h - c))
 
         # Gauche / droite
-        if h > c * 2:
-            screen.blit(
-                pygame.transform.scale(b["left"], (c, h - c * 2)),
-                (x, y + c),
-            )
-
-            screen.blit(
-                pygame.transform.scale(b["right"], (c, h - c * 2)),
-                (x + w - c, y + c),
-            )
+        if "left" in scaled:
+            screen.blit(scaled["left"], (x, y + c))
+            screen.blit(scaled["right"], (x + w - c, y + c))
 
         # Coins
         screen.blit(b["tl"], (x, y))
@@ -619,6 +640,18 @@ class RoomBrowser:
     def selected_names(self):
         return [self._value(entry) for i, entry in enumerate(self.rooms) if i in self.selected_set]
 
+    @property
+    def is_modal(self):
+        """True while a rename box, delete confirmation, or context menu
+        is open. These can render/need input OUTSIDE this browser's own
+        row-list bounds (see _context_menu.pos, positioned at the click
+        that opened it) -- a caller that normally only forwards an event
+        here after its own `.contains(pos)` check (so a click meant for
+        something else on screen isn't misrouted) must instead forward
+        EVERY event here unconditionally while this is true, or the popup
+        renders but never actually receives input."""
+        return self._rename_box is not None or self._delete_confirm_index is not None or self._context_menu.is_open
+
     def set_rooms(self, rooms, preselect_all=False):
         self.rooms = list(rooms)
         self.selected = None
@@ -671,6 +704,27 @@ class RoomBrowser:
     def contains(self, pos):
         panel_rect = pygame.Rect(self.x, self.y, self.width, self.height)
         return panel_rect.collidepoint(pos)
+
+    def handle_wheel(self, pos, direction):
+        """Scrolls by one row per wheel tick while `pos` is anywhere over
+        this browser -- confirmed with the user: grabbing the thin slider
+        thumb precisely shouldn't be the only way to scroll, hovering the
+        panel and using the wheel should work too, same "more permissive"
+        precedent the sprite editor's own hover+scroll controls already
+        set. `direction` is event.y's raw sign (positive = wheel up = wards
+        row 0, matching every other scroll control in this project).
+        Returns True if this browser had scroll room and consumed the
+        event, False otherwise (nothing to scroll, or pos isn't over it) --
+        same "did I consume this" contract handle_event's own return value
+        already uses, so a caller can fall through to something else
+        (world-camera zoom) when this returns False."""
+        if not self.contains(pos):
+            return False
+        max_scroll = self._max_scroll()
+        if max_scroll <= 0:
+            return False
+        self.scroll = max(0, min(max_scroll, self.scroll - direction))
+        return True
 
     def _delete_confirm_rects(self):
         x, y = self._context_menu.pos

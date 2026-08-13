@@ -1,7 +1,7 @@
 import pygame
 
 from core.data.ressources import TILE_SIZE, load_tileset, get_tile_surface, load_autotile_pack, load_tileset_region
-from core.editor.autotile import EMPTY, WALL, DEFAULT_FLOOR_SPRITE, build_pack_lookup
+from core.editor.autotile import EMPTY, WALL, DEFAULT_FLOOR_SPRITE, DEFAULT_WALL_SPRITE, build_pack_lookup
 from core.world.object_manager import OBJECT_TYPES, load_object_frames
 
 
@@ -92,10 +92,11 @@ class WorldRenderer:
 
     def _get_tile_surface(self, dungeon, tile_index, pack_name, tile_px, columns):
         """Dispatches to a themed pack tile or the default interior tileset
-        slice, depending on whether `pack_name` (dungeon.floor_theme/
-        wall_theme for this cell's role -- see render()) is set. The single
-        place render()'s tile-blit loop and its doorway/spawn overrides both
-        go through, so the two can never resolve a cell differently."""
+        slice, depending on whether `pack_name` (that cell's own
+        dungeon.theme_grid entry, or dungeon.floor_theme for a doorway/spawn
+        cosmetic override -- see render()) is set. The single place
+        render()'s tile-blit loop and its doorway/spawn overrides both go
+        through, so the two can never resolve a cell differently."""
         if pack_name is not None:
             return self._get_pack_tile_surface(pack_name, tile_index, tile_px)
         return self._get_scaled_tile(tile_index, tile_px, columns)
@@ -110,6 +111,23 @@ class WorldRenderer:
             _lookup, default_index, _variants = build_pack_lookup(dungeon.floor_theme)
             return default_index
         return DEFAULT_FLOOR_SPRITE
+
+    def get_theme_preview_surface(self, pack_name, role, size_px):
+        """A small square surface showing the tile a given brush (pack_name,
+        or None for the built-in interior tileset) would paint right now --
+        `role` ("floor"/"wall") only matters when pack_name is None, to pick
+        DEFAULT_FLOOR_SPRITE vs DEFAULT_WALL_SPRITE. Used by ToolPaletteUI's
+        Sol/Mur buttons so the player can see which tileset is active before
+        painting, without needing to reopen AutotileThemePanelUI. Reuses
+        _get_pack_tile_surface/_get_scaled_tile's own caches -- same tiny
+        surfaces render() already produces at other zoom levels, just one
+        more (pack_name, tile_index, size_px) cache entry."""
+        if pack_name is not None:
+            _lookup, default_index, _variants = build_pack_lookup(pack_name)
+            return self._get_pack_tile_surface(pack_name, default_index, size_px)
+        tile_index = DEFAULT_FLOOR_SPRITE if role == "floor" else DEFAULT_WALL_SPRITE
+        columns = self.tileset.get_width() // TILE_SIZE
+        return self._get_scaled_tile(tile_index, size_px, columns)
 
     def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
                skip_foreground_objects=False, show_grid=True, hide_border_cells=None):
@@ -153,13 +171,26 @@ class WorldRenderer:
                 if tile_index < 0:
                     continue
 
-                # A doorway/spawn override always renders as FLOOR-styled
-                # art (see _footprint_cells' own docstring -- cosmetic only,
-                # the logical cell underneath stays WALL) regardless of
-                # which role's theme actually owns this cell, so both
-                # branches force pack_name to the room's *floor* theme, not
-                # whatever its own logical type would normally pick.
-                if (x, y) in doorway_cells:
+                # A doorway override renders as FLOOR-styled art over what's
+                # normally a WALL cell (see _footprint_cells' own docstring
+                # -- cosmetic only, the logical cell underneath stays WALL)
+                # -- but only when the cell actually IS a WALL cell today.
+                # Checking the real grid value here (not assuming based on
+                # which cell is the anchor) is what keeps this correct for a
+                # multi-cell custom "porte": only its anchor cell is ever
+                # required to BE a wall (see ObjectManager._anchor_cell) --
+                # every other cell of its footprint can land on FLOOR, WALL,
+                # or anything else, so whether IT needs the override too is
+                # genuinely per-cell, not something the object's shape alone
+                # decides. A spawn cell is always FLOOR to begin with (see OBJECT_TYPES
+                # ["spawn"]'s placement) -- its own override is a cosmetic
+                # tile swap unrelated to WALL/FLOOR authenticity, so it stays
+                # unconditional. The pack used by either override is
+                # dungeon.floor_theme (the current brush) -- theme_grid has
+                # no single "the room's floor pack" to fall back on since
+                # different floor cells can carry different packs; this is a
+                # narrow cosmetic edge case, not the per-cell painting path.
+                if (x, y) in doorway_cells and dungeon.logical_grid[y][x] == WALL:
                     tile_index = self._floor_override_index(dungeon)
                     pack_name = dungeon.floor_theme
                 elif (x, y) in spawn_cells:
@@ -169,8 +200,7 @@ class WorldRenderer:
                         tile_index = self.SPAWN_FLOOR_SPRITE
                     pack_name = dungeon.floor_theme
                 else:
-                    is_wall_cell = dungeon.logical_grid[y][x] == WALL
-                    pack_name = dungeon.wall_theme if is_wall_cell else dungeon.floor_theme
+                    pack_name = dungeon.theme_grid[y][x]
 
                 scaled = self._get_tile_surface(dungeon, tile_index, pack_name, tile_px, columns)
                 screen.blit(scaled, (origin_x + x * tile_px, origin_y + y * tile_px))
@@ -240,15 +270,18 @@ class WorldRenderer:
         assembler are untouched) -- it just stops the player from feeling
         like they're walking into solid wall texture when the gate/wall
         itself is open (or even closed, since the door sprite is what
-        visually reads as blocking, not a wall texture peeking through)."""
+        visually reads as blocking, not a wall texture peeking through).
+
+        The actual footprint math is ObjectManager._footprint_cells_of's --
+        reused here instead of re-deriving OBJECT_TYPES[...]["size"] and the
+        dx/dy loop a second time, so there's only one place that needs to
+        get "which cells does this object's footprint cover" right."""
+        object_manager = dungeon.object_manager
         cells = set()
-        for obj in dungeon.object_manager.objects:
+        for obj in object_manager.objects:
             if not predicate(obj):
                 continue
-            size_x, size_y = OBJECT_TYPES[obj["type"]]["size"]
-            for dx in range(size_x):
-                for dy in range(size_y):
-                    cells.add((obj["x"] + dx, obj["y"] + dy))
+            cells.update(object_manager._footprint_cells_of(obj))
         return cells
 
     @classmethod

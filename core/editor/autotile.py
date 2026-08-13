@@ -56,52 +56,9 @@ for tile_id, data in TILE_DATA.items():
     ] = int(tile_id)
 
 # --------------------------------------------------------------------
-# Construction des murs
-# --------------------------------------------------------------------
-
-def build_walls(logical_grid: List[List[int]]) -> None:
-
-    h = len(logical_grid)
-    if h == 0:
-        return
-
-    w = len(logical_grid[0])
-
-    # suppression anciens murs
-
-    for y in range(h):
-        for x in range(w):
-            if logical_grid[y][x] == WALL:
-                logical_grid[y][x] = EMPTY
-
-    # reconstruction
-
-    for y in range(h):
-        for x in range(w):
-
-            if logical_grid[y][x] != FLOOR:
-                continue
-
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-
-                    if dx == 0 and dy == 0:
-                        continue
-
-                    nx = x + dx
-                    ny = y + dy
-
-                    if (
-                        0 <= nx < w
-                        and 0 <= ny < h
-                        and logical_grid[ny][nx] == EMPTY
-                    ):
-                        logical_grid[ny][nx] = WALL
-
-# --------------------------------------------------------------------
-# Murs incrémentaux -- contrairement à build_walls (strip + rescan de toute
-# la grille), ces deux fonctions ne touchent jamais qu'au voisinage immédiat
-# de la case peinte/effacée. C'est ce que Dungeon.paint_cell utilise
+# Murs incrémentaux -- ces deux fonctions ne touchent jamais qu'au voisinage
+# immédiat de la case peinte/effacée (contrairement à un plein strip+rescan
+# de toute la grille). C'est ce que Dungeon.paint_cell utilise
 # désormais : peindre une case avec l'autotile actif ne doit murer QUE ses
 # propres voisins vides, jamais re-dériver les murs de tout le reste de la
 # salle (ce que build_walls ferait, visible dès qu'on avait peint du sol
@@ -410,22 +367,25 @@ def _resolve_pack_sprite(pack_name: str, value: str, x: int, y: int) -> int:
 # --------------------------------------------------------------------
 
 def _resolve_cell_sprite(
-    logical_grid: List[List[int]], x: int, y: int, floor_pack=None, wall_pack=None,
+    logical_grid: List[List[int]], x: int, y: int, theme_grid=None,
 ) -> int:
     """The sprite index for a single cell -- shared by resolve_sprite_grid's
     full-grid rebuild and resolve_sprite_grid_region's bounded one, so the
     two never risk drifting into computing a cell's sprite differently.
 
-    floor_pack/wall_pack (Dungeon.floor_theme/wall_theme, see dungeon.py)
-    default to None -- the exact pre-theme code path (select_sprite +
-    _pick_variant's interior-only variant) runs unchanged whenever both are
-    unset, which is every room until it explicitly opts into a theme."""
+    theme_grid (Dungeon.theme_grid, see dungeon.py) is a per-cell grid of
+    pack names (or None), same shape as logical_grid -- unlike the old
+    single floor_pack/wall_pack scalars, a cell reads only its OWN entry,
+    never a room-wide setting, which is what lets two cells of the same
+    room paint with different tilesets. None (the default, no theme_grid at
+    all, or that cell's own entry is None) runs the exact pre-theme code
+    path (select_sprite + _pick_variant's interior-only variant)."""
     logical = logical_grid[y][x]
     if logical == EMPTY:
         return -1
 
     neighbors = get_logical_neighbors(logical_grid, x, y)
-    pack_name = floor_pack if logical == FLOOR else wall_pack
+    pack_name = theme_grid[y][x] if theme_grid is not None else None
     if pack_name is not None:
         return _resolve_pack_sprite(pack_name, get_neighbor_value(neighbors), x, y)
 
@@ -435,8 +395,7 @@ def _resolve_cell_sprite(
 
 def resolve_sprite_grid(
     logical_grid: List[List[int]],
-    floor_pack=None,
-    wall_pack=None,
+    theme_grid=None,
 ):
 
     h = len(logical_grid)
@@ -447,7 +406,7 @@ def resolve_sprite_grid(
     w = len(logical_grid[0])
 
     return [
-        [_resolve_cell_sprite(logical_grid, x, y, floor_pack, wall_pack) for x in range(w)]
+        [_resolve_cell_sprite(logical_grid, x, y, theme_grid) for x in range(w)]
         for y in range(h)
     ]
 
@@ -471,8 +430,7 @@ def resolve_sprite_grid_region(
     center_x: int,
     center_y: int,
     radius: int = LOCAL_EDIT_SPRITE_RADIUS,
-    floor_pack=None,
-    wall_pack=None,
+    theme_grid=None,
 ) -> None:
     """Recomputes sprite_grid IN PLACE for every cell within `radius`
     (Chebyshev) of (center_x, center_y) instead of resolve_sprite_grid's
@@ -481,8 +439,8 @@ def resolve_sprite_grid_region(
     already have the same dimensions as `logical_grid` (true throughout
     Dungeon.paint_cell/destroy_area's lifetime -- only a load/resize ever
     changes dimensions, and those go through resolve_sprite_grid's full
-    rebuild instead, see Dungeon.resync_sprite_grid). floor_pack/wall_pack:
-    see _resolve_cell_sprite."""
+    rebuild instead, see Dungeon.resync_sprite_grid). theme_grid: see
+    _resolve_cell_sprite."""
     h = len(logical_grid)
     if h == 0:
         return
@@ -490,7 +448,7 @@ def resolve_sprite_grid_region(
 
     for y in range(max(0, center_y - radius), min(h, center_y + radius + 1)):
         for x in range(max(0, center_x - radius), min(w, center_x + radius + 1)):
-            sprite_grid[y][x] = _resolve_cell_sprite(logical_grid, x, y, floor_pack, wall_pack)
+            sprite_grid[y][x] = _resolve_cell_sprite(logical_grid, x, y, theme_grid)
 
 
 def _pick_variant(sprite_index: int, x: int, y: int) -> int:

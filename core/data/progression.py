@@ -6,6 +6,8 @@ one file so it's a one-line change to retune."""
 
 from __future__ import annotations
 
+import math
+
 MAX_LEVEL = 100
 
 # Cumulative XP required to REACH level n (n=1 costs 0). Quadratic so later
@@ -21,10 +23,22 @@ def xp_for_level(level: int) -> int:
 
 
 def level_for_xp(xp: int) -> int:
-    """Current level for a total XP amount, capped at MAX_LEVEL."""
-    level = 1
+    """Current level for a total XP amount, capped at MAX_LEVEL. Inverts
+    xp_for_level's own quadratic curve (F*(L-1)*L <= xp) directly via
+    math.isqrt -- an exact integer square root, so no floating-point
+    rounding risk -- instead of counting up level by level from 1. isqrt
+    lands within one level of the right answer by construction; the two
+    nudges below settle that last step against xp_for_level itself, the
+    actual source of truth for the boundary."""
+    if xp <= 0:
+        return 1
+    factor = XP_CURVE_FACTOR
+    level = (factor + math.isqrt(factor * factor + 4 * factor * xp)) // (2 * factor)
+    level = max(1, min(level, MAX_LEVEL))
     while level < MAX_LEVEL and xp >= xp_for_level(level + 1):
         level += 1
+    while level > 1 and xp < xp_for_level(level):
+        level -= 1
     return level
 
 

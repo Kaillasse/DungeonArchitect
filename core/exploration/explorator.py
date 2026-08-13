@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 
 import pygame
@@ -10,7 +11,9 @@ from core.editor.autotile import FLOOR
 from core.world.assembly import load_assembly, save_assembly, generate_assembly
 from core.data.ressources import ROOMS_DIRECTORY, next_new_donjon_name
 from core.world.entities import Player, PlayerRef
-from core.world.object_manager import ANIMAL_TYPES, ENEMY_TYPES, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES
+from core.world.object_manager import (
+    ANIMAL_TYPES, ENEMY_TYPES, npc_types, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES,
+)
 from core.exploration.player_session import PlayerSession
 from core.exploration.multiplayer_ui import MultiplayerPanelUI
 from core.exploration.network_session import NetworkSessionMixin
@@ -29,8 +32,16 @@ from core.world.home import home_room_name, wants_creator
 # Placed objects that are only ever markers during exploration -- a spawn
 # point and each animal's/enemy's placement cell -- and get replaced by a
 # live entity (the Player, an AnimalManager-owned Animal, an
-# EnemyManager-owned Enemy) instead of being drawn as a static object sprite.
-HIDDEN_OBJECT_TYPES = {"spawn", *ANIMAL_TYPES, *ENEMY_TYPES}
+# EnemyManager-owned Enemy, a NpcManager-owned Npc) instead of being drawn
+# as a static object sprite. A FUNCTION, not a frozen set -- unlike
+# ANIMAL_TYPES/ENEMY_TYPES (hand-authored, never change at runtime),
+# npc_types() is itself dynamic (an NPC type is registered entirely
+# in-session via the sprite editor -- see object_manager.npc_types' own
+# docstring), so freezing this whole set once at import would never see a
+# type registered afterward and its placed icon would never get hidden
+# during exploration. Call hidden_object_types() fresh at each use.
+def hidden_object_types():
+    return {"spawn", *ANIMAL_TYPES, *ENEMY_TYPES, *npc_types()}
 
 
 def _doorway_interior_offset(dungeon, grid_x, grid_y):
@@ -219,6 +230,13 @@ class Explorator(NetworkSessionMixin):
         # _viewport_rects/_update_camera/_render_viewport.
 
         self.camera = Camera(zoom=1.0)
+        # (world_x, world_y) or None -- the merged camera's own eased
+        # center point while 2+ local sessions share a room (see
+        # _smoothed_center_toward/_update_shared_camera). None until the
+        # first time that code path actually runs, so it can seed itself
+        # from wherever the players actually are instead of easing in from
+        # a made-up starting point.
+        self._shared_camera_center = None
 
         # Name of the single room currently loaded (open_room), or None in
         # assembly mode (open_donjon) -- mirrors Creator.current_room's own
@@ -268,6 +286,16 @@ class Explorator(NetworkSessionMixin):
         # animals/enemies placed in it.
         self.is_network_client = False
 
+        # The room this session should return to on death/victory (see
+        # _return_to_home) when self.settings has no local_player_name of
+        # its own to derive a home room name from -- set once by
+        # GameServer.__init__ at hosting time (self.current_room itself
+        # drifts to None the moment a generated dungeon is entered, see
+        # _enter_assembly, so it can't be relied on for this). None here
+        # covers every other case (solo play always has settings; a pure
+        # network client never calls _return_to_home at all).
+        self._home_room_name = None
+
     def open_room(self, name):
         """Load a specific room (chosen from the menu) and spawn every current
         session's player in it."""
@@ -282,6 +310,7 @@ class Explorator(NetworkSessionMixin):
         if not self.is_network_client:
             self.dungeon.spawn_animals()
             self.dungeon.spawn_enemies()
+            self.dungeon.spawn_npcs()
         for session in self.players.values():
             self._position_player_at_spawn(session)
             session.current_placed_room = None
@@ -332,6 +361,7 @@ class Explorator(NetworkSessionMixin):
             for room in self.assembly.rooms:
                 room.dungeon.spawn_animals()
                 room.dungeon.spawn_enemies()
+                room.dungeon.spawn_npcs()
 
         start_room = next(
             (room for room in self.assembly.rooms if room.has_spawn()),
@@ -808,12 +838,20 @@ class Explorator(NetworkSessionMixin):
             self._grant_xp(session, XP_DUNGEON_CLEAR)
         return True
 
-    def _is_walkable(self, rect, moving_session, debug_label=None):
+    def _is_walkable(self, rect, moving_session, debug_label=None, visible_animals=None, visible_enemies=None):
         """debug_label, only used when self.debug_mode is True, tags a
         printed message identifying which candidate move (e.g. "x"/"y") this
         check was for, so a blocked move's cause (wall vs. animal/enemy/
         another player) shows up in the console instead of only being
         inferred from what's on screen.
+
+        visible_animals/visible_enemies let a caller that's about to run
+        several of these checks back-to-back (both movement axes in
+        _resolve_movement_step, or a whole replay batch in
+        _reconcile_local_player) pass in one shared _visible_animals_global()/
+        _visible_enemies_global() snapshot instead of each check redoing that
+        same room-scan from scratch. Left None (the default) for any other
+        caller, which just computes its own snapshot as before.
 
         Checks each of the 4 corners individually (not a single aggregate
         is_rect_walkable call) so a corner that has crossed into void (see
@@ -838,12 +876,16 @@ class Explorator(NetworkSessionMixin):
             self._debug_log(debug_label, "wall")
             return False
 
-        for animal, animal_rect in self._visible_animals_global():
+        if visible_animals is None:
+            visible_animals = self._visible_animals_global()
+        for animal, animal_rect in visible_animals:
             if rect.colliderect(animal_rect):
                 self._debug_log(debug_label, f"animal({animal.animal_type} at {animal_rect.center})")
                 return False
 
-        for enemy, enemy_rect, _dungeon in self._visible_enemies_global():
+        if visible_enemies is None:
+            visible_enemies = self._visible_enemies_global()
+        for enemy, enemy_rect, _dungeon in visible_enemies:
             if rect.colliderect(enemy_rect):
                 self._debug_log(debug_label, f"enemy({enemy.enemy_type} at {enemy_rect.center})")
                 return False
@@ -961,9 +1003,46 @@ class Explorator(NetworkSessionMixin):
         not decided" notes -- whether a single player's death/fall should
         instead only remove that one player is an open Phase 2+ question).
         The real "monde de base" (étage system) doesn't exist yet, so this
-        returns to the main Menu for now, same as ECHAP."""
-        print(f"[game] {reason} -- retour au menu.")
-        self.game_manager.state = GameState.MENU
+        respawns everyone at home instead (see _return_to_home) rather than
+        detouring through the main Menu, which has no real purpose here --
+        this used to set game_manager.state = MENU, which also meant the
+        SERVER's own headless GameManager left EXPLORATION and
+        serve_forever's loop treated that as "stop hosting", ending the
+        whole session for every connected player over one death. Staying
+        in EXPLORATION and just reopening home keeps the session (and, for
+        a hosted game, every other player's connection) alive instead."""
+        print(f"[game] {reason} -- retour au home.")
+        self._return_to_home()
+
+    def _return_to_home(self):
+        """Reopens home, staying in EXPLORATION -- shared by _game_over
+        (death/falling out of the map) and clicking through the victory
+        banner (see run()'s/run_networked's MOUSEBUTTONDOWN-while-victory
+        handling, and GameServer._apply_message's MSG_RETURN_HOME for why
+        a network client can't just do this locally). open_room already
+        resets victory/every session's health/spawn position as part of
+        loading a room, which is exactly what both callers need.
+
+        Solo/local play (self.settings set, a real local_player_name) goes
+        to that player's own home by name. The server -- self.settings is
+        None, _HeadlessGameManager has no notion of a single "local"
+        player at all -- only ever hosts a session that started from home
+        in the first place (start_hosting's own hard requirement), but
+        self.current_room itself is NOT a reliable stand-in for "home"
+        there: it's reset to None the moment a generated dungeon is
+        entered (_enter_assembly), which is exactly when death/victory
+        actually happen in practice. self._home_room_name (set once by
+        GameServer.__init__ at hosting time, before current_room could
+        ever have drifted) is the server's own answer to that. Falls back
+        to self.current_room only if neither of those applies (e.g. dying
+        in a single-room test session opened straight from the menu,
+        never through home at all)."""
+        if self.settings is not None and self.settings.local_player_name:
+            self.open_room(home_room_name(self.settings.local_player_name))
+        elif self._home_room_name is not None:
+            self.open_room(self._home_room_name)
+        elif self.current_room is not None:
+            self.open_room(self.current_room)
 
     def _update_current_room(self, session):
         """Edge-triggered room switch: session's player stepping onto a
@@ -1021,6 +1100,7 @@ class Explorator(NetworkSessionMixin):
                 print(f"Spawn trouvé dans : {room.stem}")
                 self.dungeon.spawn_animals()
                 self.dungeon.spawn_enemies()
+                self.dungeon.spawn_npcs()
                 return True
 
         print("Aucune salle ne contient de spawn.")
@@ -1115,7 +1195,7 @@ class Explorator(NetworkSessionMixin):
             SoundManager().play(f"player_footstep_{session.footstep_alt + 1}")
             session.footstep_alt = 1 - session.footstep_alt
 
-    def _resolve_movement_step(self, session, direction, running, dt, predicting=False, advance_animation=True):
+    def _resolve_movement_step(self, session, direction, running, dt, predicting=False, advance_animation=True, visible_animals=None, visible_enemies=None):
         """The collision-tested core of moving a player, shared by the real
         per-frame simulation (_simulate_movement, predicting=False) and Phase
         4's client-side prediction/replay (_predict_local_movement/
@@ -1141,8 +1221,22 @@ class Explorator(NetworkSessionMixin):
         real elapsed frame silently piles up extra animation time and was a
         real, visible bug (idle animation jumping/skipping frames). Real
         per-frame animation advancement only ever happens once, from
-        _predict_local_movement's own (non-replayed) call."""
+        _predict_local_movement's own (non-replayed) call.
+
+        visible_animals/visible_enemies (see _is_walkable) are computed once
+        here if not supplied, then shared by both the X and Y candidate move
+        below instead of each _is_walkable call redoing its own room-wide
+        animal/enemy scan -- callers running several of these steps
+        back-to-back (the per-frame session loop in update(), or
+        _reconcile_local_player's replay of buffered inputs) can pass one
+        shared snapshot in to avoid repeating that scan per session/replay
+        too."""
         player = session.player
+
+        if visible_animals is None:
+            visible_animals = self._visible_animals_global()
+        if visible_enemies is None:
+            visible_enemies = self._visible_enemies_global()
 
         if direction.length_squared() > 0:
 
@@ -1163,12 +1257,14 @@ class Explorator(NetworkSessionMixin):
             # boundary of whatever room happens to own the active floor.
             future_hitbox = player.get_hitbox()
             future_hitbox.x += movement.x
-            if self._is_walkable(future_hitbox, session, debug_label=None if predicting else "x"):
+            if self._is_walkable(future_hitbox, session, debug_label=None if predicting else "x",
+                                  visible_animals=visible_animals, visible_enemies=visible_enemies):
                 player.position.x += movement.x
 
             future_hitbox = player.get_hitbox()
             future_hitbox.y += movement.y
-            if self._is_walkable(future_hitbox, session, debug_label=None if predicting else "y"):
+            if self._is_walkable(future_hitbox, session, debug_label=None if predicting else "y",
+                                  visible_animals=visible_animals, visible_enemies=visible_enemies):
                 player.position.y += movement.y
 
             if not predicting:
@@ -1203,8 +1299,9 @@ class Explorator(NetworkSessionMixin):
         if advance_animation:
             player.update(dt)
 
-    def _simulate_movement(self, session, dt):
-        self._resolve_movement_step(session, session.input.move_direction, session.input.running, dt)
+    def _simulate_movement(self, session, dt, visible_animals=None, visible_enemies=None):
+        self._resolve_movement_step(session, session.input.move_direction, session.input.running, dt,
+                                     visible_animals=visible_animals, visible_enemies=visible_enemies)
 
     def _grant_xp(self, session, amount):
         """Awards XP earned from an already-authoritative event (enemy/animal
@@ -1351,13 +1448,59 @@ class Explorator(NetworkSessionMixin):
 
     CAMERA_FIT_PADDING_TILES = 4  # margin kept around every player's bounding box when the merged camera is zoomed to fit
 
-    def _update_shared_camera(self, positions):
+    # Convergence rate (per second) for the merged camera's zoom-to-fit AND
+    # its center point -- see _update_shared_camera's own note on why both
+    # are smoothed rather than snapped. Both the target fit-zoom and the
+    # players' midpoint shift continuously as they move relative to each
+    # other, and applying either directly every single frame made the
+    # shared camera visibly judder in ordinary play (reported as "laggy"/
+    # "sautillante" on the shared/merged camera) instead of reading as one
+    # deliberate camera move. Higher = snappier/less smoothing; tuned to
+    # still feel responsive within well under a second, not a slow drift.
+    CAMERA_SMOOTHING_RATE = 8.0
+
+    def _smoothed_zoom_toward(self, target_zoom, dt):
+        """Exponential ease of self.camera.zoom toward target_zoom, frame-
+        rate independent (uses dt rather than a fixed per-frame step, so
+        this converges at the same real-world speed regardless of the
+        current framerate -- see CAMERA_SMOOTHING_RATE). dt <= 0 (a
+        degenerate/first frame) snaps directly rather than risking a
+        divide-by-zero-flavored no-op."""
+        if dt <= 0:
+            return target_zoom
+        blend = 1.0 - math.exp(-self.CAMERA_SMOOTHING_RATE * dt)
+        return self.camera.zoom + (target_zoom - self.camera.zoom) * blend
+
+    def _smoothed_center_toward(self, target_x, target_y, dt):
+        """Same exponential ease as _smoothed_zoom_toward, applied to the
+        merged camera's center point instead of its zoom -- the players'
+        midpoint shifts continuously as they move relative to each other,
+        and _update_shared_camera used to center_on() it directly every
+        frame, which juddered the same way the zoom did before it got this
+        same treatment (see CAMERA_SMOOTHING_RATE's own note). Lazily
+        seeded from the very first target it's ever given (self.
+        _shared_camera_center starts None) so the first frame two players
+        share a room doesn't visibly slide in from some arbitrary prior
+        point -- and dt <= 0 re-seeds the same way, for the same reason
+        _smoothed_zoom_toward snaps outright rather than risking a
+        divide-by-zero-flavored no-op."""
+        if self._shared_camera_center is None or dt <= 0:
+            self._shared_camera_center = (target_x, target_y)
+            return self._shared_camera_center
+        blend = 1.0 - math.exp(-self.CAMERA_SMOOTHING_RATE * dt)
+        cx, cy = self._shared_camera_center
+        self._shared_camera_center = (cx + (target_x - cx) * blend, cy + (target_y - cy) * blend)
+        return self._shared_camera_center
+
+    def _update_shared_camera(self, positions, dt):
         """Zoom-to-fit self.camera across `positions` (1 or more world
         points) -- the merged view's camera. A single position is a plain
         follow (zoom untouched, manual mouse-wheel zoom fully respected,
-        byte-for-byte solo behavior); 2+ positions center on their midpoint
-        and derive zoom from their bounding box (+ padding) so nobody goes
-        off-screen, clamped to the camera's own min/max -- this *overrides*
+        byte-for-byte solo behavior); 2+ positions derive a TARGET center
+        (their midpoint) and a TARGET zoom (from their bounding box +
+        padding, so nobody goes off-screen, clamped to the camera's own
+        min/max), both eased toward rather than snapped (see
+        _smoothed_zoom_toward/_smoothed_center_toward) -- this *overrides*
         manual zoom for as long as the merge is active. This is the
         original Phase 2 zoom-to-fit camera, now used only while
         _merged_view is True instead of unconditionally."""
@@ -1382,17 +1525,19 @@ class Explorator(NetworkSessionMixin):
 
         zoom_x = self.screen.get_width() / span_x
         zoom_y = self.screen.get_height() / span_y
-        self.camera.zoom = max(self.camera.min_zoom, min(self.camera.max_zoom, min(zoom_x, zoom_y)))
-        self.camera.center_on(center_x, center_y, self.screen.get_width(), self.screen.get_height())
+        target_zoom = max(self.camera.min_zoom, min(self.camera.max_zoom, min(zoom_x, zoom_y)))
+        self.camera.zoom = self._smoothed_zoom_toward(target_zoom, dt)
+        smoothed_x, smoothed_y = self._smoothed_center_toward(center_x, center_y, dt)
+        self.camera.center_on(smoothed_x, smoothed_y, self.screen.get_width(), self.screen.get_height())
 
-    def _update_camera(self):
+    def _update_camera(self, dt):
         """Merged (self.camera, zoom-to-fit) or real split-screen (each
         local session's own camera, simple follow) depending on
         _merged_view -- see both for details."""
         local_sessions = self._local_sessions()
 
         if self._merged_view():
-            self._update_shared_camera([session.player.position for session in local_sessions])
+            self._update_shared_camera([session.player.position for session in local_sessions], dt)
             return
 
         viewport_rects = self._viewport_rects()
@@ -1490,6 +1635,19 @@ class Explorator(NetworkSessionMixin):
         # (see _check_dungeon_entrance's sync barrier), only pauses itself
         # (idle animation ticking) -- everyone else (other sessions,
         # animals/enemies/the world) keeps going.
+        #
+        # One shared visible-animal/enemy snapshot for the whole loop below
+        # (see _resolve_movement_step) instead of every session's own X/Y
+        # move recomputing the same room-wide scan. A session crossing a
+        # door mid-loop (_update_current_room) can technically add a floor
+        # to the active set after this snapshot was taken, so a session
+        # processed later in the same frame could miss one frame's worth of
+        # collision against whatever's on that newly-entered floor --
+        # accepted the same way _resolve_player_attacks below already
+        # shares one frame-stale snapshot across every session's attack.
+        # Self-corrects the very next frame either way.
+        visible_animals = self._visible_animals_global()
+        visible_enemies = self._visible_enemies_global()
         for session in self.players.values():
             if session.inventory_open:
                 session.update_frozen(dt)
@@ -1508,7 +1666,7 @@ class Explorator(NetworkSessionMixin):
                     session.update_frozen(dt)
                     continue
             self._apply_requested_actions(session)
-            self._simulate_movement(session, dt)
+            self._simulate_movement(session, dt, visible_animals=visible_animals, visible_enemies=visible_enemies)
 
         self._resolve_dungeon_transitions()
 
@@ -1536,7 +1694,7 @@ class Explorator(NetworkSessionMixin):
         # Camera suit le joueur
         # -----------------------------
 
-        self._update_camera()
+        self._update_camera(dt)
 
     # ------------------------------------------------------
 
@@ -1572,6 +1730,9 @@ class Explorator(NetworkSessionMixin):
 
         self.multiplayer_panel.update(self.game_manager.network_client is not None)
         self.multiplayer_panel.render(self.screen, self)
+
+        if self.game_manager.settings_panel.is_open:
+            self.game_manager.settings_panel.render(self.screen)
 
         pygame.display.flip()
 
@@ -1702,33 +1863,36 @@ class Explorator(NetworkSessionMixin):
                 target, camera,
                 active_floor=floor,
                 player_world_pos=center_world,
-                hide_object_types=HIDDEN_OBJECT_TYPES,
+                hide_object_types=hidden_object_types(),
                 skip_active_floor_foreground=True,
                 skip_active_floor_animals=True,
                 skip_active_floor_enemies=True,
+                skip_active_floor_npcs=True,
                 show_grid=self.debug_mode,
             )
 
             self.assembly.render_active_floor_entities(target, camera, floor, players_on_floor)
 
             self.assembly.render_active_floor_foreground(
-                target, camera, floor, hide_object_types=HIDDEN_OBJECT_TYPES,
+                target, camera, floor, hide_object_types=hidden_object_types(),
             )
 
         else:
 
             self.dungeon.render(
                 target, camera,
-                hide_object_types=HIDDEN_OBJECT_TYPES,
+                hide_object_types=hidden_object_types(),
                 skip_foreground_objects=True,
                 skip_animals=True,
                 skip_enemies=True,
+                skip_npcs=True,
                 show_grid=self.debug_mode,
             )
 
             entities = (
                 list(self.dungeon.animal_manager.animals)
                 + list(self.dungeon.enemy_manager.enemies)
+                + list(self.dungeon.npc_manager.npcs)
                 + [
                     other.player for other in self.players.values()
                     if other.player_id not in self.dungeon_entrance_ready
@@ -1738,7 +1902,7 @@ class Explorator(NetworkSessionMixin):
             for entity in entities:
                 entity.draw(target, camera)
 
-            self.dungeon.render_foreground(target, camera, hide_object_types=HIDDEN_OBJECT_TYPES)
+            self.dungeon.render_foreground(target, camera, hide_object_types=hidden_object_types())
 
     def _draw_victory_banner(self):
         """The only win condition that exists right now (see
@@ -1911,6 +2075,16 @@ class Explorator(NetworkSessionMixin):
                 if shared_result == "handled":
                     continue
 
+                if self.game_manager.settings_panel.is_open:
+                    # Fully modal, same treatment as Creator's chest/role/
+                    # autotile_theme panels -- a pure local-settings
+                    # overlay (no server round-trip needed, unlike victory),
+                    # so this works identically whether this Explorator is
+                    # solo, hosting, or -- see run_networked's own copy of
+                    # this same check -- a network client.
+                    self.game_manager.settings_panel.handle_event(event)
+                    continue
+
                 if self.multiplayer_panel.is_open:
                     if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                         self.multiplayer_panel.close()
@@ -1925,6 +2099,24 @@ class Explorator(NetworkSessionMixin):
                             running = False  # let GameManager's dispatch route into run_networked
                         continue
                     continue  # swallow everything else (movement, TAB...) while open
+
+                local_session = self.players[self._local_player_id]
+                if (
+                    local_session.inventory_open
+                    and event.type == pygame.MOUSEBUTTONDOWN
+                    and local_session.inventory_panel.handle_click(self.screen, event.pos)
+                ):
+                    self.game_manager.settings_panel.open()
+                    continue
+
+                if self.victory and event.type == pygame.MOUSEBUTTONDOWN:
+                    # Solo/local co-op IS the authoritative simulation
+                    # itself, so this can just act directly -- see
+                    # run_networked's own version, which has to ask the
+                    # server instead (victory/the world reset it triggers
+                    # are shared, whole-session state).
+                    self._return_to_home()
+                    continue
 
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_m:
                     if self._is_home_room():
