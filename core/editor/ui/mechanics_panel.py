@@ -35,6 +35,14 @@ nothing. The data model stays symmetric (object_manager still lets
 "capabilities" be set on any type, cards.py still bridges "effects" for
 OBJECT_TYPES cards too) for when a consumer eventually exists -- just no UI
 for it here yet.
+
+A mob (animal/enemy) OBJECT_TYPES card gets its own read-only branch
+(is_mob/_render_mob_info) instead of the ordinary blocks_movement/
+cell_modes/interactable/lockable rows -- those don't apply to a mob at all
+(a mob was showing the exact same checkboxes as a decorative floor object
+before this branch existed). Shows Etats (its fixed animation set) and, for
+an enemy, its stats/loot -- nothing editable yet, since no register_mob_type
+write API exists.
 """
 
 import pygame
@@ -42,7 +50,7 @@ import pygame
 from core.editor.ui.mixins import _ResizableCornerMixin
 from core.ui.widgets import BorderManager, Stepper
 from core.world.object_manager import (
-    OBJECT_TYPES, ITEM_DEFINITIONS, ARCHETYPES, CELL_MODES,
+    OBJECT_TYPES, ITEM_DEFINITIONS, ARCHETYPES, CELL_MODES, ENEMY_ANIMATIONS,
     update_type_mechanics, update_item_overrides, update_item, is_builtin_item,
 )
 from core.data.cards import resolve_card_sprite
@@ -93,6 +101,17 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.cell_modes_grid = None
         self.interactable = False
         self.lockable = False
+
+        # Mob (animal/enemy) cards are OBJECT_TYPES entries too, but none of
+        # the fields above apply to one (a mob was showing the exact same
+        # "Bloque le mouvement"/"Interagible" checkboxes as a decorative
+        # floor object, which made no sense) -- read-only summary instead,
+        # see open()/_render_mob_info. No write API for mob stats exists
+        # (no register_mob_type), so there is nothing to save here yet.
+        self.is_mob = False
+        self.mob_kind = None
+        self.mob_states = ()
+        self.mob_stats = {}
 
         # Capacites/Effets -- ITEM cards only (self.item_id), see module
         # docstring for why. "capabilities"/"effects" vocabulary is the
@@ -170,6 +189,20 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.item_id = None
         self.name = config.get("name", card_id)
         self.icon = resolve_card_sprite(card_id)
+
+        self.is_mob = bool(config.get("animal") or config.get("enemy"))
+        if self.is_mob:
+            self.mob_kind = "enemy" if config.get("enemy") else "animal"
+            # Fixed sets -- animal/enemy are always fully hand-authored
+            # Python entries, never partially registered like a custom
+            # PNJ, so there's no per-card variation to read here, unlike
+            # config.get("stats") below (skeleton1 vs skeleton2 differ).
+            self.mob_states = ENEMY_ANIMATIONS if self.mob_kind == "enemy" else ("idle", "move")
+            self.mob_stats = config.get("stats", {})
+        else:
+            self.mob_kind = None
+            self.mob_states = ()
+            self.mob_stats = {}
 
         asset = config["asset"]
         if isinstance(asset, dict):
@@ -355,7 +388,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self.clear()
             return None
 
-        if self.type_id is not None:
+        if self.type_id is not None and not self.is_mob:
             if self.archetype in CELL_MODES_ARCHETYPES:
                 if not self._is_multi_cell():
                     if self.archetype == "sol" and self._blocks_rect.collidepoint(event.pos):
@@ -407,7 +440,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                     self.heal_amount = new_amount
                     return None
 
-        if self._save_rect.collidepoint(event.pos):
+        if not self.is_mob and self._save_rect.collidepoint(event.pos):
             return self._try_save()
 
         return None
@@ -432,30 +465,34 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             screen.blit(scaled, icon_rect.topleft)
 
         if self.type_id is not None:
-            type_label = self.small_font.render(f"Archetype : {ARCHETYPES.get(self.archetype, {}).get('label', self.archetype)}", True, (200, 200, 200))
-            screen.blit(type_label, (self.x + 80, self.y + 60))
+            if self.is_mob:
+                self._render_mob_info(screen)
+            else:
+                type_label = self.small_font.render(f"Archetype : {ARCHETYPES.get(self.archetype, {}).get('label', self.archetype)}", True, (200, 200, 200))
+                screen.blit(type_label, (self.x + 80, self.y + 60))
 
-            if self.archetype in CELL_MODES_ARCHETYPES:
-                if not self._is_multi_cell():
-                    if self.archetype == "sol":
-                        check_label = "[x] Bloque le mouvement" if self.blocks_movement else "[ ] Bloque le mouvement"
-                        self.border.draw_centered_label(screen, self._blocks_rect, self.font, check_label)
-                else:
-                    self._render_cell_modes_grid(screen)
+                if self.archetype in CELL_MODES_ARCHETYPES:
+                    if not self._is_multi_cell():
+                        if self.archetype == "sol":
+                            check_label = "[x] Bloque le mouvement" if self.blocks_movement else "[ ] Bloque le mouvement"
+                            self.border.draw_centered_label(screen, self._blocks_rect, self.font, check_label)
+                    else:
+                        self._render_cell_modes_grid(screen)
 
-            interact_label = "[x] Interagible" if self.interactable else "[ ] Interagible"
-            self.border.draw_centered_label(screen, self._interactable_rect, self.font, interact_label)
+                interact_label = "[x] Interagible" if self.interactable else "[ ] Interagible"
+                self.border.draw_centered_label(screen, self._interactable_rect, self.font, interact_label)
 
-            if self.archetype == "porte":
-                lock_label = "[x] Porte verrouillable" if self.lockable else "[ ] Porte verrouillable"
-                self.border.draw_centered_label(screen, self._lockable_rect, self.font, lock_label)
+                if self.archetype == "porte":
+                    lock_label = "[x] Porte verrouillable" if self.lockable else "[ ] Porte verrouillable"
+                    self.border.draw_centered_label(screen, self._lockable_rect, self.font, lock_label)
         else:
             item_label = self.small_font.render("Item d'inventaire", True, (200, 200, 200))
             screen.blit(item_label, (self.x + 80, self.y + 60))
             self._render_capabilities(screen)
             self._render_effects(screen)
 
-        self.border.draw_centered_label(screen, self._save_rect, self.font, "Enregistrer")
+        if not self.is_mob:
+            self.border.draw_centered_label(screen, self._save_rect, self.font, "Enregistrer")
 
         if self.status_text:
             status = self.small_font.render(self.status_text, True, (220, 220, 120))
@@ -502,6 +539,48 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             amount_label = self.small_font.render("Montant (PV)", True, (200, 200, 200))
             screen.blit(amount_label, (stepper.minus_rect.x, stepper.minus_rect.y - amount_label.get_height() - 2))
             stepper.render(screen, self.border, self.small_font, self.heal_amount)
+
+    def _render_mob_info(self, screen):
+        """Read-only mob (animal/enemy) summary -- see is_mob's own comment
+        in __init__ for why this exists instead of falling through to the
+        object-mechanics rows above (they don't apply to a mob at all)."""
+        kind_label = "Ennemi" if self.mob_kind == "enemy" else "Animal"
+        type_label = self.small_font.render(f"Type : Mob ({kind_label})", True, (200, 200, 200))
+        screen.blit(type_label, (self.x + 80, self.y + 60))
+
+        states_label = self.small_font.render(f"Etats : {', '.join(self.mob_states)}", True, (200, 200, 200))
+        screen.blit(states_label, (self.x + 20, self.y + 110))
+
+        next_y = self.y + 136
+        if self.mob_stats:
+            stats_line = (
+                f"PV {self.mob_stats.get('health', '?')} | "
+                f"Vitesse {self.mob_stats.get('move_speed', '?')} | "
+                f"Aggro {self.mob_stats.get('aggro_range', '?')} | "
+                f"Portee {self.mob_stats.get('attack_range', '?')}"
+            )
+            stats_label = self.small_font.render(stats_line, True, (200, 200, 200))
+            screen.blit(stats_label, (self.x + 20, next_y))
+            next_y += 22
+
+            loot = self.mob_stats.get("loot")
+            if loot:
+                loot_line = "Loot : " + ", ".join(f"{currency} x{count}" for currency, count in loot.items())
+                loot_label = self.small_font.render(loot_line, True, (200, 200, 200))
+                screen.blit(loot_label, (self.x + 20, next_y))
+                next_y += 22
+
+            item_loot = self.mob_stats.get("item_loot")
+            if item_loot:
+                item_loot_line = "Loot objet : " + ", ".join(f"{item_id} x{count}" for item_id, count in item_loot.items())
+                item_loot_label = self.small_font.render(item_loot_line, True, (200, 200, 200))
+                screen.blit(item_loot_label, (self.x + 20, next_y))
+                next_y += 22
+
+        no_edit = self.small_font.render(
+            "Lecture seule -- pas encore de creation/edition de mob custom.", True, (150, 150, 150)
+        )
+        screen.blit(no_edit, (self.x + 20, next_y + 8))
 
     def _render_cell_modes_grid(self, screen):
         """Same 3-state grid as SpriteEditorPanelUI's own (see that

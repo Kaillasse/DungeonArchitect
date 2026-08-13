@@ -321,11 +321,12 @@ class CardPanelUI(_ResizableCornerMixin):
                     f"Contenu du pack : {sum(props['manifest'].values())} cartes",
                 ]
             else:
+                effects_text = ", ".join(effect.get("kind", "?") for effect in card.effects) if card.effects else "aucun"
                 lines = [
                     f"Nom : {card.name}",
                     f"Type : {card.card_type}",
                     f"Images : {len(card.images)}",
-                    f"Effets : {len(card.effects)}",
+                    f"Effets : {effects_text}",
                 ]
                 if card.capabilities:
                     lines.append(f"Capacites : {', '.join(card.capabilities)}")
