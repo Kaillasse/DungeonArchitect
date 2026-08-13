@@ -1,5 +1,5 @@
 from core.world.object_manager import ObjectManager
-from core.world.entities import AnimalManager, EnemyManager, NpcManager, PickupManager, ProjectileManager
+from core.world.entities import AnimalManager, EnemyManager, NpcManager, PickupManager, ProjectileManager, EffectManager
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
 from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
@@ -88,6 +88,7 @@ class Dungeon:
         self.npc_manager = NpcManager(self)
         self.pickup_manager = PickupManager(self)
         self.projectile_manager = ProjectileManager(self)
+        self.effect_manager = EffectManager(self)
         self.renderer = WorldRenderer()
         self.save = SaveManager()
 
@@ -200,15 +201,16 @@ class Dungeon:
                 elif new == WALL:
                     self.theme_grid[y][x] = self.wall_theme
 
-    def update(self, dt: float, player_refs=()) -> None:
+    def update(self, dt: float, player_refs=(), magnet_radius: float = 0, room_offset=(0, 0)) -> None:
         self.object_manager.update(dt)
         self.animal_manager.update(dt, player_refs=player_refs)
         self.enemy_manager.update(dt, player_refs=player_refs)
         self.npc_manager.update(dt, player_refs=player_refs)
-        self.pickup_manager.update(dt)
-        self.projectile_manager.update(dt, player_refs=player_refs)
+        self.pickup_manager.update(dt, player_refs=player_refs, magnet_radius=magnet_radius)
+        self.projectile_manager.update(dt, player_refs=player_refs, room_offset=room_offset)
+        self.effect_manager.update(dt)
 
-    def destroy_area(self, center_x: int, center_y: int, radius_tiles: int) -> None:
+    def destroy_area(self, center_x: int, center_y: int, radius_tiles: int) -> list:
         """Carves a circular hole into the terrain -- both FLOOR and WALL
         cells within `radius_tiles` of (center_x, center_y) become EMPTY.
         Unlike paint_cell, this never re-walls the boundary afterwards
@@ -216,14 +218,20 @@ class Dungeon:
         explosion (see ProjectileManager) is meant to leave a permanent gap,
         not perform an edit. prune_invalid() then drops any object (a vase,
         a torch, a gate...) that no longer sits on a cell its placement rule
-        allows, same as any other terrain edit."""
+        allows, same as any other terrain edit. Returns the (x, y) grid
+        cells actually cleared (already-EMPTY cells in the circle are
+        skipped, not double-counted) -- ProjectileManager uses this to spawn
+        one destruction VFX per real cell, not per cell of the theoretical
+        radius."""
+        destroyed = []
         for dy in range(-radius_tiles, radius_tiles + 1):
             for dx in range(-radius_tiles, radius_tiles + 1):
                 if dx * dx + dy * dy > radius_tiles * radius_tiles:
                     continue
                 x, y = center_x + dx, center_y + dy
-                if 0 <= x < self.width and 0 <= y < self.height:
+                if 0 <= x < self.width and 0 <= y < self.height and self.logical_grid[y][x] != EMPTY:
                     self.logical_grid[y][x] = EMPTY
+                    destroyed.append((x, y))
 
         # Same bounded-region update as paint_cell -- the carved circle
         # itself is exactly radius_tiles, +1 more for the cardinal-neighbor
@@ -234,6 +242,24 @@ class Dungeon:
         )
         self.object_manager.prune_invalid()
         self.terrain_version += 1
+        return destroyed
+
+    def destroy_wall_cell(self, x: int, y: int) -> bool:
+        """Single-cell destruction for the player's own melee attack (see
+        Explorator._resolve_player_attacks) -- unlike destroy_area, only
+        ever clears a WALL cell, never FLOOR: a punch shouldn't carve a pit
+        into open ground, only break down an actual wall in front of the
+        player. Returns whether a wall was actually there to break."""
+        if not (0 <= x < self.width and 0 <= y < self.height) or self.logical_grid[y][x] != WALL:
+            return False
+        self.logical_grid[y][x] = EMPTY
+        resolve_sprite_grid_region(
+            self.logical_grid, self.sprite_grid, x, y, radius=1,
+            theme_grid=self.theme_grid,
+        )
+        self.object_manager.prune_invalid()
+        self.terrain_version += 1
+        return True
 
     def spawn_animals(self) -> None:
         """(Re)build the live wandering Animal entities for this room's placed
@@ -336,6 +362,7 @@ class Dungeon:
             self.npc_manager.draw(screen, camera)
         self.pickup_manager.draw(screen, camera)
         self.projectile_manager.draw(screen, camera)
+        self.effect_manager.draw(screen, camera)
 
     def render_foreground(self, screen, camera, hide_object_types=None):
         """Objects flagged draw_after_player (e.g. torch), meant to be drawn after the player sprite."""

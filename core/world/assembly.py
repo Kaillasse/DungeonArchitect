@@ -348,7 +348,7 @@ class DungeonAssembly:
             )
             target_room.dungeon.object_manager._open_if_blocking(target, target_room.dungeon.object_manager)
 
-    def update(self, dt, player_refs_by_floor=None):
+    def update(self, dt, player_refs_by_floor=None, magnet_radius=0):
         """player_refs_by_floor ({floor: [PlayerRef, ...]}) only ever gets
         passed down to rooms on a matching floor -- an animal/enemy on
         another floor has no business colliding (or, for enemies, aggroing)
@@ -399,7 +399,10 @@ class DungeonAssembly:
                 PlayerRef(ref.player, ref.hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size))
                 for ref in refs_on_floor
             ]
-            room.dungeon.update(dt, player_refs=local_refs)
+            room.dungeon.update(
+                dt, player_refs=local_refs, magnet_radius=magnet_radius,
+                room_offset=(room.offset_x * tile_size, room.offset_y * tile_size),
+            )
 
     # ------------------------------------------------------------------
     # Rendering -- the active floor is drawn normally (full tiles/objects/

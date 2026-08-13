@@ -1085,6 +1085,33 @@ def load_explosion_frames():
     return _explosion_frames_cache
 
 
+# Destruction VFX (assets/effect/star/star.png) -- a single 128x32 sheet,
+# 4 frames of 32x32 sliced left-to-right, same convention as
+# load_dynamite_frames. Played once by core.world.entities.DestructionSpark
+# while homing toward whichever player destroyed the tile (melee) or the
+# nearest player in the room (explosion) -- see Dungeon.destroy_area/
+# destroy_wall_cell's own callers.
+STAR_FOLDER = "effect/star"
+STAR_FILENAME = "star.png"
+STAR_FRAME_SIZE = 32
+STAR_FRAME_COUNT = 4
+
+
+_star_frames_cache = None
+
+
+def load_star_frames():
+    """Cached at module level, same reasoning as load_dynamite_frames/
+    load_explosion_frames -- every destroyed tile would otherwise re-read
+    this sheet from disk."""
+    global _star_frames_cache
+    if _star_frames_cache is None:
+        sheet = pygame.image.load(PROJECT_ROOT / "assets" / STAR_FOLDER / STAR_FILENAME).convert_alpha()
+        size = STAR_FRAME_SIZE
+        _star_frames_cache = [sheet.subsurface((i * size, 0, size, size)).copy() for i in range(STAR_FRAME_COUNT)]
+    return _star_frames_cache
+
+
 def make_item(item_id):
     """Builds a core.world.inventory.Item from ITEM_DEFINITIONS -- kept here
     (not in inventory.py) since ITEM_DEFINITIONS lives alongside every other

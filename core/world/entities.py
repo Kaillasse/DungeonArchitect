@@ -10,7 +10,7 @@ from core.data.ressources import WORLD_SCALE, TILE_SIZE
 from core.data.sound_manager import SoundManager
 from core.world.object_manager import (
     ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, load_enemy_frames, load_currency_frames,
-    load_dynamite_frames, load_explosion_frames,
+    load_dynamite_frames, load_explosion_frames, load_star_frames,
     OBJECT_TYPES, load_npc_frames, npc_types, NPC_DIRECTIONS,
 )
 
@@ -1184,6 +1184,20 @@ def _advance_frame_once(entity, dt, duration, frame_count):
     return True
 
 
+def _move_toward(position, target, speed, dt):
+    """Moves `position` at most `speed*dt` toward `target`, without
+    overshooting -- the one magnetism calculation shared by
+    DestructionSpark (destroyed-tile VFX homing to whoever caused it) and
+    PickupManager's own currency/item homing (see its update()), so both
+    "pull toward the player" behaviors move identically instead of each
+    hand-rolling their own easing."""
+    delta = target - position
+    distance = delta.length()
+    if distance <= speed * dt or distance == 0:
+        return pygame.Vector2(target)
+    return position + delta.normalize() * speed * dt
+
+
 class Pickup:
     """A currency pickup dropped by a dead enemy (see Explorator._spawn_loot)
     -- never saved to room.json (created at runtime, not authored), never
@@ -1287,6 +1301,10 @@ class PickupManager:
     only ever come from Explorator._spawn_loot calling spawn()/spawn_item()
     directly at an enemy's death position, and are never persisted."""
 
+    # Slower than DestructionSpark.HOMING_SPEED -- a gentle "pull toward the
+    # player" once in range, not a projectile snapping onto them instantly.
+    MAGNET_SPEED = 140
+
     def __init__(self, dungeon):
         self.dungeon = dungeon
         self.pickups = []
@@ -1298,9 +1316,51 @@ class PickupManager:
     def spawn_item(self, item, slot, world_x, world_y):
         self.item_pickups.append(ItemPickup(item, slot, world_x, world_y))
 
-    def update(self, dt):
+    def _nearest_target_within(self, pickup, player_refs, magnet_radius):
+        """The closest player_refs position within magnet_radius of `pickup`,
+        or None -- magnet_radius <= 0 (no players in the room, or the caller
+        didn't pass one, see Dungeon.update's own default) always returns
+        None, same as "no magnetism" outright rather than a radius of zero
+        somehow still matching a player standing exactly on top of it.
+
+        Uses ref.hitbox.center, NOT ref.player.position -- pickup.position
+        lives in room-LOCAL coordinates (see PickupManager.spawn's callers,
+        always local_x/local_y), but Player.position is always GLOBAL (see
+        Explorator._use_interact_item's own local_x/y conversion). ref.hitbox
+        is already shifted to this room's local space by whoever built
+        player_refs (Assembly.update for a multi-room dungeon, or the
+        single-Dungeon case where local==global since there's no offset) --
+        comparing it directly to pickup.position is correct in both cases
+        with no extra conversion needed, unlike DestructionSpark's
+        target_getter (which must track a live Player across future frames,
+        not just this one, so it can't reuse this same shortcut)."""
+        if magnet_radius <= 0:
+            return None
+        best = None
+        best_dist_sq = magnet_radius * magnet_radius
+        for ref in player_refs:
+            target = pygame.Vector2(ref.hitbox.center)
+            dist_sq = pickup.position.distance_squared_to(target)
+            if dist_sq <= best_dist_sq:
+                best_dist_sq = dist_sq
+                best = target
+        return best
+
+    def update(self, dt, player_refs=(), magnet_radius=0):
         for pickup in self.pickups:
+            # Only a still-"spin" coin gets pulled -- one already playing
+            # its one-shot "collect" animation (see Pickup.begin_collect)
+            # is about to be removed below regardless of where it sits.
+            if pickup.state == "spin":
+                target = self._nearest_target_within(pickup, player_refs, magnet_radius)
+                if target is not None:
+                    pickup.position = _move_toward(pickup.position, target, self.MAGNET_SPEED, dt)
             pickup.update(dt)
+        for item_pickup in self.item_pickups:
+            if not item_pickup.collected:
+                target = self._nearest_target_within(item_pickup, player_refs, magnet_radius)
+                if target is not None:
+                    item_pickup.position = _move_toward(item_pickup.position, target, self.MAGNET_SPEED, dt)
         # A pickup sitting where the terrain got destroyed out from under it
         # (see Dungeon.destroy_area) falls through and is lost, same as
         # every other live entity's void-culling (AnimalManager/
@@ -1468,14 +1528,15 @@ class ProjectileManager:
             blast_damage=explosive.get("damage", ThrownDynamite.DEFAULT_BLAST_DAMAGE),
         ))
 
-    def update(self, dt, player_refs=()):
+    def update(self, dt, player_refs=(), room_offset=(0, 0)):
         for dynamite in self.dynamites:
             dynamite.update(dt)
             if dynamite.exploded:
                 grid_x, grid_y = self.dungeon.world_to_grid(dynamite.position.x, dynamite.position.y)
-                self.dungeon.destroy_area(grid_x, grid_y, dynamite.blast_radius_tiles)
+                destroyed_cells = self.dungeon.destroy_area(grid_x, grid_y, dynamite.blast_radius_tiles)
                 self._apply_blast_damage(dynamite, player_refs)
                 self.explosions.append(Explosion(dynamite.position.x, dynamite.position.y))
+                self._spawn_destruction_sparks(destroyed_cells, dynamite.position, player_refs, room_offset)
         self.dynamites = [dynamite for dynamite in self.dynamites if not dynamite.exploded]
 
         for explosion in self.explosions:
@@ -1508,8 +1569,126 @@ class ProjectileManager:
             if enemy.alive and _in_blast(enemy.get_hitbox()):
                 enemy.take_damage(dynamite.blast_damage)
 
+    def _spawn_destruction_sparks(self, destroyed_cells, blast_position, player_refs, room_offset):
+        """One DestructionSpark per grid cell destroy_area actually
+        cleared, all homing toward whichever player in this room is
+        closest to the blast right now -- an explosion doesn't "change
+        target" mid-flight (see EffectManager.spawn_destruction_spark's
+        own docstring for why target_getter is a closure, not a live
+        search, once captured here). No-op if the room is empty of
+        players (shouldn't happen -- a thrown dynamite implies someone's
+        here to have thrown it -- but destroy_area's return is still
+        honored either way).
+
+        Nearest-player selection compares ref.hitbox (already room-local,
+        see PickupManager._nearest_target_within's own docstring for the
+        same local-vs-global distinction) against blast_position (also
+        local, dynamite.position always is) -- correct with no conversion.
+        The closure itself reads ref.player.position instead (the actual
+        persistent Player, needed since it must stay live across many
+        FUTURE frames, unlike the ref wrapper which is rebuilt fresh every
+        frame) -- room_offset is what lets DestructionSpark convert that
+        global position back to this room's local space each frame it
+        homes (see its own update())."""
+        if not destroyed_cells or not player_refs:
+            return
+        nearest = min(player_refs, key=lambda ref: pygame.Vector2(ref.hitbox.center).distance_squared_to(blast_position))
+        target_player = nearest.player
+        for grid_x, grid_y in destroyed_cells:
+            local_x, local_y = self.dungeon.grid_to_world(grid_x, grid_y)
+            self.dungeon.effect_manager.spawn_destruction_spark(
+                local_x, local_y, lambda: target_player.position, room_offset=room_offset,
+            )
+
     def draw(self, screen, camera):
         for dynamite in self.dynamites:
             dynamite.draw(screen, camera)
         for explosion in self.explosions:
             explosion.draw(screen, camera)
+
+
+class DestructionSpark:
+    """Purely visual VFX: assets/effect/star's 4 frames play once (same
+    "play once" shape as Explosion) while homing toward a live target --
+    the feedback for a tile actually being destroyed (a broken wall from
+    the player's own melee, or one cell of an explosion's blast), spawned
+    by Dungeon.destroy_wall_cell's/destroy_area's callers (Explorator._
+    resolve_player_attacks, ProjectileManager._spawn_destruction_sparks),
+    never by the destruction methods themselves (Dungeon has no notion of
+    "which player is nearby" -- that's the caller's job, see EffectManager.
+    spawn_destruction_spark)."""
+
+    FRAME_SIZE = 32
+    ANIMATION_SPEED = 0.08
+    HOMING_SPEED = 260  # world px/sec -- fast enough to usually reach the player within the 4-frame animation
+
+    def __init__(self, world_x, world_y, target_getter, room_offset=(0, 0)):
+        # self.position lives in the SAME room-local space as world_x/
+        # world_y always already are (see grid_to_world's own callers --
+        # never true global coordinates once inside a multi-room assembly).
+        # target_getter, however, always returns a live Player.position,
+        # which is ALWAYS global -- room_offset (this room's fixed
+        # (offset_x, offset_y) * tile_size within the assembly, 0 outside
+        # one) is what update() subtracts to convert that global reading
+        # back into this room's local space every frame it homes.
+        self.position = pygame.Vector2(world_x, world_y)
+        self.target_getter = target_getter
+        self.room_offset = pygame.Vector2(room_offset)
+        self.frames = load_star_frames()
+        self.frame = 0
+        self.animation_timer = 0.0
+        self.finished = False
+        self._render_cache = {}
+
+    def update(self, dt):
+        if self.finished:
+            return
+        target = self.target_getter()
+        if target is not None:
+            local_target = pygame.Vector2(target) - self.room_offset
+            self.position = _move_toward(self.position, local_target, self.HOMING_SPEED, dt)
+        if _advance_frame_once(self, dt, self.ANIMATION_SPEED, len(self.frames)):
+            self.finished = True
+
+    def draw(self, screen, camera):
+        sprite = self.frames[self.frame]
+        _draw_cached_sprite(
+            screen, camera, self._render_cache,
+            (self.frame,),
+            sprite, self.position, self.FRAME_SIZE, self.FRAME_SIZE,
+        )
+
+
+class EffectManager:
+    """Owns live one-shot VFX-with-motion for a room -- today just
+    DestructionSpark, but a deliberately generic name/shape (mirrors
+    PickupManager/ProjectileManager) rather than "SparkManager", in case a
+    future one-shot homing effect wants the same home instead of yet
+    another near-identical manager."""
+
+    def __init__(self, dungeon):
+        self.dungeon = dungeon
+        self.sparks = []
+
+    def spawn_destruction_spark(self, world_x, world_y, target_getter, room_offset=(0, 0)):
+        """`target_getter` is a callable () -> Vector2-like | None, read
+        EVERY frame (see DestructionSpark.update) -- true magnetism toward
+        the target's CURRENT position, not a trajectory computed once at
+        spawn time. Callers capture whichever player they've already
+        picked (nearest to a blast, or whoever swung the melee hit) in a
+        closure rather than passing a live reference this manager would
+        have to track itself. `room_offset` is this room's own (offset_x,
+        offset_y) * tile_size within a multi-room assembly (0 outside one)
+        -- see DestructionSpark's own docstring for why it's needed at all
+        (world_x/world_y here are room-local, but target_getter always
+        reads a Player's global position)."""
+        self.sparks.append(DestructionSpark(world_x, world_y, target_getter, room_offset=room_offset))
+
+    def update(self, dt):
+        for spark in self.sparks:
+            spark.update(dt)
+        self.sparks = [spark for spark in self.sparks if not spark.finished]
+
+    def draw(self, screen, camera):
+        for spark in self.sparks:
+            spark.draw(screen, camera)

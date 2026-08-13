@@ -10,7 +10,7 @@ from core.world.dungeon import Dungeon, corner_cells
 from core.editor.autotile import FLOOR
 from core.world.assembly import load_assembly, save_assembly, generate_assembly
 from core.data.ressources import ROOMS_DIRECTORY, next_new_donjon_name
-from core.world.entities import Player, PlayerRef
+from core.world.entities import Player, PlayerRef, _bucket_direction
 from core.world.object_manager import (
     ANIMAL_TYPES, ENEMY_TYPES, npc_types, ITEM_DEFINITIONS, make_item, OBJECT_TYPES,
 )
@@ -760,6 +760,31 @@ class Explorator(NetworkSessionMixin):
             return room.dungeon, room.offset_x, room.offset_y
         return self.dungeon, 0, 0
 
+    def _mouse_world_position(self, session):
+        """The current mouse cursor's world-space position, or None if
+        `session` isn't the one session the mouse actually drives -- "the
+        mouse is only ever used by the primary local player" (same rule
+        the MOUSEWHEEL zoom handler already applies, see run()'s own
+        comment there), so this returns None for every other session
+        (secondary local co-op, gamepad, a remote network session) rather
+        than guessing. Resolves the same camera + viewport-relative
+        position the zoom handler does: self.camera in merged view, or
+        session.camera offset by its own _viewport_rects() rect in real
+        split-screen."""
+        if session.player_id != self._local_player_id:
+            return None
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+        if self._merged_view():
+            camera = self.camera
+            local_x, local_y = mouse_x, mouse_y
+        else:
+            rect = self._viewport_rects().get(session.player_id)
+            if rect is None:
+                return None
+            camera = session.camera
+            local_x, local_y = mouse_x - rect.x, mouse_y - rect.y
+        return pygame.Vector2(camera.screen_to_world(local_x, local_y))
+
     def _use_interact_item(self, session):
         """Returns True if session's interact slot held a usable item and it
         was used: consumes the item, applies whichever behavior it defines,
@@ -769,8 +794,14 @@ class Explorator(NetworkSessionMixin):
           -- currently just dynamite, which also carries "explosive"):
           spawns a live ThrownDynamite in the current room (converted to
           that room's local coordinates, same convention as every other
-          per-room live entity) at the player's position, in the direction
-          they're currently facing.
+          per-room live entity) at the player's position, aimed at the
+          mouse cursor for whichever session the mouse actually drives
+          (see _mouse_world_position) -- a free angle, not snapped to the
+          8-way DIRECTION_VECTORS, for precise aim despite the throw
+          animation itself only having 8 directional rows. Falls back to
+          the player's own facing direction for every other session
+          (secondary local co-op, gamepad, network), same as before this
+          existed.
         - "effects" list (see ITEM_DEFINITIONS' "effects" -- currently just
           the "heal" kind, e.g. a Potion de soin): applies each recognized
           effect immediately to session.player. An unrecognized "kind" is
@@ -791,8 +822,19 @@ class Explorator(NetworkSessionMixin):
         if "throwable" in capabilities:
             session.inventory.main_slots["interact"] = None
 
-            dx, dy = Player.DIRECTION_VECTORS.get(session.player.direction, (0, 1))
-            direction = pygame.Vector2(dx, dy)
+            mouse_world = self._mouse_world_position(session)
+            if mouse_world is not None and mouse_world != session.player.position:
+                direction = (mouse_world - session.player.position).normalize()
+            else:
+                dx, dy = Player.DIRECTION_VECTORS.get(session.player.direction, (0, 1))
+                direction = pygame.Vector2(dx, dy)
+            # The throw animation only has 8 directional rows (see
+            # Player.DIRECTIONS/get_sprite_direction) -- snap the player's
+            # OWN facing to the nearest of those for play_action below,
+            # while the dynamite itself keeps the free, unsnapped angle
+            # for precise aim (ThrownDynamite.direction is a free
+            # pygame.Vector2 already, see its own docstring).
+            session.player.direction = _bucket_direction(direction)
 
             dungeon, offset_x, offset_y = self._current_room_and_offset(session)
             tile_size = dungeon.tile_size
@@ -942,6 +984,17 @@ class Explorator(NetworkSessionMixin):
         4-corner check."""
         return int(rect.centerx // Dungeon.TILE_SIZE), int((rect.bottom - 1) // Dungeon.TILE_SIZE)
 
+    def _magnet_radius(self):
+        """World-space radius approximating "what's visible on screen" --
+        half of the screen's smaller dimension, scaled back by zoom (same
+        math Camera.screen_to_world already uses for a single axis) -- for
+        PickupManager's currency/item magnetism (see Dungeon.update). Not a
+        true field-of-view/fog-of-war concept (none exists in this
+        codebase, see the camera/viewport research behind this feature) --
+        an approximation the user explicitly asked for ("rayon equivalent
+        au champ de vision"), not a precise viewport rect."""
+        return min(self.screen.get_width(), self.screen.get_height()) / (2 * self.camera.zoom)
+
     def _update_world(self, dt, player_refs):
         """Advances the room(s) any player can currently affect -- objects,
         animals/enemies, pickups -- via whichever of assembly/single-dungeon
@@ -949,10 +1002,11 @@ class Explorator(NetworkSessionMixin):
         normal per-frame update, which additionally runs button-trigger
         checks this helper deliberately leaves out (not meaningful while
         input is frozen)."""
+        magnet_radius = self._magnet_radius()
         if self.assembly is not None:
-            self.assembly.update(dt, player_refs_by_floor=self._player_refs_by_floor())
+            self.assembly.update(dt, player_refs_by_floor=self._player_refs_by_floor(), magnet_radius=magnet_radius)
         else:
-            self.dungeon.update(dt, player_refs=player_refs)
+            self.dungeon.update(dt, player_refs=player_refs, magnet_radius=magnet_radius)
 
     def _is_cell_walkable(self, grid_x, grid_y, room):
         """Real wall/closed-door/etc. walkability for a single global cell,
@@ -1351,7 +1405,11 @@ class Explorator(NetworkSessionMixin):
         blast could (see ProjectileManager._apply_blast_damage).
         self.pvp_enabled additionally checks every *other* session's hitbox
         -- off by default (see run()'s F4 toggle), since normal co-op play
-        shouldn't have players accidentally hurting each other."""
+        shouldn't have players accidentally hurting each other. Also checks
+        the wall cell right in front of the attack hitbox (see
+        Dungeon.destroy_wall_cell) -- a swing that breaks a wall still only
+        counts as one hit for _hit_delivered_this_swing, same "once per
+        swing" rule as hitting an enemy."""
         enemies = self._visible_enemies_global()
         animals = self._visible_animals_global()
         for session in self.players.values():
@@ -1360,6 +1418,31 @@ class Explorator(NetworkSessionMixin):
                 continue
             attack_hitbox = player.get_attack_hitbox()
             hit_landed = False
+
+            dungeon, offset_x, offset_y = self._current_room_and_offset(session)
+            tile_size = dungeon.tile_size
+            local_x = attack_hitbox.centerx - offset_x * tile_size
+            local_y = attack_hitbox.centery - offset_y * tile_size
+            grid_x, grid_y = dungeon.world_to_grid(local_x, local_y)
+            if dungeon.destroy_wall_cell(grid_x, grid_y):
+                hit_landed = True
+                # grid_to_world returns room-LOCAL coordinates, matching
+                # what DestructionSpark itself stores as self.position --
+                # room_offset (below) is what lets it compare that against
+                # player.position (always GLOBAL) each frame it homes, see
+                # DestructionSpark's own docstring.
+                local_wall_x, local_wall_y = dungeon.grid_to_world(grid_x, grid_y)
+                # player=player defaults the closure's argument at
+                # definition time -- without it, every spark spawned across
+                # different iterations of this loop would share the same
+                # late-bound `player`, ending up all reading whichever
+                # session happened to be last once this whole loop finishes
+                # (the classic Python closure-in-a-loop pitfall).
+                dungeon.effect_manager.spawn_destruction_spark(
+                    local_wall_x, local_wall_y,
+                    lambda player=player: player.position,
+                    room_offset=(offset_x * tile_size, offset_y * tile_size),
+                )
 
             for enemy, enemy_rect, enemy_dungeon in enemies:
                 if attack_hitbox.colliderect(enemy_rect):
