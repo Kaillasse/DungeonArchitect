@@ -14,6 +14,7 @@ from core.data.ressources import FLOOR, next_new_donjon_name
 from core.editor.autotile import WALL, LOCAL_EDIT_SPRITE_RADIUS
 from core.data.profile_manager import ProfileManager, ADMINGOD_STOCK
 from core.data.cards import room_name_from_card_id, room_card_manifest
+from core.world.object_manager import ITEM_DEFINITIONS
 from core.world.home import home_room_name, wants_exploration
 from core.editor.ui import (
     GeneratorPanelUI, RoomPanelUI, ChestPanelUI, RolePanelUI, CardPanelUI, CardRenderer,
@@ -382,6 +383,50 @@ class Creator:
             browser.selected_set.discard(index)
         else:
             browser.selected_set.add(index)
+
+    def _resolve_dragged_card(self, event):
+        """Resolves an in-progress card drag (self.object_tool.dragging) on
+        its matching MOUSEBUTTONUP -- see the call site in run() for why
+        this must run unconditionally, before panel_click's own gate,
+        rather than from inside the generic MOUSEBUTTONUP handler below
+        (where this logic used to live and could never actually run for a
+        card-panel-originated drag)."""
+        card_id = self.object_tool.object_type
+
+        room_name = room_name_from_card_id(card_id)
+        if room_name is not None:
+            # A room-card is never placeable in the world grid
+            # (_try_place_object assumes OBJECT_TYPES/add_object semantics)
+            # -- the only meaningful drop target is the Generator, which
+            # toggles pool membership. Dropping anywhere else just cancels,
+            # same as any other drag that misses its target.
+            if self.generator_frame.contains(event.pos):
+                self._toggle_room_in_pool(room_name)
+        elif card_id in ITEM_DEFINITIONS:
+            # An item-card is never placeable in the world grid either
+            # (items live in inventory slots/loot tables, not OBJECT_TYPES'
+            # add_object -- _try_place_object would KeyError on an id it
+            # doesn't know) -- the only meaningful drop target is the
+            # Forge, to inspect/edit its capacites/effets.
+            if self.mechanics_frame.contains(event.pos):
+                self.mechanics_panel.open(card_id)
+        elif self.mechanics_frame.contains(event.pos):
+            # MechanicsPanelUI.open() already refuses (stays empty) for
+            # anything that isn't a real OBJECT_TYPES/ITEM_DEFINITIONS id --
+            # no extra guard needed here.
+            self.mechanics_panel.open(card_id)
+        elif not any(frame.contains(event.pos) for frame in self.panel_frames):
+            # Only attempt world placement if the drop isn't sitting over
+            # ANY docked panel -- without this, a drop on e.g. tools_frame/
+            # room_frame (which can visually overlap the grid) would
+            # silently "pass through" to whatever world cell happens to be
+            # behind it. Covers every current AND future panel in
+            # panel_frames, not a hardcoded list.
+            self._try_place_object()
+        # else: dropped on some other docked panel -- clean cancel, nothing
+        # placed/consumed, same as any other drag that misses its target.
+
+        self.object_tool.dragging = False
 
     def _apply_generation(self, request):
         room_names, room_count = request
@@ -944,6 +989,24 @@ class Creator:
                         if saved_type_id is not None:
                             self._refresh_card_panel()
 
+                    # Resolves an in-progress card drag BEFORE the
+                    # panel_click gate below -- a card drag always STARTS
+                    # with a press inside card_frame's bounds (that's where
+                    # cards live), so panel_click is always True for one and
+                    # stays True through to the release, wherever that
+                    # release actually is. panel_click/_panel_owns_drag was
+                    # designed for an internal-to-one-panel gesture (see its
+                    # own docstring in __init__, e.g. dragging the card
+                    # panel's own scrollbar), not a drag meant to travel
+                    # elsewhere -- if this resolution stayed gated behind
+                    # "if panel_click: continue" like it used to, it would
+                    # never run, and self.object_tool.dragging (only ever
+                    # cleared inside _resolve_dragged_card) would stay True
+                    # forever after the very first card drag, silently
+                    # hijacking the next unrelated click anywhere on screen.
+                    if event.type == pygame.MOUSEBUTTONUP and event.button == 1 and self.object_tool.dragging:
+                        self._resolve_dragged_card(event)
+
                     if panel_click:
                         continue
 
@@ -1093,40 +1156,13 @@ class Creator:
 
                             self.moving_object = None
                             self.move_drag_pos = None
-
-                        elif self.object_tool.dragging:
-
-                            room_name = room_name_from_card_id(self.object_tool.object_type)
-                            if room_name is not None:
-                                # A room-card is never placeable in the world
-                                # grid (_try_place_object assumes
-                                # OBJECT_LIST/add_object semantics) -- the
-                                # only meaningful drop target is the
-                                # Generator, which toggles pool membership.
-                                # Dropping anywhere else just cancels, same
-                                # as any other drag that misses its target.
-                                if self.generator_frame.contains(event.pos):
-                                    self._toggle_room_in_pool(room_name)
-                            elif self.mechanics_frame.contains(event.pos):
-                                # MechanicsPanelUI.open() already refuses
-                                # (stays empty) for anything that isn't a
-                                # custom type -- no extra guard needed here.
-                                self.mechanics_panel.open(self.object_tool.object_type)
-                            elif not any(frame.contains(event.pos) for frame in self.panel_frames):
-                                # Only attempt world placement if the drop
-                                # isn't sitting over ANY docked panel --
-                                # without this, a drop on e.g. tools_frame/
-                                # room_frame (which can visually overlap the
-                                # grid) would silently "pass through" to
-                                # whatever world cell happens to be behind
-                                # it. Covers every current AND future panel
-                                # in panel_frames, not a hardcoded list.
-                                self._try_place_object()
-                            # else: dropped on some other docked panel --
-                            # clean cancel, nothing placed/consumed, same
-                            # as any other drag that misses its target.
-
-                            self.object_tool.dragging = False
+                        # object_tool.dragging (a card drag) is resolved
+                        # earlier now, unconditionally, before the
+                        # panel_click gate -- see _resolve_dragged_card and
+                        # its call site above (this is the matching
+                        # MOUSEBUTTONUP, but it isn't guaranteed to be
+                        # reached for a card-drag release, see that call
+                        # site's own comment for why).
 
                     elif event.button == 3:
 

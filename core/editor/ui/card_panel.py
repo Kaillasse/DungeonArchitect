@@ -3,7 +3,7 @@
 import pygame
 
 from core.ui.widgets import BorderManager, RoomBrowser
-from core.world.object_manager import OBJECT_TYPES
+from core.world.object_manager import OBJECT_TYPES, ITEM_DEFINITIONS, ENEMY_ANIMATIONS
 from core.data.cards import CardManager, room_name_from_card_id
 from core.data.profile_manager import ADMINGOD_STOCK
 from core.editor.ui.mixins import _ResizableCornerMixin
@@ -220,7 +220,9 @@ class CardPanelUI(_ResizableCornerMixin):
                 # card checked here, and every OBJECT_LIST entry is always
                 # also an OBJECT_TYPES key (register_custom_type/
                 # _write_custom_type keep them in lockstep).
-                if rect.collidepoint(event.pos) and (card_id in OBJECT_TYPES or room_name_from_card_id(card_id) is not None):
+                if rect.collidepoint(event.pos) and (
+                    card_id in OBJECT_TYPES or card_id in ITEM_DEFINITIONS or room_name_from_card_id(card_id) is not None
+                ):
                     return card_id
             return None
         elif event.type == pygame.MOUSEBUTTONUP:
@@ -253,7 +255,7 @@ class CardPanelUI(_ResizableCornerMixin):
             row_index = self.browser.row_at(event.pos)
             if row_index is not None and 0 <= row_index < len(self._card_ids):
                 card_id = self._card_ids[row_index]
-                draggable = card_id in OBJECT_TYPES or room_name_from_card_id(card_id) is not None
+                draggable = card_id in OBJECT_TYPES or card_id in ITEM_DEFINITIONS or room_name_from_card_id(card_id) is not None
                 if draggable and self._owned_counts.get(card_id, 0) > 0:
                     drag_card_id = card_id
         self.browser.handle_event(event)
@@ -325,6 +327,20 @@ class CardPanelUI(_ResizableCornerMixin):
                     f"Images : {len(card.images)}",
                     f"Effets : {len(card.effects)}",
                 ]
+                if card.capabilities:
+                    lines.append(f"Capacites : {', '.join(card.capabilities)}")
+                if card.card_type == "mob":
+                    # Purely informational -- animal/enemy have no
+                    # custom-registration path (no register_mob_type), so
+                    # every mob's animation set is a fixed constant, never
+                    # partial like a custom PNJ's (see the "pnj" branch
+                    # below) -- nothing to check for completeness here.
+                    config = OBJECT_TYPES.get(card_id, {})
+                    if config.get("enemy"):
+                        states = ENEMY_ANIMATIONS
+                    else:
+                        states = ("idle", "move")  # mirrors Animal.LOOPING_STATES
+                    lines.append(f"Etats : {', '.join(states)}")
                 if card.card_type == "pnj":
                     is_complete, missing = self._renderer.get_completeness(card)
                     lines.append("Complet" if is_complete else "Manque : " + ", ".join(missing))

@@ -95,7 +95,7 @@ def _room_file_exists(room_name):
 
 
 class Card:
-    def __init__(self, card_id, name, images, card_type, effects=None):
+    def __init__(self, card_id, name, images, card_type, effects=None, capabilities=None):
         self.card_id = card_id
         self.name = name
         self.images = list(images) if images else []
@@ -107,6 +107,13 @@ class Card:
         # Explorator._use_interact_item for an item card; nothing consumes
         # it yet for an OBJECT_TYPES-bridged card (see default_card_for).
         self.effects = list(effects) if effects else []
+        # {"throwable": {...}, "explosive": {...}, ...} -- same vocabulary
+        # as OBJECT_TYPES/ITEM_DEFINITIONS' own "capabilities" (see
+        # object_manager._build_mechanics_fields). Display-only from here
+        # (see CardPanelUI's "Capacites : ..." detail line) -- the actual
+        # gameplay consumers (Explorator._use_interact_item/
+        # ProjectileManager) read the registry directly, not through Card.
+        self.capabilities = dict(capabilities) if capabilities else {}
 
 
 def default_card_for(card_id):
@@ -140,13 +147,17 @@ def default_card_for(card_id):
         # preferred over the auto-titlecased id every hand-authored
         # OBJECT_TYPES entry still falls back to (none of those set "name").
         name = config.get("name") or card_id.replace("_", " ").title()
-        return Card(card_id, name, images, config.get("card_type", "tile_decor"), effects=config.get("effects"))
+        return Card(
+            card_id, name, images, config.get("card_type", "tile_decor"),
+            effects=config.get("effects"), capabilities=config.get("capabilities"),
+        )
 
     definition = ITEM_DEFINITIONS.get(card_id)
     if definition is not None:
         return Card(
             card_id, definition["name"], [definition["icon_path"]],
-            definition.get("card_type", "item"), effects=definition.get("effects"),
+            definition.get("card_type", "item"),
+            effects=definition.get("effects"), capabilities=definition.get("capabilities"),
         )
 
     return None
