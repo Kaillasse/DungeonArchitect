@@ -1,0 +1,11 @@
+{
+  "dynamite": {
+    "throwable": {
+      "speed": 220
+    },
+    "explosive": {
+      "radius_tiles": 2,
+      "damage": 1
+    }
+  }
+}

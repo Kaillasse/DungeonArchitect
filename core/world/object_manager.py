@@ -9,12 +9,18 @@ from core.data.sound_manager import SoundManager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-OBJECT_TYPES = {
+# Renamed from the old "OBJECT_TYPES" -- this is now only the Python-sourced
+# seed data. The real, live registry (still called OBJECT_TYPES, see below
+# past the custom-type merge machinery) layers custom types AND per-builtin
+# mechanics overrides (see update_type_mechanics/_write_builtin_mechanics_override)
+# on top of this dict without ever mutating it.
+_BUILTIN_OBJECT_TYPES = {
     "spawn": {
         "asset": "characters/Player/rotate.png",
         "placement": "floor",
         "size": (1, 1),
         "frames": 8,
+        "card_type": "tile_special",
     },
     "button": {
         "asset": "tiles/Button.png",
@@ -23,6 +29,7 @@ OBJECT_TYPES = {
         "frames": 3,
         "linkable": True,
         "walkable": True,
+        "card_type": "tile_special",
     },
     "gate": {
         "asset": "tiles/gateopenclose.png",
@@ -40,6 +47,7 @@ OBJECT_TYPES = {
         "frames": 8,
         "linkable": True,
         "blocks_until_open": True,
+        "card_type": "tile_special",
     },
     "wall": {
         "asset": "tiles/wallopenclose.png",
@@ -48,6 +56,7 @@ OBJECT_TYPES = {
         "frames": 7,
         "linkable": True,
         "blocks_until_open": True,
+        "card_type": "tile_special",
     },
     "torch": {
         "asset": "tiles/Torch Yellow.png",
@@ -67,6 +76,7 @@ OBJECT_TYPES = {
             "L": "tiles/Torch Yellow L.png",
             "R": "tiles/Torch Yellow R.png",
         },
+        "card_type": "tile_decor",
     },
     "vase": {
         "asset": "tiles/Vase.png",
@@ -74,6 +84,7 @@ OBJECT_TYPES = {
         "size": (1, 1),
         "frames": 16,
         "blocks_movement": True,
+        "card_type": "tile_decor",
     },
     "chicken": {
         "asset": "characters/Animals/Chicken.png",
@@ -82,6 +93,7 @@ OBJECT_TYPES = {
         "frames": 2,
         "frame_size": 32,
         "animal": True,
+        "card_type": "mob",
     },
     "cow": {
         "asset": "characters/Animals/Cow.png",
@@ -90,6 +102,7 @@ OBJECT_TYPES = {
         "frames": 2,
         "frame_size": 32,
         "animal": True,
+        "card_type": "mob",
     },
     "pig": {
         "asset": "characters/Animals/Pig.png",
@@ -98,6 +111,7 @@ OBJECT_TYPES = {
         "frames": 2,
         "frame_size": 32,
         "animal": True,
+        "card_type": "mob",
     },
     "sheep": {
         "asset": "characters/Animals/Sheep.png",
@@ -106,6 +120,7 @@ OBJECT_TYPES = {
         "frames": 2,
         "frame_size": 32,
         "animal": True,
+        "card_type": "mob",
     },
     "skeleton1": {
         # "asset" here is just skeleton1's idle sheet -- the static editor
@@ -119,6 +134,22 @@ OBJECT_TYPES = {
         "frames": 6,
         "frame_size": 32,
         "enemy": True,
+        "card_type": "mob",
+        # Merged in from the old standalone ENEMY_STATS dict -- health/
+        # move_speed/aggro_range/attack_range are tuning defaults, not values
+        # given by any design doc. active_attack_frames (0-based) is the
+        # window during which a swing actually deals damage: frames 7-8 of 9
+        # (1-based), as specified. "loot" (currency type -> count) is read
+        # once, on death, by Explorator._spawn_loot -- an enemy with no
+        # "loot" key (or an empty one) simply drops nothing. "item_loot"
+        # (item id -> count, see ITEM_DEFINITIONS) is the same idea for real
+        # inventory items rather than currency.
+        "stats": {
+            "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
+            "active_attack_frames": (6, 7),
+            "loot": {"gold": 2, "blue": 1},
+            "item_loot": {"dynamite": 1},
+        },
     },
     "skeleton2": {
         "asset": "characters/Ennemies/skeleton2/idle.png",
@@ -127,6 +158,15 @@ OBJECT_TYPES = {
         "frames": 6,
         "frame_size": 32,
         "enemy": True,
+        "card_type": "mob",
+        # skeleton2 has a different attack frame count (15) with no given
+        # mapping, so its window is derived from skeleton1's *relative*
+        # position (~75%-87% through the swing) rather than guessed outright.
+        "stats": {
+            "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
+            "active_attack_frames": (11, 12),
+            "loot": {"gold": 2, "blue": 1},
+        },
     },
     "stairs": {
         # Sourced from basictileset.png frame 26, not a dedicated
@@ -143,6 +183,7 @@ OBJECT_TYPES = {
         "placement": "stairs",
         "size": (1, 1),
         "frames": 1,
+        "card_type": "tile_special",
     },
     "cave_entrance": {
         # basictileset.png frame 27. Same doorway shape/validity as
@@ -155,6 +196,7 @@ OBJECT_TYPES = {
         "size": (1, 1),
         "frames": 1,
         "walkable": True,
+        "card_type": "tile_special",
     },
     "big_entrance": {
         # basictileset.png frames 17 (left half) + 23 (right half), composed
@@ -172,6 +214,7 @@ OBJECT_TYPES = {
         "size": (2, 1),
         "frames": 1,
         "walkable": True,
+        "card_type": "tile_special",
     },
     "pillar": {
         # basictileset.png frame 18 (base). A single ordinary object, placed
@@ -194,6 +237,7 @@ OBJECT_TYPES = {
         "variants": {
             "top": "tiles/pillar_top.png",
         },
+        "card_type": "tile_decor",
     },
     "lilchest": {
         # 4 columns x 2 rows: row 0 idle/closed, row 1 the opening animation
@@ -223,6 +267,7 @@ OBJECT_TYPES = {
         "linkable": True,
         "default_loot": {"gold": 5, "blue": 5},
         "default_item_loot": {"dynamite": 2},
+        "card_type": "tile_special",
     },
 }
 OBJECT_LIST = [
@@ -272,8 +317,76 @@ def _load_custom_object_types():
 
 
 _custom_types = _load_custom_object_types()
-OBJECT_TYPES.update(_custom_types)
-OBJECT_LIST.extend(name for name in _custom_types if name not in OBJECT_LIST)
+
+# Object-type mechanics keys (opt-in gameplay behavior) vs identity/visual
+# keys (asset/placement/size/frames/name + whatever the archetype preset
+# always implies, e.g. "porte"'s walkable/is_es) -- see update_type_visual/
+# update_type_mechanics below. A builtin's mechanics can be overridden (a
+# custom_object_types.json entry marked OVERRIDE_MARKER, holding ONLY these
+# keys) without ever touching its Python-sourced visual identity.
+MECHANICS_KEYS = ("blocks_movement", "cell_modes", "interactable", "capabilities")
+DOORWAY_MECHANICS_KEYS = ("linkable", "blocks_until_open")
+OVERRIDE_MARKER = "__override_of_builtin__"
+
+
+def _derive_card_type(config):
+    """Best-effort card_type for a custom_object_types.json entry saved
+    before this field existed -- same rule core.data.cards.default_card_for
+    used to apply ad hoc per-Card, now the single place that does it, once,
+    for the registry entry itself."""
+    if config.get("npc"):
+        return "pnj"
+    if config.get("animal") or config.get("enemy"):
+        return "mob"
+    if config.get("is_es") or config.get("chest"):
+        return "tile_special"
+    return "tile_decor"
+
+
+def _merge_builtin(type_id, override):
+    """A builtin's own Python-sourced entry, with its mechanics keys
+    replaced by `override`'s (an OVERRIDE_MARKER-tagged entry holding a
+    full snapshot of MECHANICS_KEYS/DOORWAY_MECHANICS_KEYS -- never a
+    sparse diff, so a flag can be explicitly turned back off). None if
+    type_id no longer names a real builtin (a stale override left over
+    from a since-removed one)."""
+    base = _BUILTIN_OBJECT_TYPES.get(type_id)
+    if base is None:
+        return None
+    merged = dict(base)
+    for key in MECHANICS_KEYS:
+        merged.pop(key, None)
+    if base.get("placement") == "doorway":
+        for key in DOORWAY_MECHANICS_KEYS:
+            merged.pop(key, None)
+    for key in MECHANICS_KEYS + DOORWAY_MECHANICS_KEYS:
+        if key in override:
+            merged[key] = override[key]
+    return merged
+
+
+def _merged_object_types():
+    """The live registry: every builtin, with any persisted mechanics
+    override merged on top, plus every genuine custom/NPC type as-is
+    (card_type backfilled once if the entry predates that field)."""
+    merged = dict(_BUILTIN_OBJECT_TYPES)
+    for type_id, entry in _custom_types.items():
+        if entry.get(OVERRIDE_MARKER):
+            result = _merge_builtin(type_id, entry)
+            if result is not None:
+                merged[type_id] = result
+        else:
+            entry = dict(entry)
+            entry.setdefault("card_type", _derive_card_type(entry))
+            merged[type_id] = entry
+    return merged
+
+
+OBJECT_TYPES = _merged_object_types()
+OBJECT_LIST.extend(
+    type_id for type_id, entry in _custom_types.items()
+    if not entry.get(OVERRIDE_MARKER) and type_id not in OBJECT_LIST
+)
 
 # Archetypes proposes par l'editeur de sprite -- volontairement limites aux
 # types a une seule region (pas de paire torche L/R, pas de pilier
@@ -293,7 +406,7 @@ ARCHETYPES = {
 
 
 #  Les 3 etats possibles d'une case dans un "cell_modes" (voir
-# _build_custom_type_entry) -- "block" est solide (non walkable, dessine
+# _build_mechanics_fields) -- "block" est solide (non walkable, dessine
 # dans la passe normale/arriere) ; "behind" et "front" sont tous deux
 # walkable, seul leur ordre de dessin differe (arriere = normal, comme une
 # fleur/un tapis ; devant = comme une torche, la case se dessine par-dessus
@@ -302,30 +415,21 @@ ARCHETYPES = {
 CELL_MODES = ("block", "behind", "front")
 
 
-def _build_custom_type_entry(
-    name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None,
-    interactable=False, lockable=False, frame_rects=None,
-):
-    """Construction pure (aucune I/O) d'un dict au format OBJECT_TYPES --
-    partagee par register_custom_type (creer) et update_custom_type
-    (editer), pour que les deux produisent toujours exactement la meme
-    forme d'entree. `cell_modes`, s'il est fourni, prevaut sur
-    `blocks_movement` (voisinage ET ordre de dessin par case pour un objet
-    multi-cases, voir ObjectManager.is_cell_walkable/cell_draw_mode) -- les
-    deux representent la meme idee a des granularites differentes, jamais
-    les deux a la fois sur une entree.
+# Every key any ARCHETYPES preset can unconditionally set (today just
+# "porte"'s walkable/is_es) -- identity/visual keys, cleared and reapplied
+# fresh on every update_type_visual call so switching a custom type's
+# archetype can't leave a stale flag from its previous archetype behind.
+# Distinct from MECHANICS_KEYS/DOORWAY_MECHANICS_KEYS: those are optional
+# per-instance toggles (blocks_movement, lockable...), these are permanent
+# consequences of "this IS a porte/sol/mur-shaped thing".
+_ARCHETYPE_FLAG_KEYS = tuple(sorted({key for preset in ARCHETYPES.values() for key in preset["flags"]}))
 
-    `lockable` (archetype "porte" seulement -- ignore silencieusement
-    ailleurs) ajoute "linkable"/"blocks_until_open", exactement comme gate/
-    wall : la porte devient liable a un bouton et bloque tant qu'elle n'est
-    pas ouverte, au lieu de rester "walkable" en permanence (le flag par
-    defaut de l'archetype "porte", voir ARCHETYPES -- toujours applique en
-    premier via entry.update(preset["flags"]) ci-dessous, mais
-    is_cell_walkable verifie blocks_until_open AVANT walkable, donc les
-    deux flags peuvent coexister sans ambiguite). Par defaut False --
-    n'importe quelle carte "porte" deja enregistree avant l'existence de ce
-    parametre n'a jamais ce champ et reste donc exactement walkable comme
-    avant, aucune regression.
+
+def _build_visual_fields(name, tileset, rect, size, archetype, frame_rects=None):
+    """Construction pure (aucune I/O) des champs d'identite/visuel d'une
+    entree OBJECT_TYPES custom -- asset/placement/size/frames/name plus les
+    flags que l'archetype impose toujours (voir ARCHETYPES). Partagee par
+    register_custom_type (creer) et update_type_visual (editer).
 
     `frame_rects` (archetype "porte" seulement), s'il est fourni, remplace
     le `rect` unique par une liste de rects -- une frame d'animation
@@ -352,32 +456,118 @@ def _build_custom_type_entry(
         "name": name,
     }
     entry.update(preset["flags"])
-    if archetype == "porte" and lockable:
-        entry["linkable"] = True
-        entry["blocks_until_open"] = True
-    if cell_modes is not None:
-        entry["cell_modes"] = [list(row) for row in cell_modes]
-    elif blocks_movement:
-        entry["blocks_movement"] = True
-    if interactable:
-        entry["interactable"] = True
     return entry
+
+
+def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
+                             interactable=False, lockable=False, capabilities=None):
+    """Construction pure (aucune I/O) des champs mecaniques/gameplay d'une
+    entree OBJECT_TYPES -- partagee par register_custom_type et
+    update_type_mechanics (custom ET builtin, voir plus bas). `cell_modes`,
+    s'il est fourni, prevaut sur `blocks_movement` (voisinage ET ordre de
+    dessin par case pour un objet multi-cases) -- les deux representent la
+    meme idee a des granularites differentes, jamais les deux a la fois.
+
+    `lockable` (seulement si `existing["placement"] == "doorway"` --
+    ignore silencieusement ailleurs) ajoute "linkable"/"blocks_until_open",
+    exactement comme gate/wall : la porte devient liable a un bouton et
+    bloque tant qu'elle n'est pas ouverte, au lieu de rester "walkable" en
+    permanence (le flag par defaut de l'archetype "porte", voir
+    ARCHETYPES -- un flag d'identite, jamais touche ici). Par defaut False.
+
+    `capabilities` ({"throwable": {...}, "explosive": {...}, ...}) est le
+    meme vocabulaire que ITEM_DEFINITIONS' propre champ "capabilities" --
+    voir update_item_capabilities -- rendu disponible ici aussi pour qu'un
+    objet du monde (pas seulement un item d'inventaire) puisse un jour
+    porter la meme capacite (ex: un vase explosif)."""
+    fields = {}
+    if cell_modes is not None:
+        fields["cell_modes"] = [list(row) for row in cell_modes]
+    elif blocks_movement:
+        fields["blocks_movement"] = True
+    if interactable:
+        fields["interactable"] = True
+    if existing.get("placement") == "doorway" and lockable:
+        fields["linkable"] = True
+        fields["blocks_until_open"] = True
+    if capabilities:
+        fields["capabilities"] = dict(capabilities)
+    return fields
+
+
+def _persist_custom_object_types(custom):
+    CUSTOM_OBJECT_TYPES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CUSTOM_OBJECT_TYPES_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(custom, handle, indent=2, ensure_ascii=False)
 
 
 def _write_custom_type(type_id, entry):
     """Ecrit `entry` dans custom_object_types.json (fusionne, pas remplace
     -- toute autre carte custom deja enregistree reste intacte) et met a
     jour OBJECT_TYPES/OBJECT_LIST en memoire immediatement, que ce soit une
-    creation ou une mise a jour."""
+    creation ou une mise a jour. Backfille card_type une fois si absent
+    (meme regle que _merged_object_types, ici pour qu'une entree ecrite
+    CETTE session l'ait deja en memoire sans attendre un redemarrage) --
+    jamais pour un override de builtin (OVERRIDE_MARKER), dont le
+    card_type reste celui, deja correct, du builtin lui-meme."""
+    if not entry.get(OVERRIDE_MARKER):
+        entry = dict(entry)
+        entry.setdefault("card_type", _derive_card_type(entry))
+
     custom = _load_custom_object_types()
     custom[type_id] = entry
-    CUSTOM_OBJECT_TYPES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CUSTOM_OBJECT_TYPES_PATH.open("w", encoding="utf-8") as handle:
-        json.dump(custom, handle, indent=2, ensure_ascii=False)
+    _persist_custom_object_types(custom)
 
     OBJECT_TYPES[type_id] = entry
     if type_id not in OBJECT_LIST:
         OBJECT_LIST.append(type_id)
+
+
+def _write_builtin_mechanics_override(type_id, mechanics_fields):
+    """Persiste `mechanics_fields` (deja construit par _build_mechanics_fields)
+    comme override d'un builtin -- jamais le fragment brut dans OBJECT_TYPES
+    en memoire (ca casserait le tout prochain load_object_frames/
+    is_cell_walkable sur ce type avant le prochain redemarrage), toujours la
+    version fusionnee via _merge_builtin.
+
+    L'override n'est retire (plutot que persiste) que si `mechanics_fields`
+    correspond EXACTEMENT aux valeurs mecaniques deja codees en dur sur le
+    builtin lui-meme -- jamais juste "est vide". Un builtin comme "gate"
+    (blocks_until_open=True en dur) ou "vase" (blocks_movement=True en dur)
+    produit un `mechanics_fields` vide quand l'utilisateur DESACTIVE ce
+    flag depuis la Forge (aucune cle a ajouter pour representer "off") --
+    confondre "vide" avec "aucun changement souhaite" aurait silencieusement
+    ignore cette desactivation et restaure les valeurs par defaut a chaque
+    sauvegarde, empechant justement la nouvelle capacite que ce retrait de
+    garde est cense debloquer (voir le plan -- "un gate/wall togglable non
+    verrouillable")."""
+    base = _BUILTIN_OBJECT_TYPES[type_id]
+    base_mechanics = {key: base[key] for key in MECHANICS_KEYS + DOORWAY_MECHANICS_KEYS if key in base}
+
+    custom = _load_custom_object_types()
+    if mechanics_fields == base_mechanics:
+        custom.pop(type_id, None)
+        merged = dict(base)
+    else:
+        override = dict(mechanics_fields)
+        override[OVERRIDE_MARKER] = True
+        custom[type_id] = override
+        merged = _merge_builtin(type_id, override)
+    _persist_custom_object_types(custom)
+    OBJECT_TYPES[type_id] = merged
+
+
+def reset_builtin_mechanics(type_id):
+    """Efface un override de mecaniques et restaure les valeurs Python par
+    defaut du builtin -- verbe distinct de delete_custom_type, qui doit
+    rester impossible a invoquer sur un builtin (voir sa propre garde)."""
+    if type_id not in _BUILTIN_OBJECT_TYPES:
+        raise ValueError(f"'{type_id}' n'est pas un type integre au jeu")
+    custom = _load_custom_object_types()
+    if custom.pop(type_id, None) is None:
+        return
+    _persist_custom_object_types(custom)
+    OBJECT_TYPES[type_id] = dict(_BUILTIN_OBJECT_TYPES[type_id])
 
 
 def register_custom_type(
@@ -394,10 +584,59 @@ def register_custom_type(
         raise ValueError("Identifiant invalide (lettres/chiffres/_ uniquement)")
     if type_id in OBJECT_TYPES:
         raise ValueError(f"'{type_id}' existe deja")
-    entry = _build_custom_type_entry(
-        name, tileset, rect, size, archetype, blocks_movement, cell_modes,
-        interactable, lockable, frame_rects,
-    )
+    entry = _build_visual_fields(name, tileset, rect, size, archetype, frame_rects)
+    entry.update(_build_mechanics_fields(entry, blocks_movement, cell_modes, interactable, lockable))
+    _write_custom_type(type_id, entry)
+    return entry
+
+
+def update_type_visual(type_id, name, tileset, rect, size, archetype, frame_rects=None):
+    """Edite UNIQUEMENT l'identite/visuel d'une carte custom DEJA
+    enregistree (type_id doit deja exister ET etre une carte custom --
+    jamais un type integre au jeu comme "vase", identifie par la forme
+    dict de son "asset" -- meme un id qui collisionnerait par coincidence
+    avec un type integre ne peut jamais l'ecraser). Contrairement a
+    l'ancien _build_custom_type_entry (qui reconstruisait tout depuis
+    zero), les cles mecaniques deja presentes survivent intactes -- seules
+    les cles de _ARCHETYPE_FLAG_KEYS (walkable/is_es) sont effacees puis
+    reappliquees, pour qu'un changement d'archetype ne laisse pas un flag
+    de l'ancien archetype trainer."""
+    existing = OBJECT_TYPES.get(type_id)
+    if existing is None:
+        raise ValueError(f"'{type_id}' n'existe pas")
+    if not isinstance(existing.get("asset"), dict):
+        raise ValueError(f"'{type_id}' est un type integre au jeu, non modifiable")
+    entry = dict(existing)
+    for key in _ARCHETYPE_FLAG_KEYS:
+        entry.pop(key, None)
+    entry.update(_build_visual_fields(name, tileset, rect, size, archetype, frame_rects))
+    _write_custom_type(type_id, entry)
+    return entry
+
+
+def update_type_mechanics(type_id, blocks_movement=False, cell_modes=None,
+                           interactable=False, lockable=False, capabilities=None):
+    """Edite UNIQUEMENT les mecaniques/gameplay d'un type DEJA enregistre --
+    contrairement a update_type_visual, fonctionne sur N'IMPORTE QUEL type
+    existant, builtin OU custom (c'est le point d'entree qui rend un
+    builtin editable sans jamais toucher a son identite visuelle -- voir
+    _write_builtin_mechanics_override). Efface d'abord les cles mecaniques
+    existantes (jamais un merge naif : sinon desactiver un flag deja actif
+    ne ferait jamais rien) puis reapplique celles calculees pour cet appel."""
+    existing = OBJECT_TYPES.get(type_id)
+    if existing is None:
+        raise ValueError(f"'{type_id}' n'existe pas")
+    fields = _build_mechanics_fields(existing, blocks_movement, cell_modes, interactable, lockable, capabilities)
+    if not isinstance(existing.get("asset"), dict):
+        _write_builtin_mechanics_override(type_id, fields)
+        return OBJECT_TYPES[type_id]
+    entry = dict(existing)
+    for key in MECHANICS_KEYS:
+        entry.pop(key, None)
+    if existing.get("placement") == "doorway":
+        for key in DOORWAY_MECHANICS_KEYS:
+            entry.pop(key, None)
+    entry.update(fields)
     _write_custom_type(type_id, entry)
     return entry
 
@@ -406,25 +645,15 @@ def update_custom_type(
     type_id, name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None,
     interactable=False, lockable=False, frame_rects=None,
 ):
-    """Edite une carte custom DEJA enregistree (type_id doit deja exister
-    ET etre une carte custom -- jamais un type integre au jeu comme "vase",
-    identifie par la forme dict de son "asset", voir _build_custom_type_entry
-    -- meme un id qui collisionnerait par coincidence avec un type integre
-    ne peut jamais l'ecraser). Utilise quand le joueur clique une entree
-    dans la liste "Cartes existantes" de SpriteEditorPanelUI puis
-    reconfirme -- corrige a la source la confusion "deux cartes au meme nom,
-    indiscernables" plutot que d'en laisser une nouvelle s'empiler."""
-    existing = OBJECT_TYPES.get(type_id)
-    if existing is None:
-        raise ValueError(f"'{type_id}' n'existe pas")
-    if not isinstance(existing.get("asset"), dict):
-        raise ValueError(f"'{type_id}' est un type integre au jeu, non modifiable")
-    entry = _build_custom_type_entry(
-        name, tileset, rect, size, archetype, blocks_movement, cell_modes,
-        interactable, lockable, frame_rects,
-    )
-    _write_custom_type(type_id, entry)
-    return entry
+    """Alias de compatibilite -- combine update_type_visual + update_type_mechanics
+    en un seul appel, meme signature/comportement qu'avant leur separation
+    (voir ces deux fonctions). SpriteEditorPanelUI continue d'appeler
+    celui-ci sans aucun changement : il passe deja les champs visuels ET
+    mecaniques dans le meme appel, en repassant inchange tout ce qu'il ne
+    laisse pas l'utilisateur editer lui-meme (voir MechanicsPanelUI, qui
+    fait le symetrique avec update_type_mechanics seul)."""
+    update_type_visual(type_id, name, tileset, rect, size, archetype, frame_rects)
+    return update_type_mechanics(type_id, blocks_movement, cell_modes, interactable, lockable)
 
 
 def delete_custom_type(type_id):
@@ -448,9 +677,7 @@ def delete_custom_type(type_id):
 
     custom = _load_custom_object_types()
     custom.pop(type_id, None)
-    CUSTOM_OBJECT_TYPES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CUSTOM_OBJECT_TYPES_PATH.open("w", encoding="utf-8") as handle:
-        json.dump(custom, handle, indent=2, ensure_ascii=False)
+    _persist_custom_object_types(custom)
 
     del OBJECT_TYPES[type_id]
     if type_id in OBJECT_LIST:
@@ -462,10 +689,10 @@ def find_custom_type_by_source(tileset, rect):
     (tileset, rect), ou None -- permet a l'editeur de sprite d'avertir/
     proposer une edition plutot que d'enregistrer un doublon visuellement
     redondant. Une entree custom se reconnait a la forme dict de son
-    "asset" (voir _build_custom_type_entry) -- jamais un type integre, qui
+    "asset" (voir _build_visual_fields) -- jamais un type integre, qui
     utilise toujours un chemin de fichier (chaine). Matche soit le "rect"
     singulier d'une carte a 1 frame, soit n'importe quel element du
-    "rects" pluriel d'une porte multi-frame (voir _build_custom_type_entry)
+    "rects" pluriel d'une porte multi-frame (voir _build_visual_fields)
     -- une region deja prise comme UNE frame d'une porte doit etre
     signalee tout autant qu'une carte a 1 frame ordinaire."""
     rect = list(rect)
@@ -548,30 +775,10 @@ ENEMY_FOLDERS = {
 }
 ENEMY_ANIMATIONS = ("idle", "movement", "attack", "damaged", "death")
 
-# health/move_speed/aggro_range/attack_range are tuning defaults, not values
-# given by any design doc -- easy to retune here without touching Enemy's
-# logic. active_attack_frames (0-based) is the window during which a swing
-# actually deals damage: skeleton1's is as specified (frames 7-8 of 9,
-# 1-based); skeleton2 has a different attack frame count (15) with no given
-# mapping, so its window is derived from skeleton1's *relative* position
-# (~75%-87% through the swing) rather than guessed outright. "loot" (currency
-# type -> count) is read once, on death, by Explorator._spawn_loot -- an
-# enemy with no "loot" key (or an empty one) simply drops nothing. "item_loot"
-# (item id -> count, see ITEM_DEFINITIONS) is the same idea for real
-# inventory items (currently just dynamite) rather than currency.
-ENEMY_STATS = {
-    "skeleton1": {
-        "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
-        "active_attack_frames": (6, 7),
-        "loot": {"gold": 2, "blue": 1},
-        "item_loot": {"dynamite": 1},
-    },
-    "skeleton2": {
-        "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
-        "active_attack_frames": (11, 12),
-        "loot": {"gold": 2, "blue": 1},
-    },
-}
+# ENEMY_STATS (health/move_speed/aggro_range/attack_range/loot/item_loot) is
+# now merged directly into each enemy's own _BUILTIN_OBJECT_TYPES[...]["stats"]
+# entry above -- read via OBJECT_TYPES[enemy_type]["stats"], no standalone
+# dict here anymore.
 
 # Currency pickup sheets (assets/item/, alongside dynamite.png): two rows
 # of 16x16 frames -- row 0 is the idle "spinning coin" loop, row 1 plays once
@@ -612,18 +819,89 @@ def load_currency_frames(currency_type):
 # Real inventory items (as opposed to currency, see CURRENCY_FILES above) --
 # each entry is enough for both a ground ItemPickup's static icon and an
 # InventoryPanel slot's icon (same "icon_rect" crop, see Item.get_icon), plus
-# which main_slots key it belongs in and whether pressing "interact" while
-# it's equipped there should throw it (see Explorator._throw_interact_item)
-# instead of just playing the plain interact animation.
-ITEM_DEFINITIONS = {
+# which main_slots key it belongs in. "capabilities" ({"throwable": {...},
+# "explosive": {...}, ...}) replaces the old bare "throwable": True boolean --
+# same vocabulary/shape as a world-object's own optional "capabilities" (see
+# _build_mechanics_fields), read generically by Explorator._throw_interact_item/
+# ProjectileManager instead of a hardcoded dynamite-only path, so a future
+# second throwable+explosive item works numerically for free (only its own
+# sprite/visual would need wiring up).
+_BUILTIN_ITEM_DEFINITIONS = {
     "dynamite": {
         "name": "Dynamite",
         "icon_path": "item/dynamite.png",
         "icon_rect": (0, 0, 16, 16),  # frame 0 -- "avant pickup" / inventory display
         "slot": "interact",
-        "throwable": True,
+        "card_type": "item",
+        "capabilities": {
+            "throwable": {"speed": 220},
+            "explosive": {"radius_tiles": 2, "damage": 1},
+        },
     },
 }
+
+# Items have no creation API (no register_item -- ITEM_DEFINITIONS is a
+# short hand-authored list, unlike OBJECT_TYPES), only their capabilities
+# are editable in-game (see MechanicsPanelUI's "Capacites" section) --
+# so unlike custom_object_types.json, an entry here is always a full
+# capabilities override for an EXISTING item id, never a new item, and
+# needs no OVERRIDE_MARKER to disambiguate the two.
+CUSTOM_ITEM_CAPABILITIES_PATH = PROJECT_ROOT / "assets" / "tiles" / "custom_item_capabilities.json"
+
+
+def _load_custom_item_capabilities():
+    """Absent/vide/corrompu -> dict vide, meme tolerance que
+    _load_custom_object_types."""
+    if not CUSTOM_ITEM_CAPABILITIES_PATH.exists():
+        return {}
+    try:
+        with CUSTOM_ITEM_CAPABILITIES_PATH.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _persist_custom_item_capabilities(overrides):
+    CUSTOM_ITEM_CAPABILITIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CUSTOM_ITEM_CAPABILITIES_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(overrides, handle, indent=2, ensure_ascii=False)
+
+
+def _merged_item_definitions():
+    overrides = _load_custom_item_capabilities()
+    merged = {}
+    for item_id, base in _BUILTIN_ITEM_DEFINITIONS.items():
+        entry = dict(base)
+        if item_id in overrides:
+            entry["capabilities"] = dict(overrides[item_id])
+        merged[item_id] = entry
+    return merged
+
+
+ITEM_DEFINITIONS = _merged_item_definitions()
+
+
+def update_item_capabilities(item_id, capabilities):
+    """Persiste un override de capacites pour un item EXISTANT (la dynamite
+    aujourd'hui -- il n'existe aucune API de creation d'item). Un dict vide
+    retire l'override (retour aux capacites Python par defaut) plutot que
+    de persister une entree no-op. Leve ValueError si item_id n'est pas un
+    item reel."""
+    if item_id not in _BUILTIN_ITEM_DEFINITIONS:
+        raise ValueError(f"'{item_id}' n'existe pas")
+    overrides = _load_custom_item_capabilities()
+    if capabilities:
+        overrides[item_id] = dict(capabilities)
+    else:
+        overrides.pop(item_id, None)
+    _persist_custom_item_capabilities(overrides)
+
+    entry = dict(_BUILTIN_ITEM_DEFINITIONS[item_id])
+    if capabilities:
+        entry["capabilities"] = dict(capabilities)
+    ITEM_DEFINITIONS[item_id] = entry
+    return entry
 
 DYNAMITE_FRAME_SIZE = 16
 DYNAMITE_FRAME_COUNT = 4
@@ -704,7 +982,7 @@ def load_object_frames(object_type, variant=None):
         # with its opening animation's frames picked individually (see
         # SpriteEditorPanelUI), each its own independent tileset region
         # rather than consecutive cells of one sheet. One frame per rect, in
-        # order -- "frames" (see _build_custom_type_entry) already equals
+        # order -- "frames" (see _build_visual_fields) already equals
         # len(rects), so obj["frame"] indexes straight into this list.
         if "rects" in asset_path:
             return [load_tileset_region(asset_path["tileset"], r) for r in asset_path["rects"]]
@@ -928,7 +1206,7 @@ def npc_completeness(type_id):
 
 def _build_npc_type_entry(name, entity_pack, tileset, icon_rect, size, wander_actions):
     """Construction pure (aucune I/O) d'un dict au format OBJECT_TYPES pour
-    un PNJ -- parallele a _build_custom_type_entry, mais volontairement
+    un PNJ -- parallele a _build_visual_fields, mais volontairement
     PAS partagee avec lui : sa signature est pensee pour "un archetype +
     un rect (ou frame_rects) unique", alors qu'un PNJ n'a aucun rect
     propre, seulement une reference a tout un pack d'entite. `icon_rect`
@@ -1146,7 +1424,7 @@ class ObjectManager:
     def is_es_type(self, object_type):
         """True for gate/wall/cave_entrance/big_entrance, OR a custom type
         registered with the "porte" archetype (config["is_es"], see
-        _build_custom_type_entry) -- the object kinds that carry a role
+        _build_visual_fields) -- the object kinds that carry a role
         (get_role/set_role below, both already call this rather than
         ES_TYPES directly, so they pick up custom E/S types for free) and
         that core.world.assembly's generator can treat as a room-to-room
@@ -1223,7 +1501,7 @@ class ObjectManager:
             config = OBJECT_TYPES[obj["type"]]
 
             # Per-cell override (custom types only, see
-            # _build_custom_type_entry) -- a multi-cell object's footprint
+            # _build_mechanics_fields) -- a multi-cell object's footprint
             # can mix blocking/walkable cells (e.g. a pillar-like object
             # with a walkable top row, blocking base row), instead of the
             # single whole-object blocks_movement/walkable flags below

@@ -9,7 +9,7 @@ import pygame
 from core.data.ressources import WORLD_SCALE, TILE_SIZE
 from core.data.sound_manager import SoundManager
 from core.world.object_manager import (
-    ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, ENEMY_STATS, load_enemy_frames, load_currency_frames,
+    ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, load_enemy_frames, load_currency_frames,
     load_dynamite_frames, load_explosion_frames,
     OBJECT_TYPES, load_npc_frames, npc_types, NPC_DIRECTIONS,
 )
@@ -453,8 +453,8 @@ class Animal(_WanderingEntity):
     HITBOX_WIDTH = 14
     HITBOX_HEIGHT = 8
 
-    # A tuning default, not from any design doc (mirrors ENEMY_STATS' own
-    # comment) -- animals have no death animation, so unlike Enemy this is
+    # A tuning default, not from any design doc (mirrors "stats"' own
+    # comment on Enemy) -- animals have no death animation, so unlike Enemy this is
     # the only thing standing between "hit" and "gone" (see take_damage/
     # AnimalManager.update's dead-animal filter).
     HEALTH = 2
@@ -957,7 +957,7 @@ class Enemy(_WanderingEntity):
     like an Animal when the player is out of range (idle/move alternation,
     same per-axis collision-tested movement), but switches to chasing once
     the player enters its aggro_range and to attacking once in attack_range
-    -- both distances (in tiles, from core.world.object_manager.ENEMY_STATS)
+    -- both distances (in tiles, from OBJECT_TYPES[enemy_type]["stats"])
     checked fresh every frame, so stepping back out of range mid-swing just
     drops back to chasing/wandering rather than committing to a swing.
 
@@ -980,7 +980,7 @@ class Enemy(_WanderingEntity):
     def __init__(self, enemy_type, grid_x, grid_y, dungeon):
         self.enemy_type = enemy_type
         self.frames = load_enemy_frames(enemy_type)
-        self.stats = ENEMY_STATS[enemy_type]
+        self.stats = OBJECT_TYPES[enemy_type]["stats"]
         self.tile_size = dungeon.tile_size
 
         self.position = pygame.Vector2(*dungeon.grid_to_world(grid_x, grid_y))
@@ -1239,7 +1239,8 @@ class Pickup:
 
 class ItemPickup:
     """A dropped real inventory Item waiting on the ground (e.g. dynamite
-    dropped by a dead enemy, see ENEMY_STATS' "item_loot") -- unlike Pickup
+    dropped by a dead enemy, see OBJECT_TYPES[enemy_type]["stats"]'s
+    "item_loot") -- unlike Pickup
     (currency), there's no spin/collect animation, just a single static
     frame (Item.get_icon(), already cropped to frame 0 via its icon_rect --
     "avant pickup" per spec). Removes itself and drops `item` into
@@ -1340,24 +1341,36 @@ class PickupManager:
 
 class ThrownDynamite:
     """A player-thrown dynamite stick (see Explorator._throw_interact_item):
-    flies in a straight line at THROW_SPEED in the direction the player was
+    flies in a straight line at `speed` in the direction the player was
     facing at throw time, playing through its 4 frames once -- reaching the
     last frame is literally what triggers detonation (see `exploded`,
     checked by ProjectileManager.update), rather than a separate timer, so
     the explosion always lines up with "the end of the animation" exactly as
     specified. No mid-flight collision with walls/entities -- it's a lobbed
     throw arcing over obstacles to wherever the animation runs out, not a
-    line-of-sight projectile."""
+    line-of-sight projectile.
+
+    `speed`/`blast_radius_tiles`/`blast_damage` come from whichever card's
+    "throwable"/"explosive" capabilities triggered this throw (see
+    ProjectileManager.throw_dynamite/ITEM_DEFINITIONS["dynamite"]) rather
+    than being fixed to dynamite specifically -- the DEFAULT_* class
+    constants are just today's dynamite values, kept as fallbacks so a
+    direct ThrownDynamite(...) construction without capability params still
+    behaves exactly as before."""
 
     FRAME_SIZE = 16
-    THROW_SPEED = 220  # pixels/second
     FRAME_DURATION = 0.15  # seconds per frame -- 4 frames = 0.6s flight
-    BLAST_RADIUS_TILES = 2
-    BLAST_DAMAGE = 1  # dealt to the player and any live Animal/Enemy in range
+    DEFAULT_SPEED = 220  # pixels/second
+    DEFAULT_BLAST_RADIUS_TILES = 2
+    DEFAULT_BLAST_DAMAGE = 1  # dealt to the player and any live Animal/Enemy in range
 
-    def __init__(self, world_x, world_y, direction):
+    def __init__(self, world_x, world_y, direction, speed=DEFAULT_SPEED,
+                 blast_radius_tiles=DEFAULT_BLAST_RADIUS_TILES, blast_damage=DEFAULT_BLAST_DAMAGE):
         self.position = pygame.Vector2(world_x, world_y)
         self.direction = direction
+        self.speed = speed
+        self.blast_radius_tiles = blast_radius_tiles
+        self.blast_damage = blast_damage
         self.frames = load_dynamite_frames()
 
         self.frame = 0
@@ -1370,7 +1383,7 @@ class ThrownDynamite:
         if self.exploded:
             return
 
-        self.position += self.direction * self.THROW_SPEED * dt
+        self.position += self.direction * self.speed * dt
 
         if _advance_frame_once(self, dt, self.FRAME_DURATION, len(self.frames)):
             self.exploded = True
@@ -1432,15 +1445,29 @@ class ProjectileManager:
         self.dynamites = []
         self.explosions = []
 
-    def throw_dynamite(self, world_x, world_y, direction):
-        self.dynamites.append(ThrownDynamite(world_x, world_y, direction))
+    def throw_dynamite(self, world_x, world_y, direction, capabilities=None):
+        """`capabilities` is the throwing card's own capabilities dict (see
+        ITEM_DEFINITIONS["dynamite"]/Explorator._throw_interact_item) --
+        this manager stays free of any object_manager/ITEM_DEFINITIONS
+        dependency, it just reads whichever "throwable"/"explosive" params
+        the caller resolved. Missing/empty falls back to ThrownDynamite's
+        own DEFAULT_* constants (today's dynamite values)."""
+        capabilities = capabilities or {}
+        throwable = capabilities.get("throwable") or {}
+        explosive = capabilities.get("explosive") or {}
+        self.dynamites.append(ThrownDynamite(
+            world_x, world_y, direction,
+            speed=throwable.get("speed", ThrownDynamite.DEFAULT_SPEED),
+            blast_radius_tiles=explosive.get("radius_tiles", ThrownDynamite.DEFAULT_BLAST_RADIUS_TILES),
+            blast_damage=explosive.get("damage", ThrownDynamite.DEFAULT_BLAST_DAMAGE),
+        ))
 
     def update(self, dt, player_refs=()):
         for dynamite in self.dynamites:
             dynamite.update(dt)
             if dynamite.exploded:
                 grid_x, grid_y = self.dungeon.world_to_grid(dynamite.position.x, dynamite.position.y)
-                self.dungeon.destroy_area(grid_x, grid_y, dynamite.BLAST_RADIUS_TILES)
+                self.dungeon.destroy_area(grid_x, grid_y, dynamite.blast_radius_tiles)
                 self._apply_blast_damage(dynamite, player_refs)
                 self.explosions.append(Explosion(dynamite.position.x, dynamite.position.y))
         self.dynamites = [dynamite for dynamite in self.dynamites if not dynamite.exploded]
@@ -1450,13 +1477,13 @@ class ProjectileManager:
         self.explosions = [explosion for explosion in self.explosions if not explosion.finished]
 
     def _apply_blast_damage(self, dynamite, player_refs):
-        """Deals dynamite.BLAST_DAMAGE to every player in this room right now
+        """Deals dynamite.blast_damage to every player in this room right now
         (`player_refs` is empty otherwise, see Dungeon.update) and every live
         Animal/Enemy in this room, whenever their hitbox center falls within
         the same circular radius destroy_area just carved into the terrain.
         No immunity for whoever threw it -- standing too close to your own
         blast hurts just the same."""
-        radius_px = dynamite.BLAST_RADIUS_TILES * self.dungeon.tile_size
+        radius_px = dynamite.blast_radius_tiles * self.dungeon.tile_size
 
         def _in_blast(hitbox):
             dx = hitbox.centerx - dynamite.position.x
@@ -1465,15 +1492,15 @@ class ProjectileManager:
 
         for ref in player_refs:
             if _in_blast(ref.hitbox):
-                ref.player.take_damage(dynamite.BLAST_DAMAGE)
+                ref.player.take_damage(dynamite.blast_damage)
 
         for animal in self.dungeon.animal_manager.animals:
             if animal.alive and _in_blast(animal.get_hitbox()):
-                animal.take_damage(dynamite.BLAST_DAMAGE)
+                animal.take_damage(dynamite.blast_damage)
 
         for enemy in self.dungeon.enemy_manager.enemies:
             if enemy.alive and _in_blast(enemy.get_hitbox()):
-                enemy.take_damage(dynamite.BLAST_DAMAGE)
+                enemy.take_damage(dynamite.blast_damage)
 
     def draw(self, screen, camera):
         for dynamite in self.dynamites:

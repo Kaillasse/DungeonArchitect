@@ -32,9 +32,14 @@ CARDS_DIRECTORY = PROJECT_ROOT / "assets" / "cards"
 CARDS_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
 # "pnj" is reserved -- zero cards of this type exist until the PNJ system
-# itself is built (a separate, later vision item). "room" is the newest --
-# see room_card_id/default_card_for's room branch below.
-CARD_TYPES = ("tile", "item", "mob", "room", "pnj")
+# itself is built (a separate, later vision item). "room" is the newest.
+# "tile_decor"/"tile_special" split the old flat "tile" bucket used for
+# every OBJECT_TYPES-bridged non-mob/non-pnj card (torch/vase/pillar vs.
+# spawn/button/gate/wall/E-S/chest/...) -- "tile" itself now only names the
+# 2 BASE_TILE_CARDS placeholders (tile_floor/tile_wall), see
+# object_manager._derive_card_type for the rule that assigns the other two
+# to an OBJECT_TYPES entry that doesn't declare card_type explicitly.
+CARD_TYPES = ("tile", "tile_decor", "tile_special", "item", "mob", "room", "pnj")
 
 # Prefix namespacing a saved room (assets/rooms/<name>.json) as a Card id --
 # a double underscore rather than e.g. ":" since a room name is already
@@ -121,28 +126,21 @@ def default_card_for(card_id):
 
     config = OBJECT_TYPES.get(card_id)
     if config is not None:
-        # "pnj" checked before "mob" -- a PNJ type (config["npc"] is True,
-        # see object_manager.register_npc_type) is its own CARD_TYPES entry,
-        # not a mob (no health/damage, see core.world.entities.Npc's own
-        # class docstring for why it's deliberately not chased like an
-        # Animal/Enemy).
-        if config.get("npc"):
-            card_type = "pnj"
-        elif config.get("animal") or config.get("enemy"):
-            card_type = "mob"
-        else:
-            card_type = "tile"
+        # card_type is now stored directly on every OBJECT_TYPES entry
+        # (built-in literals set it explicitly; custom/NPC entries get it
+        # backfilled at write/load time, see object_manager._derive_card_type)
+        # rather than re-derived here from npc/animal/enemy flags each call.
         images = [config["asset"]] + list(config.get("variants", {}).values())
         # A custom type registered via the sprite editor carries its own
         # chosen display name (see object_manager.register_custom_type) --
         # preferred over the auto-titlecased id every hand-authored
         # OBJECT_TYPES entry still falls back to (none of those set "name").
         name = config.get("name") or card_id.replace("_", " ").title()
-        return Card(card_id, name, images, card_type)
+        return Card(card_id, name, images, config.get("card_type", "tile_decor"))
 
     definition = ITEM_DEFINITIONS.get(card_id)
     if definition is not None:
-        return Card(card_id, definition["name"], [definition["icon_path"]], "item")
+        return Card(card_id, definition["name"], [definition["icon_path"]], definition.get("card_type", "item"))
 
     return None
 
@@ -308,20 +306,26 @@ def render_room_thumbnail(room_name):
     return surface
 
 
-def room_card_manifest(room_name):
-    """{card_id: count} of every tile/object card actually invested in this
-    room's current saved content -- FLOOR/WALL cell counts (tile_floor/
-    tile_wall) plus one entry per placed object's own type. The single
-    source of truth for both a room card's refund-on-delete (see
-    core.editor.creator.Creator._delete_room) and, indirectly, its
-    displayed properties (see room_card_properties below, which shares the
-    same "load into a scratch Dungeon" approach but reads different fields).
+def room_card_properties(room_name):
+    """Computed display properties for a room card -- dimensions, E/S count
+    (the same "genuinely usable connector" definition
+    core.world.assembly._valid_entry_exits applies), a tally of placed
+    entities by type, and "manifest": {card_id: count} of every tile/object
+    card actually invested in this room's current saved content (FLOOR/WALL
+    cell counts as tile_floor/tile_wall, plus one entry per placed object's
+    own type) -- the single source of truth for both a room card's
+    refund-on-delete (see core.editor.creator.Creator._delete_room, via
+    room_card_manifest below -- rooms ARE literally packs of the cards used
+    to build them) and its "Contenu du pack" display (see CardPanelUI).
     Computed fresh from the saved file every call rather than cached, since
-    Creator can edit the room live in between."""
+    Creator can edit the room live in between -- one Dungeon load covers
+    both the manifest and the rest of these properties (previously two
+    separate loads, one per function)."""
     from core.world.dungeon import Dungeon  # deferred: cards.py otherwise only imports "leaf" modules
 
     dungeon = Dungeon()
     dungeon.load_from_json(room_name)
+    om = dungeon.object_manager
 
     manifest = {}
     for row in dungeon.logical_grid:
@@ -330,21 +334,6 @@ def room_card_manifest(room_name):
                 manifest["tile_floor"] = manifest.get("tile_floor", 0) + 1
             elif cell == WALL:
                 manifest["tile_wall"] = manifest.get("tile_wall", 0) + 1
-    for obj in dungeon.object_manager.objects:
-        manifest[obj["type"]] = manifest.get(obj["type"], 0) + 1
-    return manifest
-
-
-def room_card_properties(room_name):
-    """Computed display properties for a room card: dimensions, E/S count
-    (the same "genuinely usable connector" definition
-    core.world.assembly._valid_entry_exits applies), and a tally of placed
-    entities by type."""
-    from core.world.dungeon import Dungeon  # deferred, see room_card_manifest
-
-    dungeon = Dungeon()
-    dungeon.load_from_json(room_name)
-    om = dungeon.object_manager
 
     es_count = sum(
         1 for obj in om.objects
@@ -352,6 +341,17 @@ def room_card_properties(room_name):
     )
     entities = {}
     for obj in om.objects:
+        manifest[obj["type"]] = manifest.get(obj["type"], 0) + 1
         entities[obj["type"]] = entities.get(obj["type"], 0) + 1
 
-    return {"width": dungeon.width, "height": dungeon.height, "es_count": es_count, "entities": entities}
+    return {
+        "width": dungeon.width, "height": dungeon.height, "es_count": es_count,
+        "entities": entities, "manifest": manifest,
+    }
+
+
+def room_card_manifest(room_name):
+    """{card_id: count} of every tile/object card actually invested in
+    room_name's current saved content -- see room_card_properties, which
+    this now delegates to (one Dungeon load instead of two)."""
+    return room_card_properties(room_name)["manifest"]

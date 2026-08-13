@@ -16,6 +16,7 @@
     ],
     "frames": 1,
     "name": "stone",
+    "card_type": "tile_decor",
     "blocks_movement": true
   },
   "stone_2": {

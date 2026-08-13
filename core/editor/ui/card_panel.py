@@ -316,6 +316,7 @@ class CardPanelUI(_ResizableCornerMixin):
                     f"Dimensions : {props['width']}x{props['height']}",
                     f"E/S : {props['es_count']}",
                     f"Objets : {sum(props['entities'].values())}",
+                    f"Contenu du pack : {sum(props['manifest'].values())} cartes",
                 ]
             else:
                 lines = [

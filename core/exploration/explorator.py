@@ -12,7 +12,7 @@ from core.world.assembly import load_assembly, save_assembly, generate_assembly
 from core.data.ressources import ROOMS_DIRECTORY, next_new_donjon_name
 from core.world.entities import Player, PlayerRef
 from core.world.object_manager import (
-    ANIMAL_TYPES, ENEMY_TYPES, npc_types, ENEMY_STATS, ITEM_DEFINITIONS, make_item, OBJECT_TYPES,
+    ANIMAL_TYPES, ENEMY_TYPES, npc_types, ITEM_DEFINITIONS, make_item, OBJECT_TYPES,
 )
 from core.exploration.player_session import PlayerSession
 from core.exploration.multiplayer_ui import MultiplayerPanelUI
@@ -714,12 +714,12 @@ class Explorator(NetworkSessionMixin):
 
     @staticmethod
     def _spawn_loot(enemy, enemy_dungeon):
-        """Drops ENEMY_STATS[enemy.enemy_type]'s loot/item_loot around the
-        death spot via _scatter_loot. enemy.position is already local to
-        enemy_dungeon (never offset-translated -- see Animal/Enemy's own
-        coordinate convention), so no conversion is needed before handing it
-        to that same dungeon's PickupManager."""
-        stats = ENEMY_STATS[enemy.enemy_type]
+        """Drops OBJECT_TYPES[enemy.enemy_type]["stats"]'s loot/item_loot
+        around the death spot via _scatter_loot. enemy.position is already
+        local to enemy_dungeon (never offset-translated -- see Animal/
+        Enemy's own coordinate convention), so no conversion is needed
+        before handing it to that same dungeon's PickupManager."""
+        stats = OBJECT_TYPES[enemy.enemy_type]["stats"]
         Explorator._scatter_loot(
             enemy_dungeon, enemy.position.x, enemy.position.y,
             stats.get("loot", {}), stats.get("item_loot", {}), spread=10,
@@ -761,9 +761,10 @@ class Explorator(NetworkSessionMixin):
         return self.dungeon, 0, 0
 
     def _throw_interact_item(self, session):
-        """Returns True if session's interact slot held a throwable item (see
-        ITEM_DEFINITIONS' "throwable" flag -- currently just dynamite) and it
-        was thrown: consumes the item, spawns a live ThrownDynamite in the
+        """Returns True if session's interact slot held an item with a
+        "throwable" capability (see ITEM_DEFINITIONS' "capabilities" dict --
+        currently just dynamite, which also carries "explosive") and it was
+        thrown: consumes the item, spawns a live ThrownDynamite in the
         current room (converted to that room's local coordinates, same
         convention as every other per-room live entity) at the player's
         position, in the direction they're currently facing, and plays the
@@ -771,7 +772,8 @@ class Explorator(NetworkSessionMixin):
         slot is empty or holds a non-throwable item, leaving _trigger_action
         to fall back to the plain interact animation."""
         item = session.inventory.main_slots["interact"]
-        if item is None or not ITEM_DEFINITIONS.get(item.item_id, {}).get("throwable"):
+        capabilities = ITEM_DEFINITIONS.get(item.item_id, {}).get("capabilities", {}) if item is not None else {}
+        if "throwable" not in capabilities:
             return False
 
         session.inventory.main_slots["interact"] = None
@@ -783,7 +785,7 @@ class Explorator(NetworkSessionMixin):
         tile_size = dungeon.tile_size
         local_x = session.player.position.x - offset_x * tile_size
         local_y = session.player.position.y - offset_y * tile_size
-        dungeon.projectile_manager.throw_dynamite(local_x, local_y, direction)
+        dungeon.projectile_manager.throw_dynamite(local_x, local_y, direction, capabilities)
         SoundManager().play("dynamite_interact")
 
         session.player.play_action("interact")
