@@ -30,24 +30,30 @@ class SpriteEditorPanelUI:
     comme CardPanelUI) : on choisit un fichier PNG sous assets/tiles/, on
     deplace une selection dimensionnee selon les steppers largeur/hauteur
     (alignee sur la grille source 16px, pas de redimensionnement libre au
-    pixel pres). Deux modes (self.mode, boutons _mode_rects) :
-    - "tuile" : la selection est UN sprite (une carte) -- on regle nom/
-      archetype/blocage, "Enregistrer" appelle object_manager.
-      register_custom_type puis rend l'id du type nouvellement cree --
-      Creator (le seul appelant) s'en sert pour crediter 1 exemplaire de la
-      carte au profil actif et rafraichir CardPanelUI, meme geste que
-      --give-card. Volontairement limite aux archetypes a une seule region
-      (voir ARCHETYPES) -- torche/pilier restent hors scope, voir leur
-      commentaire dans object_manager.py.
-    - "pack" : la selection devient une grille de width_tiles x height_tiles
-      tuiles 1x1 INDIVIDUELLES -- "Enregistrer" les extrait et numerote
-      chacune separement dans un nouveau pack autotile (ressources.
-      save_autotile_pack), sans les brancher sur AUTOTILE_LOOKUP : associer
-      chaque tuile a son motif de voisins reste une etape manuelle
-      separee, ce mode automatise seulement le recadrage. Ne touche jamais
-      OBJECT_TYPES/le systeme de Cartes (des tuiles de terrain brutes ne
-      sont pas des objets placables) -- handle_event retourne toujours
-      None pour ce mode, Creator n'a rien a crediter.
+    pixel pres). Trois modes (self.mode, boutons _mode_rects) :
+    - "decouper" : regroupe les deux comportements de recadrage/extraction
+      qui n'ont jamais ete des handlers vraiment separes (ils partagent deja
+      toute leur colonne de parametres et leur chaine handle_event/render,
+      voir plus bas) -- un sous-toggle self.crop_kind (CROP_KINDS,
+      _crop_kind_rects) choisit lequel est actif :
+        - "tuile" : la selection est UN sprite (une carte) -- on regle nom/
+          archetype/blocage, "Enregistrer" appelle object_manager.
+          register_custom_type puis rend l'id du type nouvellement cree --
+          Creator (le seul appelant) s'en sert pour crediter 1 exemplaire de
+          la carte au profil actif et rafraichir CardPanelUI, meme geste que
+          --give-card. Volontairement limite aux archetypes a une seule
+          region (voir ARCHETYPES) -- torche/pilier restent hors scope, voir
+          leur commentaire dans object_manager.py.
+        - "pack" : la selection devient une grille de width_tiles x
+          height_tiles tuiles 1x1 INDIVIDUELLES -- "Enregistrer" les extrait
+          et numerote chacune separement dans un nouveau pack autotile
+          (ressources.save_autotile_pack), sans les brancher sur
+          AUTOTILE_LOOKUP : associer chaque tuile a son motif de voisins
+          reste une etape manuelle separee, ce sous-mode automatise
+          seulement le recadrage. Ne touche jamais OBJECT_TYPES/le systeme
+          de Cartes (des tuiles de terrain brutes ne sont pas des objets
+          placables) -- handle_event retourne toujours None pour ce
+          sous-mode, Creator n'a rien a crediter.
     - "bitmap" : remplace la visionneuse de fichier par un choix de pack
       (self.pack_browser) + une grille de ses tuiles deja extraites. La
       tuile selectionnee gagne soit un bitmask (4 boutons Haut/Droite/Bas/
@@ -56,22 +62,25 @@ class SpriteEditorPanelUI:
       bitmask deja assigne ailleurs dans le pack), via ressources.
       update_autotile_pack_tile. handle_event retourne toujours None ici
       aussi -- Creator resynchronise juste le donjon ouvert si le pack
-      modifie est son theme actif (voir _try_save_bitmap_tile).
-    - "pixel" : le seul mode qui touche vraiment aux pixels -- un outil
-      type Paint rudimentaire (pinceau avec roue de couleur + taille,
-      pipette, selection rectangulaire au clique-glisse, copier/couper/
-      coller au clavier, annuler) sur le fichier PNG charge (n'importe
-      lequel sous assets/, pas seulement assets/tiles/ -- voir
-      _file_browser_root == ""), ou sur une toile vierge nouvellement
-      creee (voir _px_new_canvas_create, ecrite sous assets/tiles/
-      custom_sprites/). "Enregistrer" ecrase le fichier source en place
-      (pygame.image.save via ressources.save_tileset_png) -- confirme
-      avec l'utilisateur : pas de sauvegarde automatique par trait,
-      contrairement au mode bitmap, une ecriture PNG est plus couteuse
-      et plus destructive qu'une simple fusion JSON. handle_event
+      modifie est son theme actif (voir _try_save_bitmap_tile). Reste
+      independant de "decouper" pour l'instant -- pourrait un jour s'y
+      repartir (avec la Forge), pas encore tranche.
+    - "peindre" (ex-"pixel", pur renommage -- identifiants internes
+      _handle_pixel_event/_render_pixel/_px_* inchanges) : le seul mode qui
+      touche vraiment aux pixels -- un outil type Paint rudimentaire
+      (pinceau avec roue de couleur + taille, pipette, selection
+      rectangulaire au clique-glisse, copier/couper/coller au clavier,
+      annuler) sur le fichier PNG charge (n'importe lequel sous assets/, pas
+      seulement assets/tiles/ -- voir _file_browser_root == ""), ou sur une
+      toile vierge nouvellement creee (voir _px_new_canvas_create, ecrite
+      sous assets/tiles/custom_sprites/). "Enregistrer" ecrase le fichier
+      source en place (pygame.image.save via ressources.save_tileset_png)
+      -- confirme avec l'utilisateur : pas de sauvegarde automatique par
+      trait, contrairement au mode bitmap, une ecriture PNG est plus
+      couteuse et plus destructive qu'une simple fusion JSON. handle_event
       retourne toujours None -- ce mode ne credite jamais de nouvelle
-      Carte, il ne fait que produire/modifier le PNG source qu'un autre
-      passage en mode tuile/pack/bitmap saura ensuite recadrer/tagger.
+      Carte, il ne fait que produire/modifier le PNG source qu'un passage
+      en mode "decouper" saura ensuite recadrer/tagger.
 
     Camera de la visionneuse (self.camera, core.engine.camera.Camera) :
     clic molette maintenu = pan, molette = zoom ancre sur le curseur --
@@ -80,7 +89,11 @@ class SpriteEditorPanelUI:
     """
 
     PANEL_WIDTH = 1000
-    PANEL_HEIGHT = 700
+    # +44 par rapport a l'original (700) -- meme delta que le nouveau toggle
+    # crop_kind ajoute en tete de la colonne de parametres du mode
+    # "decouper" (voir _layout), pour que confirm_rect/le texte de statut en
+    # dessous restent visibles au lieu de toucher tout juste le bord bas.
+    PANEL_HEIGHT = 744
     OVERLAY_ALPHA = 150
 
     VIEWER_WIDTH = 520
@@ -114,9 +127,26 @@ class SpriteEditorPanelUI:
     # parametres a 3, une chaine longue deborderait de son propre rect
     # (draw_centered_label ne tronque/wrap pas). Le titre du panneau +
     # status_text donnent le contexte complet.
-    MODES = (("tuile", "Tuile"), ("pack", "Pack"), ("bitmap", "Bitmap"), ("pixel", "Pixel"))
+    #
+    # "decouper" regroupe les anciens modes "tuile" et "pack" (voir
+    # crop_kind, le sous-toggle qui choisit lequel des deux comportements
+    # est actif -- tuile/pack ne sont plus des self.mode possibles depuis
+    # ce regroupement, seulement des self.crop_kind). "peindre" est un pur
+    # renommage de l'ancien mode "pixel" -- aucun changement de
+    # comportement, seuls les identifiants internes _px_*/_handle_pixel_
+    # event/_render_pixel restent tels quels (identifiants Python internes,
+    # non visibles, les renommer serait du churn sans benefice).
+    MODES = (("decouper", "Decouper"), ("peindre", "Peindre"), ("bitmap", "Bitmap"))
 
-    # Mode "pixel" -- outils/roue de couleur.
+    # Mode "decouper" -- sous-toggle entre les deux anciens comportements
+    # "tuile" (une seule carte placable) et "pack" (grille de tuiles
+    # individuelles extraites) qu'il regroupe desormais. Reprend
+    # exactement le vocabulaire des anciens ids de mode -- toute la chaine
+    # partagee tuile/pack plus bas teste self.crop_kind au lieu de
+    # self.mode, sans autre changement de comportement.
+    CROP_KINDS = (("tuile", "Tuile"), ("pack", "Pack"))
+
+    # Mode "peindre" (ex-"pixel") -- outils/roue de couleur.
     PX_TOOLS = (("brush", "Pinceau"), ("eyedropper", "Pipette"), ("select", "Selection"))
     PX_MAX_BRUSH_SIZE = 16
     PX_UNDO_LIMIT = 20
@@ -186,18 +216,20 @@ class SpriteEditorPanelUI:
         self._panning = False
         self._pan_last_pos = None
 
-        # "tuile" -- une seule region devient une nouvelle Carte placable
-        # (comportement d'origine). "pack" -- la zone de selection devient
-        # une grille de tuiles 1x1 INDIVIDUELLES (width_tiles x height_tiles
-        # cases separees, pas un seul sprite combine) extraites et
-        # numerotees dans un nouveau pack autotile (voir _try_register_pack
-        # / ressources.save_autotile_pack) -- l'association bitmask reste
-        # une etape manuelle separee, ce mode ne fait qu'automatiser le
+        self.mode = "decouper"
+        # Sous-toggle du mode "decouper" (voir CROP_KINDS) -- "tuile" : une
+        # seule region devient une nouvelle Carte placable (comportement
+        # d'origine). "pack" : la zone de selection devient une grille de
+        # tuiles 1x1 INDIVIDUELLES (width_tiles x height_tiles cases
+        # separees, pas un seul sprite combine) extraites et numerotees
+        # dans un nouveau pack autotile (voir _try_register_pack /
+        # ressources.save_autotile_pack) -- l'association bitmask reste une
+        # etape manuelle separee, ce sous-mode ne fait qu'automatiser le
         # recadrage.
-        self.mode = "tuile"
+        self.crop_kind = "tuile"
         self.width_tiles = 1
         self.height_tiles = 1
-        # "pack" mode only -- "autotile" (comportement d'origine, ci-dessus)
+        # crop_kind "pack" only -- "autotile" (comportement d'origine, ci-dessus)
         # ou "entite" : la feuille chargee vient d'une feuille de
         # personnage/PNJ (assets/characters/, voir _file_browser_root) et le
         # decoupage en grille utilise entity_tile_size (32 par defaut pour
@@ -413,6 +445,7 @@ class SpriteEditorPanelUI:
         self._px_new_h = 16
 
         self._mode_rects = {}
+        self._crop_kind_rects = {}
         self._width_stepper = None
         self._height_stepper = None
         self._archetype_rects = {}
@@ -437,7 +470,8 @@ class SpriteEditorPanelUI:
 
     def open(self):
         self.active = True
-        self.mode = "tuile"
+        self.mode = "decouper"
+        self.crop_kind = "tuile"
         self.pack_kind = "autotile"
         self._file_browser_root = "tiles"
         self.status_text = ""
@@ -528,29 +562,39 @@ class SpriteEditorPanelUI:
         params_x = self.viewer_rect.right + 20
         step_w = 190
 
-        # 4 boutons maintenant (Tuile/Pack/Bitmap/Pixel, voir MODES) -- 70px
-        # chacun (l'ancienne largeur, pour 3 boutons) deborderait du panneau
-        # une fois un 4e ajoute (4*70+3*4=292 > les ~224px disponibles entre
-        # params_x et le bord droit du panneau) ; 52px tient tout juste
-        # (4*52+3*4=220).
+        # 3 boutons (Decouper/Peindre/Bitmap, voir MODES) -- largeur
+        # d'origine 70px (3*70+2*4=218 tient dans les ~224px disponibles
+        # entre params_x et le bord droit du panneau).
         self._mode_rects = {}
         row_x = params_x
         for mode_id, _label in self.MODES:
-            rect = pygame.Rect(row_x, self.y + 60, 52, 32)
+            rect = pygame.Rect(row_x, self.y + 60, 70, 32)
             self._mode_rects[mode_id] = rect
             row_x = rect.right + 4
 
-        self.name_box.rect.x = params_x
-        self.name_box.rect.y = self.y + 100
+        # Sous-toggle Tuile/Pack du mode "decouper" (voir CROP_KINDS) --
+        # meme gabarit que _pack_kind_rects plus bas (93px chacun). En tete
+        # de la colonne de parametres partagee tuile/pack, ce qui decale
+        # tout le reste (name_box et en dessous) de +44px par rapport a
+        # avant ce regroupement -- meme delta ajoute a PANEL_HEIGHT.
+        self._crop_kind_rects = {}
+        row_x = params_x
+        for kind_id, _label in self.CROP_KINDS:
+            rect = pygame.Rect(row_x, self.y + 100, 93, 32)
+            self._crop_kind_rects[kind_id] = rect
+            row_x = rect.right + 4
 
-        self._width_stepper = Stepper(params_x, self.y + 146, 28, 50, 1, self.MAX_TILES)
-        self._height_stepper = Stepper(params_x, self.y + 190, 28, 50, 1, self.MAX_TILES)
+        self.name_box.rect.x = params_x
+        self.name_box.rect.y = self.y + 144
+
+        self._width_stepper = Stepper(params_x, self.y + 190, 28, 50, 1, self.MAX_TILES)
+        self._height_stepper = Stepper(params_x, self.y + 234, 28, 50, 1, self.MAX_TILES)
 
         # 3 archetypes now (Sol/Mur/Porte) share the same column width as
         # the 3 mode buttons above -- same narrow-width treatment (60px vs
         # the original 90px, "Porte" itself is a short label -- see
         # object_manager.ARCHETYPES).
-        archetype_y = self.y + 234
+        archetype_y = self.y + 278
         self._archetype_rects = {}
         row_x = params_x
         for archetype_id, preset in ARCHETYPES.items():
@@ -563,35 +607,35 @@ class SpriteEditorPanelUI:
         # rendered footprint is capped to roughly this same ~140px
         # regardless of width_tiles/height_tiles, so a fixed gap before
         # _interactable_rect below is safe for any selection size.
-        self._blocks_rect = pygame.Rect(params_x, self.y + 278, step_w, 32)
-        self._interactable_rect = pygame.Rect(params_x, self.y + 430, step_w, 32)
+        self._blocks_rect = pygame.Rect(params_x, self.y + 322, step_w, 32)
+        self._interactable_rect = pygame.Rect(params_x, self.y + 474, step_w, 32)
 
-        # Mode "pack" only -- Autotile (comportement d'origine, utilise
+        # crop_kind "pack" only -- Autotile (comportement d'origine, utilise
         # archetype_rects ci-dessus pour le role Sol/Mur) vs Entite (feuille
         # de personnage/PNJ, voir pack_kind) -- meme emplacement que
-        # _blocks_rect ci-dessus, jamais utilise par le mode pack lui-meme,
-        # donc aucun chevauchement reel malgre le meme y.
+        # _blocks_rect ci-dessus, jamais utilise par crop_kind "pack"
+        # lui-meme, donc aucun chevauchement reel malgre le meme y.
         self._pack_kind_rects = {}
         row_x = params_x
         for kind_id, _label in (("autotile", "Autotile"), ("entite", "Entite")):
-            rect = pygame.Rect(row_x, self.y + 278, 93, 32)
+            rect = pygame.Rect(row_x, self.y + 322, 93, 32)
             self._pack_kind_rects[kind_id] = rect
             row_x = rect.right + 4
         # Taille de cellule (px, feuille source) pour le decoupage en grille
         # d'un pack Entite -- 32 par defaut (voir entity_tile_size), une
         # feuille de personnage n'est quasiment jamais gridee sur 16px comme
         # le tileset interieur (TILE_SIZE) que le mode Autotile utilise.
-        self._entity_tile_size_stepper = Stepper(params_x, self.y + 322, 28, 50, 8, 128)
+        self._entity_tile_size_stepper = Stepper(params_x, self.y + 366, 28, 50, 8, 128)
 
         # Archetype "porte" only, below _interactable_rect -- see
         # _try_register/handle_event/render's own archetype gates. Frame
         # thumbnails (see _door_frame_thumb_rects) start right below the
         # stepper and can wrap onto a 2nd row up to MAX_DOOR_FRAMES -- the
         # gap to _confirm_rect below leaves room for that.
-        self._lockable_rect = pygame.Rect(params_x, self.y + 470, step_w, 32)
-        self._door_frames_stepper = Stepper(params_x, self.y + 512, 28, 50, 1, self.MAX_DOOR_FRAMES)
+        self._lockable_rect = pygame.Rect(params_x, self.y + 514, step_w, 32)
+        self._door_frames_stepper = Stepper(params_x, self.y + 556, 28, 50, 1, self.MAX_DOOR_FRAMES)
 
-        self._confirm_rect = pygame.Rect(params_x, self.y + 616, step_w, 40)
+        self._confirm_rect = pygame.Rect(params_x, self.y + 660, step_w, 40)
         self._close_rect = pygame.Rect(self.x + self.PANEL_WIDTH - 90, self.y + 12, 70, 28)
 
         # Mode "bitmap" -- reuses the same viewer_rect bounds for a tile
@@ -698,7 +742,7 @@ class SpriteEditorPanelUI:
         (32 by default) instead: a character sheet's own cells are rarely
         16px (blackcat.png's are 32x32) and vary per sheet, unlike the
         fixed built-in tileset every other mode crops from."""
-        if self.mode == "pack" and self.pack_kind == "entite":
+        if self.crop_kind == "pack" and self.pack_kind == "entite":
             return self.entity_tile_size
         return TILE_SIZE
 
@@ -717,6 +761,23 @@ class SpriteEditorPanelUI:
         self._sel_x = 0
         self._sel_y = 0
         self._refresh_file_list()
+
+    def _set_crop_kind(self, kind_id):
+        """Tuile <-> Pack sub-toggle within mode "decouper" (see CROP_KINDS)
+        -- mirrors _set_pack_kind's own reset, just triggered by switching
+        crop_kind INSTEAD of leaving mode "decouper" entirely (see
+        _set_mode's own equivalent reset, gated on the outer mode instead).
+        Without this, switching from crop_kind "pack"+pack_kind "entite"
+        (file_browser pointed at assets/characters/) back to "tuile" would
+        leave file_browser stuck showing character sheets instead of
+        assets/tiles/."""
+        if kind_id == self.crop_kind:
+            return
+        if self.crop_kind == "pack" and self._file_browser_root != "tiles":
+            self.pack_kind = "autotile"
+            self._file_browser_root = "tiles"
+            self._refresh_file_list()
+        self.crop_kind = kind_id
 
     def _clamp_selection(self):
         if self.image is None:
@@ -2108,29 +2169,33 @@ class SpriteEditorPanelUI:
         return None
 
     def _set_mode(self, mode_id):
-        """Switches self.mode, resetting pack mode's own kind/file-browser-
-        root back to their defaults whenever leaving "pack" -- otherwise
-        file_browser could keep showing assets/characters/** content while
-        back in "tuile" mode, which only ever means assets/tiles/ (see
-        _full_image_name/_refresh_file_list). A no-op reset if pack_kind
-        was already "autotile".
+        """Switches self.mode, resetting "decouper"'s own crop_kind/pack_kind/
+        file-browser-root back to their defaults whenever leaving it entirely
+        -- otherwise file_browser could keep showing assets/characters/**
+        content while in "peindre"/"bitmap", which mean something else
+        entirely (see _full_image_name/_refresh_file_list). A no-op reset if
+        pack_kind was already "autotile" (see _set_crop_kind for the
+        equivalent reset when switching crop_kind WITHIN "decouper" instead
+        of leaving it).
 
         Also refreshes pack_browser whenever entering "bitmap" -- open()
         populates it once, so without this a pack registered moments ago
-        in "pack" mode (e.g. straight after slicing blackcat.png) would
-        never show up here until the whole panel is closed and reopened.
+        under crop_kind "pack" (e.g. straight after slicing blackcat.png)
+        would never show up here until the whole panel is closed and
+        reopened.
 
-        "pixel" gets the same file_browser_root treatment as "pack" above,
-        just with its own root ("", assets/ entier -- see _refresh_file_list)
-        instead of "characters". Deliberately no autosave-on-leave here
-        (unlike bitmap's _bm_auto_save_current) -- a PNG write is heavier/
-        more destructive than bitmap's per-tile JSON merge, confirmed with
-        the user as an explicit "Enregistrer" button only (see _px_save)."""
-        if self.mode == "pack" and mode_id != "pack" and self._file_browser_root != "tiles":
+        "peindre" gets the same file_browser_root treatment as "decouper"
+        above, just with its own root ("", assets/ entier -- see
+        _refresh_file_list) instead of "characters". Deliberately no
+        autosave-on-leave here (unlike bitmap's _bm_auto_save_current) -- a
+        PNG write is heavier/more destructive than bitmap's per-tile JSON
+        merge, confirmed with the user as an explicit "Enregistrer" button
+        only (see _px_save)."""
+        if self.mode == "decouper" and mode_id != "decouper" and self._file_browser_root != "tiles":
             self.pack_kind = "autotile"
             self._file_browser_root = "tiles"
             self._refresh_file_list()
-        if self.mode == "pixel" and mode_id != "pixel" and self._file_browser_root != "tiles":
+        if self.mode == "peindre" and mode_id != "peindre" and self._file_browser_root != "tiles":
             self._file_browser_root = "tiles"
             self._px_painting = False
             self._px_new_canvas_open = False
@@ -2140,7 +2205,7 @@ class SpriteEditorPanelUI:
             self._refresh_file_list()
         if mode_id == "bitmap" and self.mode != "bitmap":
             self.pack_browser.set_rooms(list_autotile_packs())
-        if mode_id == "pixel" and self.mode != "pixel":
+        if mode_id == "peindre" and self.mode != "peindre":
             self._file_browser_root = ""
             self._refresh_file_list()
         self.mode = mode_id
@@ -2811,7 +2876,7 @@ class SpriteEditorPanelUI:
                 if browser.is_modal:
                     browser.handle_event(event)
                     return None
-            if self.mode == "pixel":
+            if self.mode == "peindre":
                 # New-canvas sub-form reuses name_box for the filename --
                 # typed characters go there. Otherwise (no text field
                 # visible in this mode) KEYDOWN only ever means a
@@ -2898,7 +2963,7 @@ class SpriteEditorPanelUI:
                         self._cycle_neighbor(neighbor_key, 1 if event.y > 0 else -1)
                 return None
             if (
-                self.mode == "tuile"
+                self.crop_kind == "tuile"
                 and self.archetype in self.CELL_MODES_ARCHETYPES
                 and self.cell_modes_grid is not None
                 and not (self.width_tiles == 1 and self.height_tiles == 1)
@@ -2926,7 +2991,7 @@ class SpriteEditorPanelUI:
         if self.mode == "bitmap":
             return self._handle_bitmap_event(event)
 
-        if self.mode == "pixel":
+        if self.mode == "peindre":
             return self._handle_pixel_event(event)
 
         if event.type == pygame.MOUSEBUTTONUP:
@@ -2970,7 +3035,7 @@ class SpriteEditorPanelUI:
         # (RoomBrowser.is_modal) -- route every event there
         # unconditionally while one is open, or the popup renders but
         # never actually receives input.
-        if self.mode == "tuile" and self.existing_cards_browser.is_modal:
+        if self.crop_kind == "tuile" and self.existing_cards_browser.is_modal:
             self.existing_cards_browser.handle_event(event)
             return None
 
@@ -2978,7 +3043,7 @@ class SpriteEditorPanelUI:
             # Right-click only ever means "open existing_cards_browser's
             # own Supprimer menu" here -- everything else only responds
             # to left-click/middle-click (pan).
-            if self.mode == "tuile" and self.existing_cards_browser.contains(event.pos):
+            if self.crop_kind == "tuile" and self.existing_cards_browser.contains(event.pos):
                 self.existing_cards_browser.handle_event(event)
             return None
 
@@ -3002,20 +3067,25 @@ class SpriteEditorPanelUI:
                 self._load_image(selected)
             return None
 
-        if self.mode == "tuile" and self.existing_cards_browser.contains(event.pos):
+        if self.crop_kind == "tuile" and self.existing_cards_browser.contains(event.pos):
             self.existing_cards_browser.handle_event(event)
             selected_id = self.existing_cards_browser.selected_name
             if selected_id is not None:
                 self._load_existing_card_for_edit(selected_id)
             return None
 
-        if self.mode == "tuile" and self.editing_type_id is not None and self._new_card_rect.collidepoint(event.pos):
+        if self.crop_kind == "tuile" and self.editing_type_id is not None and self._new_card_rect.collidepoint(event.pos):
             self._reset_to_new_card()
             return None
 
         for mode_id, rect in self._mode_rects.items():
             if rect.collidepoint(event.pos):
                 self._set_mode(mode_id)
+                return None
+
+        for kind_id, rect in self._crop_kind_rects.items():
+            if rect.collidepoint(event.pos):
+                self._set_crop_kind(kind_id)
                 return None
 
         if self.viewer_rect.collidepoint(event.pos) and self.image is not None:
@@ -3039,7 +3109,7 @@ class SpriteEditorPanelUI:
             self._ensure_door_frame_rects()
             return None
 
-        if self.mode == "pack":
+        if self.crop_kind == "pack":
             for kind_id, rect in self._pack_kind_rects.items():
                 if rect.collidepoint(event.pos):
                     self._set_pack_kind(kind_id)
@@ -3052,13 +3122,13 @@ class SpriteEditorPanelUI:
                     self._clamp_selection()
                     return None
 
-        if not (self.mode == "pack" and self.pack_kind == "entite"):
+        if not (self.crop_kind == "pack" and self.pack_kind == "entite"):
             for archetype_id, rect in self._archetype_rects.items():
                 if rect.collidepoint(event.pos):
                     self.archetype = archetype_id
                     return None
 
-        if self.mode == "tuile" and self.archetype == "porte":
+        if self.crop_kind == "tuile" and self.archetype == "porte":
             if self._lockable_rect.collidepoint(event.pos):
                 self.lockable = not self.lockable
                 return None
@@ -3080,7 +3150,7 @@ class SpriteEditorPanelUI:
                         self._sel_x, self._sel_y = self.door_frame_rects[index][0], self.door_frame_rects[index][1]
                     return None
 
-        if self.mode == "tuile" and self.archetype in self.CELL_MODES_ARCHETYPES:
+        if self.crop_kind == "tuile" and self.archetype in self.CELL_MODES_ARCHETYPES:
             if self.width_tiles == 1 and self.height_tiles == 1:
                 # The plain blocks_movement checkbox only ever makes sense
                 # for "sol" -- "mur" is already solid by sitting on a WALL
@@ -3099,12 +3169,12 @@ class SpriteEditorPanelUI:
                         self._cycle_cell_mode(row, col, 1)
                         return None
 
-        if self.mode == "tuile" and self._interactable_rect.collidepoint(event.pos):
+        if self.crop_kind == "tuile" and self._interactable_rect.collidepoint(event.pos):
             self.interactable = not self.interactable
             return None
 
         if self._confirm_rect.collidepoint(event.pos):
-            if self.mode == "pack":
+            if self.crop_kind == "pack":
                 self._try_register_pack()
                 return None
             if self.editing_type_id is not None:
@@ -3139,12 +3209,18 @@ class SpriteEditorPanelUI:
             self._render_bitmap(screen)
             return
 
-        if self.mode == "pixel":
+        if self.mode == "peindre":
             self._render_pixel(screen)
             return
 
+        for kind_id, rect in self._crop_kind_rects.items():
+            label = dict(self.CROP_KINDS)[kind_id]
+            selected = kind_id == self.crop_kind
+            text = f"> {label}" if selected else label
+            self.border.draw_centered_label(screen, rect, self.font, text, (255, 220, 120) if selected else (255, 255, 255))
+
         self.file_browser.render(screen)
-        if self.mode == "tuile":
+        if self.crop_kind == "tuile":
             self.existing_cards_browser.render(screen)
             if self.editing_type_id is not None:
                 self.border.draw_centered_label(screen, self._new_card_rect, self.small_font, "Nouvelle carte")
@@ -3162,9 +3238,9 @@ class SpriteEditorPanelUI:
             screen.set_clip(self.viewer_rect)
             screen.blit(scaled_image, (self.viewer_rect.x + image_screen_x, self.viewer_rect.y + image_screen_y))
 
-            if self.mode == "tuile":
+            if self.crop_kind == "tuile":
                 self._render_existing_card_markers(screen)
-            elif self.mode == "pack":
+            elif self.crop_kind == "pack":
                 self._render_pack_region_markers(screen)
 
             active_tile_size = self._active_tile_size()
@@ -3176,7 +3252,7 @@ class SpriteEditorPanelUI:
                 self.height_tiles * active_tile_size * zoom,
             )
             pygame.draw.rect(screen, (255, 220, 120), sel_rect, 2)
-            if self.mode == "pack":
+            if self.crop_kind == "pack":
                 # Internal grid lines -- makes "this is N separate 1x1 (or
                 # tile_size x tile_size) tiles, not one combined sprite"
                 # visible at a glance.
@@ -3200,7 +3276,7 @@ class SpriteEditorPanelUI:
         h_label = self.small_font.render("Hauteur (tuiles)", True, (200, 200, 200))
         screen.blit(h_label, (self._height_stepper.minus_rect.x, self._height_stepper.minus_rect.y - h_label.get_height() - 2))
 
-        if self.mode == "pack":
+        if self.crop_kind == "pack":
             for kind_id, rect in self._pack_kind_rects.items():
                 label = "Autotile" if kind_id == "autotile" else "Entite"
                 selected = kind_id == self.pack_kind
@@ -3216,14 +3292,14 @@ class SpriteEditorPanelUI:
                     self._entity_tile_size_stepper.minus_rect.y - size_label.get_height() - 2,
                 ))
 
-        if not (self.mode == "pack" and self.pack_kind == "entite"):
+        if not (self.crop_kind == "pack" and self.pack_kind == "entite"):
             for archetype_id, rect in self._archetype_rects.items():
                 label = ARCHETYPES[archetype_id]["label"]
                 selected = archetype_id == self.archetype
                 text = f"> {label}" if selected else label
                 self.border.draw_centered_label(screen, rect, self.font, text, (255, 220, 120) if selected else (255, 255, 255))
 
-        if self.mode == "tuile" and self.archetype in self.CELL_MODES_ARCHETYPES:
+        if self.crop_kind == "tuile" and self.archetype in self.CELL_MODES_ARCHETYPES:
             if self.width_tiles == 1 and self.height_tiles == 1:
                 if self.archetype == "sol":
                     check_label = "[x] Bloque le mouvement" if self.blocks_movement else "[ ] Bloque le mouvement"
@@ -3231,11 +3307,11 @@ class SpriteEditorPanelUI:
             else:
                 self._render_cell_modes_grid(screen)
 
-        if self.mode == "tuile":
+        if self.crop_kind == "tuile":
             interact_label = "[x] Interagible" if self.interactable else "[ ] Interagible"
             self.border.draw_centered_label(screen, self._interactable_rect, self.font, interact_label)
 
-        if self.mode == "tuile" and self.archetype == "porte":
+        if self.crop_kind == "tuile" and self.archetype == "porte":
             lock_label = "[x] Porte verrouillable" if self.lockable else "[ ] Porte verrouillable"
             self.border.draw_centered_label(screen, self._lockable_rect, self.font, lock_label)
 
@@ -3248,7 +3324,7 @@ class SpriteEditorPanelUI:
 
             self._render_door_frame_thumbs(screen)
 
-        confirm_label = "Mettre a jour" if (self.mode == "tuile" and self.editing_type_id is not None) else "Enregistrer"
+        confirm_label = "Mettre a jour" if (self.crop_kind == "tuile" and self.editing_type_id is not None) else "Enregistrer"
         self.border.draw_centered_label(screen, self._confirm_rect, self.font, confirm_label)
 
         if self.status_text:
