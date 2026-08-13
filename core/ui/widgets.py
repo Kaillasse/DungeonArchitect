@@ -247,6 +247,61 @@ class Stepper:
 
 
 # ---------------------------------------------------------------------
+# Layout column (vertical rect-stacking cursor)
+# ---------------------------------------------------------------------
+
+
+class LayoutColumn:
+    """A vertical cursor for laying out a column of rects without hand-
+    computing `self.y + <magic offset>` for every field -- the pattern that
+    made `SpriteEditorPanelUI._layout()` (originally 197 lines of literal
+    y-offsets, one panel adding a field away from silently overlapping
+    another) fragile: adding a field meant recomputing every offset below
+    it by hand and cross-referencing prose comments to confirm mutually-
+    exclusive sub-sections didn't actually collide.
+
+    Holds no state beyond `x`/`y`/`width` -- `y` is a plain mutable
+    attribute, not hidden behind a method, specifically so a caller can
+    snapshot/restore it around two mutually-exclusive sub-blocks that are
+    meant to start at the same y (e.g. a "tuile-only" vs "pack-only" field
+    group, never rendered at once) -- `saved_y = column.y; ...; column.y =
+    saved_y` -- rather than this class inventing a "branch" abstraction
+    with no second proven use case yet."""
+
+    def __init__(self, x, y, width):
+        self.x = x
+        self.y = y
+        self.width = width
+
+    def rect(self, height, width=None):
+        """One rect at the current cursor, `width` defaulting to the
+        column's own width -- advances the cursor by `height`."""
+        r = pygame.Rect(self.x, self.y, width if width is not None else self.width, height)
+        self.y += height
+        return r
+
+    def gap(self, height):
+        """Advances the cursor without producing a rect -- spacing between
+        sections. Returns self so calls can chain, e.g. `column.gap(8).rect(32)`."""
+        self.y += height
+        return self
+
+    def row(self, count, height, gap=4):
+        """`count` equal-width rects side by side at the current cursor
+        (splitting the column's own width, same idiom every hand-rolled
+        mode-button/toggle row in this codebase already used) -- advances
+        the cursor by `height` once, not per rect."""
+        w = (self.width - gap * (count - 1)) // count
+        rects = []
+        x = self.x
+        for _ in range(count):
+            rects.append(pygame.Rect(x, self.y, w, height))
+            x += w + gap
+        self.y += height
+        return rects
+
+
+# ---------------------------------------------------------------------
 # Panel frame (draggable/collapsible title bar wrapper)
 # ---------------------------------------------------------------------
 
