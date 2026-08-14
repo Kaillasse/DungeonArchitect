@@ -210,7 +210,7 @@ class Dungeon:
 
     def update(self, dt: float, player_refs=(), magnet_radius: float = 0, room_offset=(0, 0)) -> None:
         self.object_manager.update(dt)
-        self.animal_manager.update(dt, player_refs=player_refs)
+        self.animal_manager.update(dt, player_refs=player_refs, room_offset=room_offset)
         self.enemy_manager.update(dt, player_refs=player_refs, room_offset=room_offset)
         self.npc_manager.update(dt, player_refs=player_refs)
         self.pickup_manager.update(dt, player_refs=player_refs, magnet_radius=magnet_radius)

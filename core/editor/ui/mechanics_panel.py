@@ -76,10 +76,10 @@ from core.ui.widgets import BorderManager, Stepper
 from core.world.object_manager import (
     OBJECT_TYPES, ITEM_DEFINITIONS, ARCHETYPES, CELL_MODES, ENEMY_ANIMATIONS, CURRENCY_FILES,
     NPC_DIRECTIONS, load_npc_frames, load_enemy_frames, load_animal_frames, load_object_frames,
-    action_direction_coverage,
+    action_direction_coverage, effective_loot_cards,
     update_type_mechanics, update_item_overrides, update_item, is_builtin_item,
 )
-from core.data.cards import resolve_card_sprite
+from core.data.cards import resolve_card_sprite, default_card_for
 from core.data.sound_manager import SoundManager, list_available_sound_files
 
 CELL_MODES_ARCHETYPES = ("sol", "mur", "porte")
@@ -203,6 +203,19 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self._mob_attack_range_raw = 1
         self.mob_loot = {}
         self.mob_item_loot = {}
+
+        # Cartes -- {card_id: count}, what the current card drops (as OTHER
+        # cards) when it dies/is destroyed (see object_manager.
+        # effective_loot_cards/core.world.entities.credit_pending_card).
+        # Shown for mob/object/item (see _shows_loot_cards) -- distinct
+        # section from mob_loot/mob_item_loot above (currency/real items),
+        # additive alongside it rather than replacing it. Populated by
+        # open() from effective_loot_cards (so a never-customized card
+        # starts the editor already showing its implicit default, one copy
+        # of itself), added to via drag-and-drop from CardPanelUI (see
+        # try_add_loot_card/Creator._resolve_dragged_card), removed by
+        # stepping a row's count down to 0.
+        self.loot_cards = {}
 
         # PNJ cards get their own info branch (is_pnj/open/_render_pnj_info)
         # -- entity-pack data (nested by action THEN direction, unlike the
@@ -345,6 +358,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self._load_effects(item_def.get("effects", []))
             self._load_sounds(item_def.get("sounds", {}))
             self._load_pitch(item_def.get("sound_pitch", {}))
+            self.loot_cards = effective_loot_cards(card_id)
             self.status_text = ""
             return
 
@@ -452,6 +466,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self._load_effects(config.get("effects", []))
         self._load_sounds(config.get("sounds", {}))
         self._load_pitch(config.get("sound_pitch", {}))
+        self.loot_cards = effective_loot_cards(card_id) if not is_pnj else {}
         self.status_text = ""
 
     def _load_capabilities(self, capabilities):
@@ -565,6 +580,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         mistake without having to drop another one over it."""
         self.type_id = None
         self.item_id = None
+        self.loot_cards = {}
         self.status_text = ""
 
     def _cy(self, offset):
@@ -649,12 +665,11 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         rather than a single fixed offset, so two sections can never
         overlap even though the viewport now scrolls instead of forcing the
         whole panel taller."""
-        if self.card_kind == "object":
-            return 440  # past blocks/interactable/lockable + cell_modes grid's worst case
-        if self.is_mob and self.mob_kind == "enemy":
-            return 688 + len(self._mob_loot_rows()) * 32 + 20
-        # animal/item/pnj -- past capacites/effets (see _capacites_top_offset),
-        # nothing else shown below that for any of these 3 kinds.
+        if self._shows_loot_cards():
+            return self._loot_cards_top_offset() + self._loot_cards_section_height()
+        # pnj only -- past capacites/effets (see _capacites_top_offset),
+        # nothing else shown below that (no loot-cards concept for a PNJ,
+        # see _shows_loot_cards).
         return self._capacites_top_offset() + 198
 
     def _capacites_top_offset(self):
@@ -807,6 +822,77 @@ class MechanicsPanelUI(_ResizableCornerMixin):
     def _mob_loot_row_stepper(self, index):
         return Stepper(self.x + 40, self._cy(688 + index * 32), self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 0, 99)
 
+    # -- Cartes (loot table) -- mob/object/item, see _shows_loot_cards ------
+
+    def _loot_cards_top_offset(self):
+        """Panel-relative y where the Cartes section starts -- right after
+        whatever kind-specific content precedes it, same dynamic-per-kind
+        spirit as _capacites_top_offset/_sounds_top_offset."""
+        if self.card_kind == "object":
+            return 440  # past blocks/interactable/lockable + cell_modes grid's worst case
+        if self.is_mob and self.mob_kind == "enemy":
+            return 688 + len(self._mob_loot_rows()) * 32 + 20
+        # animal or item -- nothing else shown above it besides capacites/effets.
+        return self._capacites_top_offset() + 198
+
+    def _loot_card_rows(self):
+        """(card_id, count) for every row, in self.loot_cards' own
+        insertion order (a never-customized card's first/only row is its
+        own id -- see effective_loot_cards -- so that stays first even
+        after other entries are dropped in)."""
+        return list(self.loot_cards.items())
+
+    def _loot_card_row_label(self, card_id):
+        card = default_card_for(card_id)
+        return card.name if card is not None else card_id
+
+    def _loot_cards_section_height(self):
+        """Header line + one 32px row per entry (or one placeholder-height
+        row when empty, so the drop zone never collapses to nothing and
+        becomes impossible to aim a drag at) + trailing gap."""
+        if not self._shows_loot_cards():
+            return 0
+        rows = max(1, len(self.loot_cards))
+        return 30 + rows * 32 + 10
+
+    def _loot_card_row_stepper(self, index):
+        top = self._loot_cards_top_offset()
+        return Stepper(
+            self.x + 40, self._cy(top + 30 + index * 32), self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 0, 99,
+        )
+
+    def loot_dropzone_rect(self):
+        """Screen rect for the Cartes section's drag-and-drop target --
+        Creator hit-tests a card drag's release point against this (see
+        try_add_loot_card/Creator._resolve_dragged_card) before falling
+        back to its normal drop handling (opening this panel on the
+        dropped card instead). None while nothing supporting a loot table
+        is loaded, or while the section has scrolled fully out of the
+        viewport (clipped against _viewport_rect -- a drop on a spot that
+        LOOKS like it's over some other visible row shouldn't silently hit
+        an off-screen section)."""
+        if not self._shows_loot_cards():
+            return None
+        content_x = self.x + 20
+        content_width = self.width - 40 - self.SCROLLBAR_WIDTH - 6
+        rect = pygame.Rect(
+            content_x, self._cy(self._loot_cards_top_offset()), content_width, self._loot_cards_section_height(),
+        )
+        visible = rect.clip(self._viewport_rect())
+        return visible if visible.height > 0 else None
+
+    def try_add_loot_card(self, card_id, pos):
+        """Adds one copy of `card_id` to the currently loaded card's
+        working Cartes table if `pos` lands on loot_dropzone_rect, True on
+        success. An id already present just gets its count bumped rather
+        than duplicated. False (nothing changed) otherwise, letting the
+        caller fall through to its own normal drop handling."""
+        rect = self.loot_dropzone_rect()
+        if rect is None or not rect.collidepoint(pos):
+            return False
+        self.loot_cards[card_id] = self.loot_cards.get(card_id, 0) + 1
+        return True
+
     def _cell_mode_grid_rects(self):
         width_tiles, height_tiles = self.size
         anchor = self._blocks_rect
@@ -839,6 +925,12 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         of re-testing the 3-way flag combination separately in
         handle_event and render."""
         return self.card_kind in ("item", "mob", "pnj")
+
+    def _shows_loot_cards(self):
+        """Cartes (loot table) is shown for item, mob (animal or enemy), and
+        object (tile_decor/tile_special) cards -- not pnj, which has no
+        death/destruction concept to drop anything on."""
+        return self.card_kind in ("item", "mob", "object")
 
     def _sound_slot_keys(self):
         """Every sound row that applies to the currently loaded card --
@@ -979,14 +1071,17 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             if self.pitch_enabled.get(key) and key in self.pitch_range
         }
 
+        loot_cards = dict(self.loot_cards) if self._shows_loot_cards() else None
+
         try:
             if self.card_kind == "item":
                 if is_builtin_item(self.item_id):
-                    update_item_overrides(self.item_id, capabilities, effects, sounds, sound_pitch)
+                    update_item_overrides(self.item_id, capabilities, effects, sounds, sound_pitch, loot_cards)
                 else:
                     update_item(
                         self.item_id, self.name, self.item_slot, self.icon_path, self.icon_rect,
                         capabilities=capabilities, effects=effects, sounds=sounds, sound_pitch=sound_pitch,
+                        loot_cards=loot_cards,
                     )
             else:
                 update_type_mechanics(
@@ -1000,6 +1095,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                     effects=effects,
                     sounds=sounds,
                     sound_pitch=sound_pitch,
+                    loot_cards=loot_cards,
                 )
         except ValueError as exc:
             self.status_text = str(exc)
@@ -1170,6 +1266,20 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                     loot[key] = new_value
                     return None
 
+        if self._shows_loot_cards():
+            for index, (card_id, count) in enumerate(self._loot_card_rows()):
+                new_value = self._loot_card_row_stepper(index).handle_click(event.pos, count)
+                if new_value is not None:
+                    if new_value <= 0:
+                        # Stepped down to 0 -- the row disappears entirely
+                        # rather than persisting a "0 of this card" entry
+                        # (dict order is otherwise preserved, see
+                        # _loot_card_rows' own docstring).
+                        self.loot_cards.pop(card_id, None)
+                    else:
+                        self.loot_cards[card_id] = new_value
+                    return None
+
         for key in self._sound_slot_keys():
             rects = self._sound_rects.get(key)
             if rects is None:
@@ -1279,6 +1389,9 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
         if self.is_mob and self.mob_kind == "enemy":
             self._render_mob_stats_editing(screen)
+
+        if self._shows_loot_cards():
+            self._render_loot_cards(screen)
 
         self._render_sounds(screen)
 
@@ -1477,6 +1590,35 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             label_surface = self.small_font.render(label_text, True, (200, 200, 200))
             screen.blit(label_surface, (stepper.minus_rect.x, stepper.minus_rect.y - label_surface.get_height() - 2))
             stepper.render(screen, self.border, self.small_font, loot.get(key, 0))
+
+    def _render_loot_cards(self, screen):
+        """Header + one stepper row per self.loot_cards entry, inside a
+        thin outlined box marking the drag-and-drop target (see
+        loot_dropzone_rect/try_add_loot_card) -- a never-customized card
+        already shows its implicit default (one copy of itself, see
+        effective_loot_cards), so this is never blank on first open, only
+        after the player deliberately empties it."""
+        top = self._loot_cards_top_offset()
+        header = self.small_font.render("Cartes (butin a la mort/destruction)", True, (200, 200, 200))
+        screen.blit(header, (self.x + 20, self._cy(top)))
+
+        box = pygame.Rect(
+            self.x + 20, self._cy(top + 22), self.width - 40 - self.SCROLLBAR_WIDTH - 6,
+            self._loot_cards_section_height() - 22,
+        )
+        pygame.draw.rect(screen, (90, 90, 90), box, 1)
+
+        rows = self._loot_card_rows()
+        if not rows:
+            hint = self.small_font.render("(vide -- glisse une carte ici)", True, (130, 130, 130))
+            screen.blit(hint, (box.x + 10, box.y + 8))
+            return
+
+        for index, (card_id, count) in enumerate(rows):
+            stepper = self._loot_card_row_stepper(index)
+            label_surface = self.small_font.render(self._loot_card_row_label(card_id), True, (200, 200, 200))
+            screen.blit(label_surface, (stepper.minus_rect.x, stepper.minus_rect.y - label_surface.get_height() - 2))
+            stepper.render(screen, self.border, self.small_font, count)
 
     def _render_pnj_info(self, screen):
         """PNJ-specific info below the shared preview -- entity pack name

@@ -96,7 +96,7 @@ def _room_file_exists(room_name):
 
 class Card:
     def __init__(self, card_id, name, images, card_type, effects=None, capabilities=None, sounds=None,
-                 sound_pitch=None):
+                 sound_pitch=None, loot_cards=None):
         self.card_id = card_id
         self.name = name
         self.images = list(images) if images else []
@@ -132,6 +132,17 @@ class Card:
         self.sound_pitch = (
             {key: list(value) for key, value in sound_pitch.items()} if sound_pitch else {}
         )
+        # {card_id: count} -- what this card drops (as OTHER cards) when it
+        # dies/is destroyed, see object_manager.effective_loot_cards/
+        # core.world.entities.credit_pending_card. Unlike sounds/
+        # capabilities/effects above, None here is NOT the same as {}: None
+        # means "this card never had loot_cards explicitly saved, so the
+        # implicit default (one copy of its own card) applies" -- resolved
+        # by effective_loot_cards, never baked into this attribute itself,
+        # so self.loot_cards stays an honest reflection of what's actually
+        # persisted (an empty dict here really does mean "drops nothing",
+        # not "unedited").
+        self.loot_cards = dict(loot_cards) if loot_cards is not None else None
 
 
 def default_card_for(card_id):
@@ -169,6 +180,7 @@ def default_card_for(card_id):
             card_id, name, images, config.get("card_type", "tile_decor"),
             effects=config.get("effects"), capabilities=config.get("capabilities"),
             sounds=config.get("sounds"), sound_pitch=config.get("sound_pitch"),
+            loot_cards=config.get("loot_cards"),
         )
 
     definition = ITEM_DEFINITIONS.get(card_id)
@@ -178,6 +190,7 @@ def default_card_for(card_id):
             definition.get("card_type", "item"),
             effects=definition.get("effects"), capabilities=definition.get("capabilities"),
             sounds=definition.get("sounds"), sound_pitch=definition.get("sound_pitch"),
+            loot_cards=definition.get("loot_cards"),
         )
 
     return None
@@ -288,6 +301,7 @@ class CardManager:
                     effects=payload.get("effects"),
                     sounds=payload.get("sounds"),
                     sound_pitch=payload.get("sound_pitch"),
+                    loot_cards=payload.get("loot_cards"),
                 )
 
         return default_card_for(card_id)
@@ -306,6 +320,7 @@ class CardManager:
                     "effects": card.effects,
                     "sounds": card.sounds,
                     "sound_pitch": card.sound_pitch,
+                    "loot_cards": card.loot_cards,
                 },
                 handle, indent=2, ensure_ascii=False,
             )

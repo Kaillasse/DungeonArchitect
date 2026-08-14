@@ -349,6 +349,7 @@ _custom_types = _load_custom_object_types()
 # keys) without ever touching its Python-sourced visual identity.
 MECHANICS_KEYS = (
     "blocks_movement", "cell_modes", "interactable", "capabilities", "stats", "effects", "sounds", "sound_pitch",
+    "loot_cards",
 )
 DOORWAY_MECHANICS_KEYS = ("linkable", "blocks_until_open")
 OVERRIDE_MARKER = "__override_of_builtin__"
@@ -486,7 +487,7 @@ def _build_visual_fields(name, tileset, rect, size, archetype, frame_rects=None)
 
 def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
                              interactable=False, lockable=False, capabilities=None, stats=None, effects=None,
-                             sounds=None, sound_pitch=None):
+                             sounds=None, sound_pitch=None, loot_cards=None):
     """Construction pure (aucune I/O) des champs mecaniques/gameplay d'une
     entree OBJECT_TYPES -- partagee par register_custom_type et
     update_type_mechanics (custom ET builtin, voir plus bas). `cell_modes`,
@@ -532,7 +533,18 @@ def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
     entree ici n'a de sens que pour une cle qui a aussi une entree dans
     `sounds` (voir core.data.sound_manager.play_card_sound, qui tire un
     multiplicateur aleatoire dans cette plage a CHAQUE lecture -- jamais
-    calcule/fige une seule fois ici)."""
+    calcule/fige une seule fois ici).
+
+    `loot_cards` ({card_id: count}) est la table de butin-en-cartes creditee
+    (voir core.world.entities.credit_pending_card) quand cette carte meurt/
+    est detruite -- SANS cette cle du tout, effective_loot_cards ci-dessous
+    retombe sur le defaut implicite "1 exemplaire de sa propre carte", donc
+    None ici veut dire "ne pas toucher a l'existant", jamais "table vide" :
+    contrairement a capabilities/effects/sounds (verifies par vacuite, un
+    dict {} explicitement voulu par le joueur -- "cette carte ne drop
+    litteralement rien" -- serait sinon indiscernable de "pas edite du
+    tout" et retomberait silencieusement sur le defaut au lieu de le
+    remplacer)."""
     fields = {}
     if cell_modes is not None:
         fields["cell_modes"] = [list(row) for row in cell_modes]
@@ -553,6 +565,8 @@ def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
         fields["sounds"] = dict(sounds)
     if sound_pitch:
         fields["sound_pitch"] = {key: list(value) for key, value in sound_pitch.items()}
+    if loot_cards is not None:
+        fields["loot_cards"] = dict(loot_cards)
     return fields
 
 
@@ -677,7 +691,7 @@ def update_type_visual(type_id, name, tileset, rect, size, archetype, frame_rect
 
 def update_type_mechanics(type_id, blocks_movement=False, cell_modes=None,
                            interactable=False, lockable=False, capabilities=None, stats=None, effects=None,
-                           sounds=None, sound_pitch=None):
+                           sounds=None, sound_pitch=None, loot_cards=None):
     """Edite UNIQUEMENT les mecaniques/gameplay d'un type DEJA enregistre --
     contrairement a update_type_visual, fonctionne sur N'IMPORTE QUEL type
     existant, builtin OU custom (c'est le point d'entree qui rend un
@@ -698,7 +712,7 @@ def update_type_mechanics(type_id, blocks_movement=False, cell_modes=None,
         raise ValueError(f"'{type_id}' n'existe pas")
     fields = _build_mechanics_fields(
         existing, blocks_movement, cell_modes, interactable, lockable, capabilities, stats, effects, sounds,
-        sound_pitch,
+        sound_pitch, loot_cards,
     )
     if not isinstance(existing.get("asset"), dict):
         _write_builtin_mechanics_override(type_id, fields)
@@ -975,10 +989,12 @@ def _persist_custom_item_overrides(overrides):
 
 
 def _build_item_entry(name, slot, icon_path, icon_rect, capabilities=None, effects=None, sounds=None,
-                       sound_pitch=None):
+                       sound_pitch=None, loot_cards=None):
     """Construction pure (aucune I/O) d'une entree ITEM_DEFINITIONS custom --
     partagee par register_item/update_item. `card_type` toujours "item" --
-    aucun autre type de carte n'utilise ce registre."""
+    aucun autre type de carte n'utilise ce registre. `loot_cards`: voir
+    _build_mechanics_fields's own docstring -- meme convention "None =
+    inchange, {} = explicitement vide" (jamais confondu avec "absent")."""
     entry = {
         "name": name,
         "icon_path": icon_path,
@@ -994,6 +1010,8 @@ def _build_item_entry(name, slot, icon_path, icon_rect, capabilities=None, effec
         entry["sounds"] = dict(sounds)
     if sound_pitch:
         entry["sound_pitch"] = {key: list(value) for key, value in sound_pitch.items()}
+    if loot_cards is not None:
+        entry["loot_cards"] = dict(loot_cards)
     return entry
 
 
@@ -1012,12 +1030,36 @@ def _merged_item_definitions():
 ITEM_DEFINITIONS = _merged_item_definitions()
 
 
+def effective_loot_cards(card_id):
+    """The loot table actually credited (see core.world.entities.
+    credit_pending_card) when `card_id` dies (a mob) or is destroyed (a
+    tile_decor/tile_special object, or -- if the vocabulary is ever wired
+    up for one -- an item): its own "loot_cards" override if one was ever
+    saved for it (even an explicitly emptied {}, meaning "drops nothing at
+    all" -- see _build_mechanics_fields/_build_item_entry's own docstrings
+    on why presence, not truthiness, is what's checked at save time), else
+    the implicit default of one copy of its own card -- exactly the
+    hardcoded behavior every destructible/killable card had before this
+    table existed, now just the fallback rather than the only option.
+    Works for both an OBJECT_TYPES- and an ITEM_DEFINITIONS-backed id (a
+    tile_floor/tile_wall BASE_TILE_CARDS id matches neither registry, so it
+    always falls through to its own default -- consistent, since those two
+    are deliberately kept out of the unified mechanics registry, see
+    CLAUDE.md)."""
+    config = OBJECT_TYPES.get(card_id)
+    if config is None:
+        config = ITEM_DEFINITIONS.get(card_id)
+    if config is not None and "loot_cards" in config:
+        return dict(config["loot_cards"])
+    return {card_id: 1}
+
+
 def is_builtin_item(item_id):
     return item_id in _BUILTIN_ITEM_DEFINITIONS
 
 
 def register_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, effects=None, sounds=None,
-                   sound_pitch=None):
+                   sound_pitch=None, loot_cards=None):
     """Valide et persiste un NOUVEL item -- l'equivalent register_custom_type
     pour ITEM_DEFINITIONS. Leve ValueError sur un id invalide/deja pris ou
     un slot inconnu."""
@@ -1027,7 +1069,7 @@ def register_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, 
         raise ValueError(f"'{item_id}' existe deja")
     if slot not in ("attack", "interact", "passive"):
         raise ValueError(f"Slot inconnu : {slot}")
-    entry = _build_item_entry(name, slot, icon_path, icon_rect, capabilities, effects, sounds, sound_pitch)
+    entry = _build_item_entry(name, slot, icon_path, icon_rect, capabilities, effects, sounds, sound_pitch, loot_cards)
     custom = _load_custom_items()
     custom[item_id] = entry
     _persist_custom_items(custom)
@@ -1036,7 +1078,7 @@ def register_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, 
 
 
 def update_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, effects=None, sounds=None,
-                 sound_pitch=None):
+                 sound_pitch=None, loot_cards=None):
     """Edite un item custom DEJA enregistre -- jamais un item integre au jeu
     (dynamite) comme register_item/update_item ne peuvent jamais l'ecraser :
     voir update_item_overrides pour editer les mecaniques d'un builtin."""
@@ -1046,7 +1088,7 @@ def update_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, ef
         raise ValueError(f"'{item_id}' est un item integre au jeu, non modifiable (voir update_item_overrides)")
     if slot not in ("attack", "interact", "passive"):
         raise ValueError(f"Slot inconnu : {slot}")
-    entry = _build_item_entry(name, slot, icon_path, icon_rect, capabilities, effects, sounds, sound_pitch)
+    entry = _build_item_entry(name, slot, icon_path, icon_rect, capabilities, effects, sounds, sound_pitch, loot_cards)
     custom = _load_custom_items()
     custom[item_id] = entry
     _persist_custom_items(custom)
@@ -1054,7 +1096,7 @@ def update_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, ef
     return entry
 
 
-def update_item_overrides(item_id, capabilities, effects, sounds=None, sound_pitch=None):
+def update_item_overrides(item_id, capabilities, effects, sounds=None, sound_pitch=None, loot_cards=None):
     """Persiste un override mecanique (capacites ET/OU effets, toujours
     l'etat complet, jamais un diff partiel -- desactiver l'un ne necessite
     pas un appel separe) pour un item EXISTANT INTEGRE AU JEU (dynamite
@@ -1079,8 +1121,10 @@ def update_item_overrides(item_id, capabilities, effects, sounds=None, sound_pit
         entry["sounds"] = dict(sounds)
     if sound_pitch:
         entry["sound_pitch"] = {key: list(value) for key, value in sound_pitch.items()}
+    if loot_cards is not None:
+        entry["loot_cards"] = dict(loot_cards)
     base_state = {
-        key: base[key] for key in ("capabilities", "effects", "sounds", "sound_pitch") if key in base
+        key: base[key] for key in ("capabilities", "effects", "sounds", "sound_pitch", "loot_cards") if key in base
     }
 
     overrides = _load_custom_item_overrides()
@@ -1090,7 +1134,7 @@ def update_item_overrides(item_id, capabilities, effects, sounds=None, sound_pit
     else:
         overrides[item_id] = entry
         merged = dict(base)
-        for key in ("capabilities", "effects", "sounds", "sound_pitch"):
+        for key in ("capabilities", "effects", "sounds", "sound_pitch", "loot_cards"):
             if key in entry:
                 merged[key] = entry[key]
             else:

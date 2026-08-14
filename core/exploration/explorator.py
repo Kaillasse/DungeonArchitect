@@ -10,7 +10,7 @@ from core.world.dungeon import Dungeon, corner_cells
 from core.editor.autotile import FLOOR
 from core.world.assembly import load_assembly, save_assembly, generate_assembly
 from core.data.ressources import ROOMS_DIRECTORY, next_new_donjon_name
-from core.world.entities import Player, PlayerRef, _bucket_direction, credit_pending_card
+from core.world.entities import Player, PlayerRef, _bucket_direction, _credit_loot
 from core.world.object_manager import (
     ANIMAL_TYPES, ENEMY_TYPES, npc_types, ITEM_DEFINITIONS, make_item, OBJECT_TYPES,
 )
@@ -1507,8 +1507,7 @@ class Explorator(NetworkSessionMixin):
                 # this whole loop finishes (the classic Python
                 # closure-in-a-loop pitfall).
                 def _on_arrival(session=session, card_ids=card_ids):
-                    for card_id in card_ids:
-                        credit_pending_card(session, card_id)
+                    _credit_loot(session, card_ids)
 
                 dungeon.effect_manager.spawn_destruction_spark(
                     local_wall_x, local_wall_y,

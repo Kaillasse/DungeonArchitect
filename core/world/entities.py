@@ -11,7 +11,7 @@ from core.data.sound_manager import SoundManager, play_card_sound
 from core.world.object_manager import (
     ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, load_enemy_frames, load_currency_frames,
     load_dynamite_frames, load_explosion_frames, load_star_frames,
-    OBJECT_TYPES, load_npc_frames, npc_types, NPC_DIRECTIONS,
+    OBJECT_TYPES, load_npc_frames, npc_types, NPC_DIRECTIONS, effective_loot_cards,
 )
 
 def _draw_cached_sprite(screen, camera, cache, key_prefix, sprite, position, frame_w, frame_h, flip=False, anchor_feet=False):
@@ -481,6 +481,14 @@ class Animal(_WanderingEntity):
 
         self.health = self.HEALTH
         self.alive = True
+        # Guards AnimalManager.update's own reward spark against firing more
+        # than once for the same corpse -- an animal has no despawn-hold
+        # delay like Enemy (see Enemy.DEATH_DESPAWN_DELAY/reward_spawned),
+        # so the alive->dead transition and its reward both happen in the
+        # very same update() call, but that call could still, in principle,
+        # observe an already-dead animal more than once before the
+        # "not alive" list-comprehension filter actually drops it.
+        self.reward_spawned = False
 
         self._render_cache = {}
 
@@ -908,12 +916,20 @@ class AnimalManager(_EntityManager):
     def _entities(self, value):
         self.animals = value
 
-    def update(self, dt, player_refs=()):
+    def update(self, dt, player_refs=(), room_offset=(0, 0)):
         for animal in self.animals:
             animal.update(
                 dt,
                 lambda rect, _animal=animal: self._is_free(rect, _animal, player_refs),
             )
+            if not animal.alive and not animal.reward_spawned:
+                # Same "disappear like a destroyed tile" treatment
+                # EnemyManager._spawn_death_reward gives an enemy -- an
+                # animal just has no despawn-hold delay to defer this past,
+                # so the check happens right here instead of gated behind a
+                # despawn_ready flag.
+                animal.reward_spawned = True
+                self._spawn_death_reward(animal, player_refs, room_offset)
         # No death animation to play out (unlike Enemy) -- a dead animal
         # just disappears the moment its health runs out, same as one that's
         # wandered over void (destroyed terrain, or off the edge of the
@@ -922,6 +938,27 @@ class AnimalManager(_EntityManager):
         self.animals = [
             animal for animal in self.animals if animal.alive and not _is_over_void(self.dungeon, animal)
         ]
+
+    def _spawn_death_reward(self, animal, player_refs, room_offset):
+        """See EnemyManager._spawn_death_reward -- same magnetic-star
+        reward, crediting animal.animal_type's own loot table (see
+        object_manager.effective_loot_cards) once it arrives. No-op if the
+        room has no players in it right now."""
+        if not player_refs:
+            return
+        nearest = min(
+            player_refs, key=lambda ref: pygame.Vector2(ref.hitbox.center).distance_squared_to(animal.position),
+        )
+        target_player, target_session = nearest.player, nearest.session
+        card_id = animal.animal_type
+
+        def _on_arrival(session=target_session, card_id=card_id):
+            _credit_loot(session, card_id)
+
+        self.dungeon.effect_manager.spawn_destruction_spark(
+            animal.position.x, animal.position.y, lambda: target_player.position,
+            room_offset=room_offset, on_arrival=_on_arrival,
+        )
 
 
 class NpcManager(_EntityManager):
@@ -1233,7 +1270,7 @@ class EnemyManager(_EntityManager):
         card_id = enemy.enemy_type
 
         def _on_arrival(session=target_session, card_id=card_id):
-            credit_pending_card(session, card_id)
+            _credit_loot(session, card_id)
 
         self.dungeon.effect_manager.spawn_destruction_spark(
             enemy.position.x, enemy.position.y, lambda: target_player.position,
@@ -1681,8 +1718,7 @@ class ProjectileManager:
             card_ids = card_ids_by_cell.get((grid_x, grid_y), [])
 
             def _on_arrival(session=target_session, card_ids=card_ids):
-                for card_id in card_ids:
-                    credit_pending_card(session, card_id)
+                _credit_loot(session, card_ids)
 
             self.dungeon.effect_manager.spawn_destruction_spark(
                 local_x, local_y, lambda: target_player.position, room_offset=room_offset,
@@ -1696,18 +1732,34 @@ class ProjectileManager:
             explosion.draw(screen, camera)
 
 
-def credit_pending_card(session, card_id):
-    """Increments session.pending_cards[card_id] -- session is duck-typed
-    here (a core.exploration.player_session.PlayerSession in practice, but
-    this module never imports that class, only mutates the plain dict
-    attribute it's already handed via PlayerRef.session/a caller's own
-    closure) since a destroyed tile/object or a dead enemy's reward needs
-    the same "credit a live SESSION, not just its Player" hook
-    PlayerRef.hitbox/.player alone can't give (see DestructionSpark's own
-    on_arrival). Only ever committed to the persisted
-    Profile.card_collection later, on a victorious run (see
+def credit_pending_card(session, card_id, count=1):
+    """Increments session.pending_cards[card_id] by `count` -- session is
+    duck-typed here (a core.exploration.player_session.PlayerSession in
+    practice, but this module never imports that class, only mutates the
+    plain dict attribute it's already handed via PlayerRef.session/a
+    caller's own closure) since a destroyed tile/object or a dead
+    enemy/animal's reward needs the same "credit a live SESSION, not just
+    its Player" hook PlayerRef.hitbox/.player alone can't give (see
+    DestructionSpark's own on_arrival). Only ever committed to the
+    persisted Profile.card_collection later, on a victorious run (see
     Explorator._commit_pending_cards) -- never here."""
-    session.pending_cards[card_id] = session.pending_cards.get(card_id, 0) + 1
+    session.pending_cards[card_id] = session.pending_cards.get(card_id, 0) + count
+
+
+def _credit_loot(session, card_ids):
+    """Credits `session` with the full, combined loot table (see
+    object_manager.effective_loot_cards) of every id in `card_ids` -- a
+    single card id (a dead enemy/animal's own type) or an iterable of them
+    (every card a destroyed cell is worth: tile plus whatever object sat on
+    it). The shared crediting step behind every reward's on_arrival hook
+    below, so a card's own "drop N of card X" table is honored uniformly
+    regardless of what killed/destroyed it (melee, dynamite, or a future
+    third way)."""
+    if isinstance(card_ids, str):
+        card_ids = [card_ids]
+    for card_id in card_ids:
+        for loot_id, loot_count in effective_loot_cards(card_id).items():
+            credit_pending_card(session, loot_id, loot_count)
 
 
 class DestructionSpark:

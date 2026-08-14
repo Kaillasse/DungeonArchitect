@@ -443,12 +443,20 @@ class Creator:
             # doesn't know) -- the only meaningful drop target is the
             # Forge, to inspect/edit its capacites/effets.
             if self.mechanics_frame.contains(event.pos) and self._forge_unlocked():
-                self.mechanics_panel.open(card_id)
+                if not self.mechanics_panel.try_add_loot_card(card_id, event.pos):
+                    self.mechanics_panel.open(card_id)
         elif self.mechanics_frame.contains(event.pos) and self._forge_unlocked():
+            # try_add_loot_card first: a drop landing specifically on the
+            # Forge's own Cartes section (only possible while it's already
+            # showing a card that supports one, see
+            # MechanicsPanelUI._shows_loot_cards) adds this card as a loot
+            # entry instead of replacing what's loaded -- open() is the
+            # fallback for everywhere else on the panel, same as before.
             # MechanicsPanelUI.open() already refuses (stays empty) for
             # anything that isn't a real OBJECT_TYPES/ITEM_DEFINITIONS id --
             # no extra guard needed here.
-            self.mechanics_panel.open(card_id)
+            if not self.mechanics_panel.try_add_loot_card(card_id, event.pos):
+                self.mechanics_panel.open(card_id)
         elif not any(frame.contains(event.pos) for frame in self.panel_frames):
             # Only attempt world placement if the drop isn't sitting over
             # ANY docked panel -- without this, a drop on e.g. tools_frame/
