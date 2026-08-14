@@ -227,6 +227,39 @@ class Creator:
             0 <= grid_y < self.dungeon.height
         )
 
+    def _grow_dungeon_for_mouse(self, mouse_pos):
+        """Painting's own version of _is_valid_grid_cell -- instead of
+        just rejecting a click outside the current grid, grows self.dungeon
+        (see Dungeon.grow) exactly enough to bring it in bounds, in
+        whichever of the 4 directions are needed, then recenters the
+        camera so the view doesn't visually jump (a left/top grow inserts
+        new columns/rows before the existing ones, so every already-
+        painted cell's own grid index -- and therefore its screen position
+        under an unmoved camera -- would otherwise shift). Deliberately
+        does NOT return adjusted grid coordinates -- every caller already
+        calls _mouse_to_grid again right after this (existing code,
+        unchanged), and that naturally resolves to the right cell once the
+        camera has been recentered here, with no coordinate math needed at
+        any call site. Returns False (nothing painted) if growing enough
+        would exceed Dungeon.MAX_ROOM_DIMENSION -- same silent-reject
+        contract _is_valid_grid_cell already had for an out-of-bounds
+        click, just reachable from a different distance now. Only used by
+        the two PAINT entry points (left-click, drag-paint) -- erasing and
+        the object-drop preview keep using _is_valid_grid_cell unchanged,
+        since growing the room for either of those makes no sense."""
+        grid_x, grid_y = self._mouse_to_grid(mouse_pos)
+        left = max(0, -grid_x)
+        top = max(0, -grid_y)
+        right = max(0, grid_x + 1 - self.dungeon.width)
+        bottom = max(0, grid_y + 1 - self.dungeon.height)
+        if not (left or top or right or bottom):
+            return True
+        if not self.dungeon.grow(left=left, right=right, top=top, bottom=bottom):
+            return False
+        self.camera.x += left * self.dungeon.tile_size
+        self.camera.y += top * self.dungeon.tile_size
+        return True
+
     def open_room(self, name):
         self.current_room = name
         self.last_assembly = None
@@ -1072,7 +1105,7 @@ class Creator:
                             # opens RolePanelUI (below).
                             continue
 
-                        if self._is_valid_grid_cell(event.pos):
+                        if self._grow_dungeon_for_mouse(event.pos):
 
                             grid_x, grid_y = self._mouse_to_grid(event.pos)
                             existing_obj = self.dungeon.object_manager.get_object_at(grid_x, grid_y)
@@ -1198,7 +1231,7 @@ class Creator:
 
                         self.move_drag_pos = event.pos
 
-                    elif self.painting and self._is_valid_grid_cell(event.pos):
+                    elif self.painting and self._grow_dungeon_for_mouse(event.pos):
 
                         self._paint_at_mouse(event.pos, erase=False)
 

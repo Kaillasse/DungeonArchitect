@@ -37,6 +37,12 @@ class Dungeon:
 
     TILE_SIZE = SOURCE_TILE_SIZE * WORLD_SCALE
 
+    # Safety cap for grow() -- 100x the default 20x20 room's area, generous
+    # for a room/home that grows over a long time, but bounded against a
+    # runaway allocation from a single stray out-of-bounds paint (a camera
+    # bug, or a click far off-screen while zoomed way out).
+    MAX_ROOM_DIMENSION = 200
+
     def __init__(self, width: int = 20, height: int = 20) -> None:
         self.width = width
         self.height = height
@@ -258,6 +264,62 @@ class Dungeon:
             theme_grid=self.theme_grid,
         )
         self.object_manager.prune_invalid()
+        self.terrain_version += 1
+        return True
+
+    def grow(self, left: int = 0, right: int = 0, top: int = 0, bottom: int = 0) -> bool:
+        """Extends the grid in any combination of the 4 directions --
+        `right`/`bottom` just append new EMPTY/-1/None columns/rows (no
+        existing coordinate changes meaning), but `left`/`top` INSERT new
+        ones at the start, which shifts every cell that already existed to
+        a higher index -- so every absolute coordinate stored elsewhere
+        (every placed object's own "x"/"y", and every link's {"x","y"}
+        pointing at the OTHER object -- confirmed by reading ObjectManager.
+        link, not assumed) must shift by the same (left, top) to keep
+        pointing at the same physical cell. object_manager's own
+        _cell_index ({(x,y): obj}) is rebuilt once afterward rather than
+        incrementally, since every key changed at once.
+
+        Deliberately does NOT re-run resolve_sprite_grid/build_walls_
+        around for the new area -- the caller (Creator, painting the cell
+        that triggered this) already does that for the cell it's about to
+        paint, right after this returns.
+
+        Returns False (no-op, nothing changed) if the resulting size would
+        exceed MAX_ROOM_DIMENSION in either dimension -- same silent-reject
+        spirit every other out-of-bounds guard in this class already uses,
+        rather than raising."""
+        if not (left or right or top or bottom):
+            return True
+        new_width = self.width + left + right
+        new_height = self.height + top + bottom
+        if new_width > self.MAX_ROOM_DIMENSION or new_height > self.MAX_ROOM_DIMENSION:
+            return False
+
+        def _grow_row(row, fill):
+            return [fill] * left + row + [fill] * right
+
+        self.logical_grid = [[EMPTY] * new_width for _ in range(top)] + \
+            [_grow_row(row, EMPTY) for row in self.logical_grid] + \
+            [[EMPTY] * new_width for _ in range(bottom)]
+        self.sprite_grid = [[-1] * new_width for _ in range(top)] + \
+            [_grow_row(row, -1) for row in self.sprite_grid] + \
+            [[-1] * new_width for _ in range(bottom)]
+        self.theme_grid = [[None] * new_width for _ in range(top)] + \
+            [_grow_row(row, None) for row in self.theme_grid] + \
+            [[None] * new_width for _ in range(bottom)]
+
+        if left or top:
+            for obj in self.object_manager.objects:
+                obj["x"] += left
+                obj["y"] += top
+                for link in obj.get("links", []):
+                    link["x"] += left
+                    link["y"] += top
+            self.object_manager._rebuild_cell_index()
+
+        self.width = new_width
+        self.height = new_height
         self.terrain_version += 1
         return True
 
