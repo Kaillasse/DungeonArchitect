@@ -67,6 +67,8 @@ PNJ's entity_pack/wander_actions, or for creating a new mob type -- those
 stay SpriteEditorPanelUI's job / unbuilt, respectively.
 """
 
+import random
+
 import pygame
 
 from core.editor.ui.mixins import _ResizableCornerMixin
@@ -78,15 +80,45 @@ from core.world.object_manager import (
     update_type_mechanics, update_item_overrides, update_item, is_builtin_item,
 )
 from core.data.cards import resolve_card_sprite
+from core.data.sound_manager import SoundManager, list_available_sound_files
 
 CELL_MODES_ARCHETYPES = ("sol", "mur", "porte")
 
 
 class MechanicsPanelUI(_ResizableCornerMixin):
     STANDARD_WIDTH = 420
-    STANDARD_HEIGHT = 920
+    STANDARD_HEIGHT = 560
     MAX_WIDTH = 900
-    MAX_HEIGHT = 1050
+    MAX_HEIGHT = 900
+    SOUND_ROW_HEIGHT = 30
+    # A sound row gains this much extra height when its pitch slider is
+    # showing (see _sound_row_height) -- the slider draws on its own line
+    # right below the file picker/Jouer row, not squeezed onto it (no room
+    # left in STANDARD_WIDTH once the pitch toggle button is added too).
+    PITCH_ROW_HEIGHT = 26
+    # The draggable range's own bounds -- how far a slider's two handles can
+    # travel, not the DEFAULT range a freshly-enabled slot starts at
+    # (that's DEFAULT_PITCH_RANGE below). x2.0/x0.5 is already a drastic
+    # register shift for a short SFX; wider would mostly just sound broken.
+    PITCH_SLIDER_MIN = 0.5
+    PITCH_SLIDER_MAX = 2.0
+    DEFAULT_PITCH_RANGE = [0.85, 1.15]
+    # Panel-relative y where the scrollable content area begins (right below
+    # the shared preview + its state tabs) -- every row at or below this,
+    # across every card_kind, goes through _cy() instead of `self.y + N`
+    # directly, so self.scroll_offset shifts it uniformly. The preview
+    # itself, the title, "Vider", and the Enregistrer button all stay
+    # pinned (never scroll) by continuing to use `self.y`/`self.height`
+    # directly, never _cy().
+    CONTENT_TOP = 244
+    SCROLLBAR_WIDTH = 10
+    WHEEL_STEP_PX = 48
+    _SOUND_LABEL_OVERRIDES = {
+        "use": "Utilisation", "place": "Pose", "destroy": "Casse",
+        "throw": "Lancer", "interact": "Interaction",
+        "idle": "Repos", "movement": "Mouvement", "move": "Mouvement",
+        "attack": "Attaque", "damaged": "Touche", "death": "Mort",
+    }
     CELL_MODE_COLORS = {"block": (190, 90, 90), "behind": (110, 190, 110), "front": (100, 150, 220)}
     GRID_MAX_PX = 140
     STEP_BUTTON_SIZE = 24
@@ -210,6 +242,37 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.heal_enabled = False
         self.heal_amount = 1
 
+        # Sons -- {"use"/"place"/"destroy": "filename.wav"|None}, same
+        # generic vocabulary as capabilities/effects above (see
+        # core.data.cards.Card.sounds/object_manager's "sounds" mechanics
+        # field). Which of the 3 keys is actually shown/editable depends on
+        # card_kind, see _sound_slot_keys. _available_sound_files is
+        # scanned once per panel lifetime (a session doesn't drop new .wav
+        # files into assets/sound/ mid-edit), not re-globbed per frame.
+        self.card_sounds = {"use": None, "place": None, "destroy": None}
+        self._available_sound_files = list_available_sound_files()
+        self._sound_rects = {}
+
+        # Pitch -- {key: True/False} whether random-pitch is on for that
+        # sound slot, {key: [min, max]} its range when it is (see
+        # core.data.cards.Card.sound_pitch/core.data.sound_manager.
+        # play_card_sound). Only meaningful for a key that also has a real
+        # sound assigned (self.card_sounds[key]) -- the toggle/slider
+        # simply aren't drawn otherwise, see _render_sounds. A fresh toggle
+        # (no saved range yet) seeds DEFAULT_PITCH_RANGE rather than
+        # starting degenerate at [1.0, 1.0].
+        self.pitch_enabled = {}
+        self.pitch_range = {}
+        self._pitch_rects = {}
+        self._pitch_dragging = None  # (key, "lo"/"hi") or None
+
+        # Scrollable-content viewport state (see CONTENT_TOP's own
+        # docstring) -- pixel-based, not row-based, since rows here are
+        # variable-height/variable-count depending on card_kind, unlike
+        # core.ui.widgets.RoomBrowser's uniform row list.
+        self.scroll_offset = 0
+        self._scrollbar_dragging = False
+
         self.status_text = ""
         self.border = BorderManager()
         self.font = pygame.font.SysFont("arial", 16)
@@ -255,6 +318,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         first/second respectively -- no id is ever both."""
         self.preview_frame = 0
         self.preview_animation_timer = 0.0
+        self.scroll_offset = 0
 
         item_def = ITEM_DEFINITIONS.get(card_id)
         if item_def is not None:
@@ -279,6 +343,8 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self._preview_frames = [self.icon] if self.icon else []
             self._load_capabilities(item_def.get("capabilities", {}))
             self._load_effects(item_def.get("effects", []))
+            self._load_sounds(item_def.get("sounds", {}))
+            self._load_pitch(item_def.get("sound_pitch", {}))
             self.status_text = ""
             return
 
@@ -384,6 +450,8 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
         self._load_capabilities(config.get("capabilities", {}))
         self._load_effects(config.get("effects", []))
+        self._load_sounds(config.get("sounds", {}))
+        self._load_pitch(config.get("sound_pitch", {}))
         self.status_text = ""
 
     def _load_capabilities(self, capabilities):
@@ -499,41 +567,214 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.item_id = None
         self.status_text = ""
 
+    def _cy(self, offset):
+        """Screen-space y for a scrollable-content row at panel-relative
+        offset `offset` (e.g. 270 for _blocks_rect) -- see CONTENT_TOP's
+        own docstring. Every row-building call below CONTENT_TOP goes
+        through this instead of `self.y + offset` directly, so
+        self.scroll_offset shifts every one of them together."""
+        return self.y + offset - self.scroll_offset
+
+    def _viewport_rect(self):
+        """The clipped, scrollable middle band -- from right below the
+        preview/tabs down to just above the pinned Enregistrer button.
+        Both the render clip and the click-hit gate for every scrollable
+        row go through this one rect, so "what's visible" and "what's
+        clickable" can never drift apart."""
+        top = self.y + self.CONTENT_TOP
+        bottom = self.y + self.height - 66
+        return pygame.Rect(self.x, top, self.width, max(0, bottom - top))
+
+    def _sound_row_height(self, key):
+        """SOUND_ROW_HEIGHT, plus PITCH_ROW_HEIGHT once a real sound is
+        assigned to `key` AND its random-pitch slider is enabled -- a row
+        with nothing assigned, or with pitch off, never grows, so toggling
+        pitch on/off for one row shifts every row below it without
+        otherwise disturbing the layout."""
+        height = self.SOUND_ROW_HEIGHT
+        if self.card_sounds.get(key) and self.pitch_enabled.get(key):
+            height += self.PITCH_ROW_HEIGHT
+        return height
+
+    def _sound_section_height(self):
+        return sum(self._sound_row_height(key) for key in self._sound_slot_keys())
+
+    def _content_height(self):
+        """Total scrollable content height (panel-relative, i.e. as if
+        scroll_offset were 0) for the currently loaded card -- always ends
+        with the Sons section, whatever it's preceded by per card_kind, see
+        _sounds_top_offset. 0 while empty (nothing to scroll)."""
+        if self.type_id is None and self.item_id is None:
+            return 0
+        bottom = self._sounds_top_offset() + self._sound_section_height() + 10
+        return bottom - self.CONTENT_TOP
+
+    def _max_scroll(self):
+        return max(0, self._content_height() - self._viewport_rect().height)
+
+    def _clamp_scroll(self):
+        self.scroll_offset = max(0, min(self.scroll_offset, self._max_scroll()))
+
+    def _scrollbar_track_rect(self):
+        viewport = self._viewport_rect()
+        return pygame.Rect(viewport.right - self.SCROLLBAR_WIDTH, viewport.y, self.SCROLLBAR_WIDTH, viewport.height)
+
+    def _scrollbar_thumb_rect(self):
+        track = self._scrollbar_track_rect()
+        max_scroll = self._max_scroll()
+        if max_scroll <= 0 or track.height <= 0:
+            return track
+        thumb_h = max(20, track.height * track.height / (self._content_height() or 1))
+        thumb_y = track.y + (track.height - thumb_h) * (self.scroll_offset / max_scroll)
+        return pygame.Rect(track.x, thumb_y, track.width, thumb_h)
+
+    def handle_wheel(self, pos, direction):
+        """Scrolls while `pos` is anywhere over this panel -- same
+        "hovering is enough, not just grabbing the thin thumb" precedent as
+        core.ui.widgets.RoomBrowser.handle_wheel/CardPanelUI.handle_wheel.
+        Returns True if consumed, so Creator's own MOUSEWHEEL handler knows
+        not to fall through to zooming the world camera instead."""
+        if not self.contains(pos):
+            return False
+        max_scroll = self._max_scroll()
+        if max_scroll <= 0:
+            return False
+        self.scroll_offset = max(0, min(max_scroll, self.scroll_offset - direction * self.WHEEL_STEP_PX))
+        return True
+
+    def _sounds_top_offset(self):
+        """Panel-relative y where the Sons section starts -- always right
+        after whatever kind-specific content precedes it (object mechanics/
+        capacites+effets/mob stats+loot/pnj info), computed per card_kind
+        rather than a single fixed offset, so two sections can never
+        overlap even though the viewport now scrolls instead of forcing the
+        whole panel taller."""
+        if self.card_kind == "object":
+            return 440  # past blocks/interactable/lockable + cell_modes grid's worst case
+        if self.is_mob and self.mob_kind == "enemy":
+            return 688 + len(self._mob_loot_rows()) * 32 + 20
+        # animal/item/pnj -- past capacites/effets (see _capacites_top_offset),
+        # nothing else shown below that for any of these 3 kinds.
+        return self._capacites_top_offset() + 198
+
+    def _capacites_top_offset(self):
+        """Panel-relative y where Capacites/Effets starts -- right after
+        whatever kind-specific info precedes it (see module docstring),
+        computed per card_kind rather than a single fixed offset sized for
+        the worst case (an enemy's Type+Etats info): an item has NOTHING
+        above it at all, so that fixed offset used to leave a large dead
+        scroll gap before anything useful. Only called for kinds that
+        actually show Capacites/Effets (see _shows_capabilities_and_effects
+        -- item/mob/pnj), but harmless to call for "object" too."""
+        if self.card_kind == "item":
+            return 270
+        if self.is_mob and self.mob_kind == "enemy":
+            return 300
+        if self.is_mob:  # animal
+            return 320
+        return 300  # pnj
+
     def _layout(self):
         panel_rect = pygame.Rect(self.x, self.y, self.width, self.height)
         self._clear_rect = pygame.Rect(panel_rect.right - 90, panel_rect.y + 12, 70, 28)
         content_x = self.x + 20
-        # Shared preview -- state tabs (variable count, computed on demand
-        # by _preview_state_rects) sit at y+48; the box itself is fixed.
+        # Shared preview -- PINNED, never scrolls (state tabs, variable
+        # count, computed on demand by _preview_state_rects, sit at y+48;
+        # the box itself is fixed).
         self.preview_rect = pygame.Rect(content_x, self.y + 76, 160, 160)
+        # Everything below here is scrollable content -- built via _cy(),
+        # see its own docstring.
+        content_width = self.width - 40 - self.SCROLLBAR_WIDTH - 6
         # Plain-object mechanics rows (blocks/interactable/lockable) --
         # start right below the preview + a one-line info label.
-        self._blocks_rect = pygame.Rect(content_x, self.y + 270, self.width - 40, 32)
-        self._interactable_rect = pygame.Rect(content_x, self.y + 310, self.width - 40, 32)
-        self._lockable_rect = pygame.Rect(content_x, self.y + 350, self.width - 40, 32)
+        self._blocks_rect = pygame.Rect(content_x, self._cy(270), content_width, 32)
+        self._interactable_rect = pygame.Rect(content_x, self._cy(310), content_width, 32)
+        self._lockable_rect = pygame.Rect(content_x, self._cy(350), content_width, 32)
         # Capacites/Effets -- item/mob/pnj cards (see module docstring),
-        # fixed rows below anything mob/pnj/object might show above (worst
-        # case, an enemy's Type+Etats info), each with its own Stepper row
-        # (label drawn above it, same idiom as ChestPanelUI's loot rows)
-        # directly beneath it, shown only while that row's own checkbox is
-        # enabled -- same "always laid out, conditionally shown" style as
-        # blocks/interactable/lockable.
-        self._throwable_rect = pygame.Rect(content_x, self.y + 400, self.width - 40, 28)
-        self._explosive_rect = pygame.Rect(content_x, self.y + 470, self.width - 40, 28)
-        self._heal_rect = pygame.Rect(content_x, self.y + 540, self.width - 40, 28)
+        # starting right after whatever kind-specific info precedes it (see
+        # _capacites_top_offset -- dynamic per card_kind, same reasoning as
+        # _sounds_top_offset: an item has nothing above it at all, so a
+        # single fixed offset sized for "worst case, an enemy's Type+Etats
+        # info" left a large dead scroll gap for every other kind). Each
+        # row has its own Stepper row (label drawn above it, same idiom as
+        # ChestPanelUI's loot rows) directly beneath it, shown only while
+        # that row's own checkbox is enabled -- same "always laid out,
+        # conditionally shown" style as blocks/interactable/lockable.
+        capacites_top = self._capacites_top_offset()
+        self._throwable_rect = pygame.Rect(content_x, self._cy(capacites_top), content_width, 28)
+        self._explosive_rect = pygame.Rect(content_x, self._cy(capacites_top + 70), content_width, 28)
+        self._heal_rect = pygame.Rect(content_x, self._cy(capacites_top + 140), content_width, 28)
+        # Enregistrer -- PINNED, never scrolls (same reasoning as the
+        # preview above): the panel would be useless if saving your edits
+        # required scrolling to find the button first.
         self._save_rect = pygame.Rect(content_x, self.y + self.height - 56, self.width - 40, 40)
 
+        # Sons -- see _sounds_top_offset/_sound_slot_keys. A variable
+        # number of rows depending on card_kind (a mob gets one per
+        # ENEMY_ANIMATIONS/idle+move state, plus place/destroy) -- this is
+        # exactly what the scrollable viewport above exists for, unlike the
+        # old fixed 3-row/bottom-anchored layout this replaced. Each row is
+        # itself variable-height too (see _sound_row_height) -- an
+        # accumulating cursor, not index*SOUND_ROW_HEIGHT, so a row whose
+        # pitch slider is showing pushes every row below it down instead of
+        # overlapping it.
+        sound_keys = self._sound_slot_keys()
+        cursor = self._sounds_top_offset()
+        row_h = self.SOUND_ROW_HEIGHT - 6
+        label_w, btn_w, name_w, play_w, pitch_w, gap = 90, 20, 90, 44, 44, 5
+        self._sound_rects = {}
+        self._pitch_rects = {}
+        for key in sound_keys:
+            ry = self._cy(cursor)
+            lx = content_x + label_w + gap
+            prev_rect = pygame.Rect(lx, ry, btn_w, row_h)
+            name_rect = pygame.Rect(prev_rect.right + gap, ry, name_w, row_h)
+            next_rect = pygame.Rect(name_rect.right + gap, ry, btn_w, row_h)
+            play_rect = pygame.Rect(next_rect.right + gap, ry, play_w, row_h)
+            pitch_toggle_rect = pygame.Rect(play_rect.right + gap, ry, pitch_w, row_h)
+            self._sound_rects[key] = {
+                "label": pygame.Rect(content_x, ry, label_w, row_h),
+                "prev": prev_rect, "name": name_rect, "next": next_rect, "play": play_rect,
+                "pitch_toggle": pitch_toggle_rect,
+            }
+            if self.card_sounds.get(key) and self.pitch_enabled.get(key):
+                slider_y = self._cy(cursor + self.SOUND_ROW_HEIGHT + 6)
+                track = pygame.Rect(content_x + 46, slider_y, content_width - 46 - 96, 12)
+                lo_value, hi_value = self.pitch_range.get(key, self.DEFAULT_PITCH_RANGE)
+                lo_x = self._pitch_value_to_x(track, lo_value)
+                hi_x = self._pitch_value_to_x(track, hi_value)
+                self._pitch_rects[key] = {
+                    "track": track,
+                    "lo": pygame.Rect(lo_x - 5, track.centery - 8, 10, 16),
+                    "hi": pygame.Rect(hi_x - 5, track.centery - 8, 10, 16),
+                }
+            else:
+                self._pitch_rects.pop(key, None)
+            cursor += self._sound_row_height(key)
+
     def _throw_speed_stepper(self):
-        return Stepper(self.x + 40, self.y + 432, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 20, 800)
+        return Stepper(
+            self.x + 40, self._cy(self._capacites_top_offset() + 32),
+            self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 20, 800,
+        )
 
     def _blast_radius_stepper(self):
-        return Stepper(self.x + 40, self.y + 502, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 6)
+        return Stepper(
+            self.x + 40, self._cy(self._capacites_top_offset() + 102),
+            self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 6,
+        )
 
     def _blast_damage_stepper(self):
-        return Stepper(self.x + 260, self.y + 502, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 10)
+        return Stepper(
+            self.x + 260, self._cy(self._capacites_top_offset() + 102),
+            self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 10,
+        )
 
     def _heal_amount_stepper(self):
-        return Stepper(self.x + 40, self.y + 572, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 10)
+        return Stepper(
+            self.x + 40, self._cy(self._capacites_top_offset() + 172),
+            self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 10,
+        )
 
     # -- mob stats editing (enemy only) -------------------------------
 
@@ -544,10 +785,10 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         for aggro_range; attack_range's sub-1 precision is a deliberately
         accepted loss for this first editing pass, see module docstring)."""
         return {
-            "health": Stepper(self.x + 40, self.y + 620, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 20),
-            "move_speed": Stepper(self.x + 260, self.y + 620, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 10, 200),
-            "aggro_range": Stepper(self.x + 40, self.y + 654, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 15),
-            "attack_range": Stepper(self.x + 260, self.y + 654, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 5),
+            "health": Stepper(self.x + 40, self._cy(620), self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 20),
+            "move_speed": Stepper(self.x + 260, self._cy(620), self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 10, 200),
+            "aggro_range": Stepper(self.x + 40, self._cy(654), self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 15),
+            "attack_range": Stepper(self.x + 260, self._cy(654), self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 1, 5),
         }
 
     def _mob_loot_rows(self):
@@ -564,8 +805,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         return rows
 
     def _mob_loot_row_stepper(self, index):
-        y = self.y + 688 + index * 32
-        return Stepper(self.x + 40, y, self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 0, 99)
+        return Stepper(self.x + 40, self._cy(688 + index * 32), self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 0, 99)
 
     def _cell_mode_grid_rects(self):
         width_tiles, height_tiles = self.size
@@ -599,6 +839,78 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         of re-testing the 3-way flag combination separately in
         handle_event and render."""
         return self.card_kind in ("item", "mob", "pnj")
+
+    def _sound_slot_keys(self):
+        """Every sound row that applies to the currently loaded card --
+        deliberately one slot per ACTION the card can actually trigger, not
+        a fixed use/place/destroy triad: an item gets "use" (see
+        Explorator._use_interact_item's effects branch), plus "throw" once
+        "Lancable" is enabled (the throw itself, see the same method's
+        throwable branch -- distinct from "use" since a throwable item
+        never goes through the effects branch at all); a mob gets one row
+        PER STATE in self.mob_states (ENEMY_ANIMATIONS for an enemy, idle/
+        move for an animal -- see entities.py's Enemy.take_damage/
+        _on_loop_frame_advanced for which of these are actually wired to
+        play yet, "idle"/"movement" are stored but currently inert, no
+        looping-sound mechanism exists), plus "place"/"destroy" since a mob
+        is placed/destroyed exactly like any other OBJECT_TYPES card; a
+        plain object gets "place"/"destroy", plus "interact" once
+        "Interagible" is enabled OR the type is hardcoded "linkable" (a
+        button, gate, or wall -- these trigger by being walked onto/opened,
+        never through the "Interagible" checkbox at all, see
+        ObjectManager._activate_button/check_button_trigger); a PNJ keeps
+        the original use/place/destroy triad (per-role sounds are a
+        possible future extension, not built this pass). Empty for nothing
+        loaded."""
+        if self.card_kind == "item":
+            keys = ["use"]
+            if self.throwable_enabled:
+                keys.append("throw")
+            return keys
+        if self.card_kind == "mob":
+            return list(self.mob_states) + ["place", "destroy"]
+        if self.card_kind == "pnj":
+            return ["use", "place", "destroy"]
+        if self.card_kind == "object":
+            keys = ["place", "destroy"]
+            if self.interactable or OBJECT_TYPES.get(self.type_id, {}).get("linkable"):
+                keys.append("interact")
+            return keys
+        return []
+
+    def _sound_slot_label(self, key):
+        return "Son : " + self._SOUND_LABEL_OVERRIDES.get(key, key.replace("_", " ").title())
+
+    def _load_sounds(self, sounds):
+        self.card_sounds = dict(sounds)
+
+    def _cycle_sound(self, key, step):
+        options = [None] + self._available_sound_files
+        current = self.card_sounds.get(key)
+        index = options.index(current) if current in options else 0
+        self.card_sounds[key] = options[(index + step) % len(options)]
+
+    def _load_pitch(self, sound_pitch):
+        self.pitch_enabled = {key: True for key in sound_pitch}
+        self.pitch_range = {key: list(value) for key, value in sound_pitch.items()}
+
+    def _toggle_pitch(self, key):
+        """Flips random-pitch on/off for `key` -- newly enabling it (no
+        saved range from a previous session) seeds DEFAULT_PITCH_RANGE
+        rather than starting at a degenerate [x, x] (which would just play
+        at pitch x always, no randomness at all -- pointless default)."""
+        self.pitch_enabled[key] = not self.pitch_enabled.get(key, False)
+        if self.pitch_enabled[key] and key not in self.pitch_range:
+            self.pitch_range[key] = list(self.DEFAULT_PITCH_RANGE)
+
+    def _pitch_value_to_x(self, track, value):
+        span = self.PITCH_SLIDER_MAX - self.PITCH_SLIDER_MIN
+        frac = max(0.0, min(1.0, (value - self.PITCH_SLIDER_MIN) / span))
+        return track.x + frac * track.width
+
+    def _pitch_x_to_value(self, track, x):
+        frac = max(0.0, min(1.0, (x - track.x) / max(1, track.width)))
+        return self.PITCH_SLIDER_MIN + frac * (self.PITCH_SLIDER_MAX - self.PITCH_SLIDER_MIN)
 
     def _build_mob_stats(self):
         """The stats dict to persist for an enemy mob, or None for
@@ -657,15 +969,24 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         effects = []
         if self.heal_enabled:
             effects.append({"kind": "heal", "amount": self.heal_amount})
+        sounds = {key: path for key, path in self.card_sounds.items() if path}
+        # A pitch range only means anything for a key that ALSO has a real
+        # sound assigned and its own toggle enabled -- an orphaned range
+        # left over from a sound that's since been cleared (see
+        # _cycle_sound) never gets persisted.
+        sound_pitch = {
+            key: self.pitch_range[key] for key in sounds
+            if self.pitch_enabled.get(key) and key in self.pitch_range
+        }
 
         try:
             if self.card_kind == "item":
                 if is_builtin_item(self.item_id):
-                    update_item_overrides(self.item_id, capabilities, effects)
+                    update_item_overrides(self.item_id, capabilities, effects, sounds, sound_pitch)
                 else:
                     update_item(
                         self.item_id, self.name, self.item_slot, self.icon_path, self.icon_rect,
-                        capabilities=capabilities, effects=effects,
+                        capabilities=capabilities, effects=effects, sounds=sounds, sound_pitch=sound_pitch,
                     )
             else:
                 update_type_mechanics(
@@ -677,6 +998,8 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                     capabilities=capabilities,
                     stats=self._build_mob_stats(),
                     effects=effects,
+                    sounds=sounds,
+                    sound_pitch=sound_pitch,
                 )
         except ValueError as exc:
             self.status_text = str(exc)
@@ -688,17 +1011,53 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         if self._handle_resize_event(event):
             return None
 
-        # The PNJ preview's click-drag-to-rotate gesture spans multiple
-        # event types (unlike everything else in this panel, which only
-        # ever reacts to a single MOUSEBUTTONDOWN) -- handled first, before
-        # the MOUSEBUTTONDOWN-only gate below short-circuits every other
-        # event type.
+        # The PNJ preview's click-drag-to-rotate gesture and the scrollbar
+        # thumb drag both span multiple event types (unlike everything else
+        # in this panel, which only ever reacts to a single
+        # MOUSEBUTTONDOWN) -- handled first, before the MOUSEBUTTONDOWN-only
+        # gate below short-circuits every other event type. At most one of
+        # the two is ever active at once (both require a fresh
+        # MOUSEBUTTONDOWN to start, see below).
         if self.is_pnj and self._pnj_dragging_direction:
             if event.type == pygame.MOUSEMOTION:
                 self._update_pnj_drag(event)
                 return None
             if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 self._pnj_dragging_direction = False
+                return None
+
+        if self._scrollbar_dragging:
+            if event.type == pygame.MOUSEMOTION:
+                track = self._scrollbar_track_rect()
+                max_scroll = self._max_scroll()
+                if max_scroll > 0 and track.height > 0:
+                    rel = (event.pos[1] - track.y) / track.height
+                    self.scroll_offset = max(0, min(max_scroll, round(rel * max_scroll)))
+                return None
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._scrollbar_dragging = False
+                return None
+
+        # A pitch slider handle drag, same multi-event shape as the two
+        # above -- (key, "lo"/"hi") identifies which row/handle. Dragging
+        # "lo" past "hi" (or vice versa) clamps against the OTHER handle's
+        # current value rather than crossing it, so the range can never
+        # invert.
+        if self._pitch_dragging is not None:
+            key, handle = self._pitch_dragging
+            if event.type == pygame.MOUSEMOTION:
+                rects = self._pitch_rects.get(key)
+                current = self.pitch_range.get(key, list(self.DEFAULT_PITCH_RANGE))
+                if rects is not None:
+                    value = self._pitch_x_to_value(rects["track"], event.pos[0])
+                    if handle == "lo":
+                        current[0] = min(value, current[1])
+                    else:
+                        current[1] = max(value, current[0])
+                    self.pitch_range[key] = current
+                return None
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._pitch_dragging = None
                 return None
 
         if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
@@ -724,6 +1083,21 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         if self.is_pnj and self.preview_rect.collidepoint(event.pos):
             self._pnj_dragging_direction = True
             self._pnj_drag_last_pos = event.pos
+            return None
+
+        if self._max_scroll() > 0 and self._scrollbar_thumb_rect().collidepoint(event.pos):
+            self._scrollbar_dragging = True
+            return None
+
+        # Everything below reads/writes a row inside the scrollable band --
+        # gated on the click actually landing within _viewport_rect (not
+        # just within the row's own rect), so a row scrolled out of view
+        # can never be hit through the pinned preview/title or Enregistrer
+        # areas it might geometrically overlap once shifted by
+        # scroll_offset (see _cy's own docstring).
+        if not self._viewport_rect().collidepoint(event.pos):
+            if self._save_rect.collidepoint(event.pos):
+                return self._try_save()
             return None
 
         if self.card_kind == "object":
@@ -796,8 +1170,57 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                     loot[key] = new_value
                     return None
 
-        if self._save_rect.collidepoint(event.pos):
-            return self._try_save()
+        for key in self._sound_slot_keys():
+            rects = self._sound_rects.get(key)
+            if rects is None:
+                continue
+            if rects["prev"].collidepoint(event.pos):
+                self._cycle_sound(key, -1)
+                return None
+            if rects["next"].collidepoint(event.pos):
+                self._cycle_sound(key, 1)
+                return None
+            if rects["play"].collidepoint(event.pos):
+                filename = self.card_sounds.get(key)
+                if filename:
+                    pitch = None
+                    if self.pitch_enabled.get(key):
+                        lo, hi = sorted(self.pitch_range.get(key, self.DEFAULT_PITCH_RANGE))
+                        if hi > lo:
+                            pitch = random.uniform(lo, hi)
+                    SoundManager().play_path(filename, pitch=pitch)
+                return None
+            # The pitch toggle only does anything for a row that actually
+            # has a sound assigned -- randomizing the pitch of "Aucun" is
+            # meaningless, so the button isn't even drawn otherwise (see
+            # _render_sounds), but the click-gate is repeated here too in
+            # case a stale click lands on a rect from a since-cleared row.
+            if self.card_sounds.get(key) and rects["pitch_toggle"].collidepoint(event.pos):
+                self._toggle_pitch(key)
+                return None
+            pitch_rects = self._pitch_rects.get(key)
+            if pitch_rects is not None:
+                if pitch_rects["lo"].collidepoint(event.pos):
+                    self._pitch_dragging = (key, "lo")
+                    return None
+                if pitch_rects["hi"].collidepoint(event.pos):
+                    self._pitch_dragging = (key, "hi")
+                    return None
+                if pitch_rects["track"].collidepoint(event.pos):
+                    # A click on the track itself (not precisely on either
+                    # handle) jumps the NEAREST handle there and starts
+                    # dragging it from there -- more forgiving than forcing
+                    # a pixel-precise grab on a 10px-wide handle.
+                    value = self._pitch_x_to_value(pitch_rects["track"], event.pos[0])
+                    lo, hi = self.pitch_range.get(key, self.DEFAULT_PITCH_RANGE)
+                    handle = "lo" if abs(value - lo) <= abs(value - hi) else "hi"
+                    current = self.pitch_range.setdefault(key, list(self.DEFAULT_PITCH_RANGE))
+                    if handle == "lo":
+                        current[0] = min(value, current[1])
+                    else:
+                        current[1] = max(value, current[0])
+                    self._pitch_dragging = (key, handle)
+                    return None
 
         return None
 
@@ -811,11 +1234,34 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self._draw_resize_handle(screen)
             return
 
+        # _layout() rebuilds every cached content rect (_blocks_rect,
+        # _sound_rects, _save_rect, ...) from self.x/y/width/height/
+        # scroll_offset -- previously only re-run on move() (a PanelFrame
+        # drag), which silently left every rect stale after a resize-handle
+        # drag (self.width/height changing without a matching move()) or a
+        # scroll (scroll_offset changing without one either, see _cy).
+        # Called here, every frame, rather than hunting down every event
+        # path that could invalidate it -- render() always runs once per
+        # frame regardless of events (see Creator.run()), so this keeps
+        # rects correct for the NEXT event with at most one frame of lag,
+        # cheap enough (plain Rect arithmetic) to not matter.
+        self._clamp_scroll()
+        self._layout()
+
         title = self.font.render(f"Mecaniques -- {self.name}", True, (255, 255, 255))
         screen.blit(title, (self.x + 20, self.y + 16))
         self.border.draw_centered_label(screen, self._clear_rect, self.small_font, "Vider")
 
         self._render_preview(screen)
+
+        # Everything below is the scrollable band -- clipped to
+        # _viewport_rect so a row scrolled past the top/bottom never bleeds
+        # into the pinned preview/title above or the pinned Enregistrer
+        # button below. previous_clip is restored afterward rather than
+        # cleared to None outright, in case a caller further up already had
+        # its own clip active.
+        previous_clip = screen.get_clip()
+        screen.set_clip(self._viewport_rect())
 
         if self.card_kind == "mob":
             self._render_mob_info(screen)
@@ -825,7 +1271,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self._render_object_info(screen)
         else:
             item_label = self.small_font.render("Item d'inventaire", True, (200, 200, 200))
-            screen.blit(item_label, (self.x + 20, self.y + 244))
+            screen.blit(item_label, (self.x + 20, self._cy(244)))
 
         if self._shows_capabilities_and_effects():
             self._render_capabilities(screen)
@@ -834,6 +1280,11 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         if self.is_mob and self.mob_kind == "enemy":
             self._render_mob_stats_editing(screen)
 
+        self._render_sounds(screen)
+
+        screen.set_clip(previous_clip)
+        self._render_scrollbar(screen)
+
         self.border.draw_centered_label(screen, self._save_rect, self.font, "Enregistrer")
 
         if self.status_text:
@@ -841,6 +1292,12 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             screen.blit(status, (self.x + 20, self._save_rect.y - 22))
 
         self._draw_resize_handle(screen)
+
+    def _render_scrollbar(self, screen):
+        if self._max_scroll() <= 0:
+            return
+        pygame.draw.rect(screen, (40, 40, 46), self._scrollbar_track_rect())
+        pygame.draw.rect(screen, (150, 150, 150), self._scrollbar_thumb_rect())
 
     def _render_preview(self, screen):
         """Shared preview area for EVERY card kind -- see module docstring's
@@ -905,6 +1362,54 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             screen.blit(amount_label, (stepper.minus_rect.x, stepper.minus_rect.y - amount_label.get_height() - 2))
             stepper.render(screen, self.border, self.small_font, self.heal_amount)
 
+    def _render_sounds(self, screen):
+        """Sons section -- one row per _sound_slot_keys entry, each a
+        filename cycled from _available_sound_files (< / > buttons, "Aucun"
+        at the None end), a Jouer button that previews it immediately via
+        SoundManager.play_path (through the row's own pitch range if
+        enabled, so previewing actually demonstrates the randomization),
+        and -- only once a real file is assigned -- a "Pitch" toggle. Once
+        toggled on, a second line renders the double-handle range slider
+        (see _render_pitch_slider)."""
+        for key in self._sound_slot_keys():
+            rects = self._sound_rects.get(key)
+            if rects is None:
+                continue
+            label = self.small_font.render(self._sound_slot_label(key), True, (200, 200, 200))
+            screen.blit(label, (rects["label"].x, rects["label"].y + 4))
+            self.border.draw_centered_label(screen, rects["prev"], self.small_font, "<")
+            self.border.draw_centered_label(screen, rects["next"], self.small_font, ">")
+            current = self.card_sounds.get(key)
+            display = current if current else "Aucun"
+            if len(display) > 12:
+                display = display[:10] + "..."
+            name_surface = self.small_font.render(display, True, (230, 230, 230))
+            screen.blit(name_surface, (rects["name"].x + 4, rects["name"].y + 4))
+            self.border.draw_centered_label(screen, rects["play"], self.small_font, "Jouer")
+            if current:
+                pitch_label = "[x] Pitch" if self.pitch_enabled.get(key) else "[ ] Pitch"
+                self.border.draw_centered_label(screen, rects["pitch_toggle"], self.small_font, pitch_label)
+
+            pitch_rects = self._pitch_rects.get(key)
+            if pitch_rects is not None:
+                self._render_pitch_slider(screen, key, pitch_rects)
+
+    def _render_pitch_slider(self, screen, key, rects):
+        track = rects["track"]
+        pygame.draw.rect(screen, (40, 40, 46), track, border_radius=4)
+        lo, hi = self.pitch_range.get(key, self.DEFAULT_PITCH_RANGE)
+        lo_x = self._pitch_value_to_x(track, lo)
+        hi_x = self._pitch_value_to_x(track, hi)
+        # The filled span between the two handles -- the actual range a
+        # random pitch will be drawn from, at a glance.
+        pygame.draw.rect(
+            screen, (110, 150, 190), pygame.Rect(lo_x, track.y, max(1, hi_x - lo_x), track.height),
+        )
+        for handle in ("lo", "hi"):
+            pygame.draw.rect(screen, (220, 220, 220), rects[handle], border_radius=2)
+        readout = self.small_font.render(f"x{lo:.2f} - x{hi:.2f}", True, (200, 200, 200))
+        screen.blit(readout, (track.right + 8, track.centery - readout.get_height() / 2))
+
     def _render_object_info(self, screen):
         """Archetype label + mechanics checkboxes (blocks_movement/
         cell_modes/interactable/lockable) -- plain decorative/special
@@ -912,7 +1417,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         render()'s own kind dispatch for symmetry with _render_mob_info/
         _render_pnj_info."""
         type_label = self.small_font.render(f"Archetype : {ARCHETYPES.get(self.archetype, {}).get('label', self.archetype)}", True, (200, 200, 200))
-        screen.blit(type_label, (self.x + 20, self.y + 244))
+        screen.blit(type_label, (self.x + 20, self._cy(244)))
 
         if self.archetype in CELL_MODES_ARCHETYPES:
             if not self._is_multi_cell():
@@ -937,16 +1442,16 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         twice as both read-only text and editable steppers."""
         kind_label = "Ennemi" if self.mob_kind == "enemy" else "Animal"
         type_label = self.small_font.render(f"Type : Mob ({kind_label})", True, (200, 200, 200))
-        screen.blit(type_label, (self.x + 20, self.y + 244))
+        screen.blit(type_label, (self.x + 20, self._cy(244)))
 
         states_label = self.small_font.render(f"Etats : {', '.join(self.mob_states)}", True, (200, 200, 200))
-        screen.blit(states_label, (self.x + 20, self.y + 266))
+        screen.blit(states_label, (self.x + 20, self._cy(266)))
 
         if self.mob_kind != "enemy":
             note = self.small_font.render(
                 "Aucune stat pour un animal -- seuls les ennemis en ont.", True, (150, 150, 150)
             )
-            screen.blit(note, (self.x + 20, self.y + 288))
+            screen.blit(note, (self.x + 20, self._cy(288)))
 
     def _render_mob_stats_editing(self, screen):
         """PV/Vitesse/Aggro/Portee steppers + loot rows (currency then
@@ -980,9 +1485,9 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         action_direction_coverage) -- the preview itself (tabs/box/frame)
         is drawn generically by _render_preview."""
         type_label = self.small_font.render("Type : PNJ", True, (200, 200, 200))
-        screen.blit(type_label, (self.x + 20, self.y + 244))
+        screen.blit(type_label, (self.x + 20, self._cy(244)))
         pack_label = self.small_font.render(f"Pack : {self.pnj_entity_pack}", True, (150, 150, 150))
-        screen.blit(pack_label, (self.x + 20, self.y + 260))
+        screen.blit(pack_label, (self.x + 20, self._cy(260)))
 
         tagged, _missing = action_direction_coverage(self.pnj_entity_pack, self.pnj_wander_actions.get(self.preview_state))
         coverage = f"{len(tagged)}/{len(NPC_DIRECTIONS)} directions taguees"
@@ -990,7 +1495,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             f"Direction : {self.pnj_direction} ({coverage}) -- glisser sur le sprite pour tourner",
             True, (200, 200, 200),
         )
-        screen.blit(direction_label, (self.x + 20, self.y + 276))
+        screen.blit(direction_label, (self.x + 20, self._cy(276)))
 
     def _render_cell_modes_grid(self, screen):
         """Same 3-state grid as SpriteEditorPanelUI's own (see that

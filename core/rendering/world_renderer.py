@@ -15,12 +15,14 @@ class WorldRenderer:
 
     # basictileset.png (6 cols x 5 rows, the only sheet load_tileset ever
     # resolves to -- no tileset.png exists) -- a ledge/edge tile drawn one
-    # cell south of every non-empty cell whose south neighbor is EMPTY, only
-    # while show_grid is True (F3 debug -- see render()'s "hide_border_cells"
-    # too): a debug visualization of the logical grid's floor boundary, not
-    # player-facing art, since a void cell is real, walkable-into terrain
-    # (see Explorator._is_void/_attempt_fall) rather than a gap to visually
-    # patch over.
+    # cell south of every non-empty cell whose south neighbor is EMPTY,
+    # gated by show_border (see render()/_render_border) rather than
+    # show_grid (F3 debug lines only) -- player-facing, marking the real
+    # floor boundary a void cell drop actually is (see
+    # Explorator._is_void/_attempt_fall), not just a debug aid. hide_border_cells
+    # (render()'s own param, see DungeonAssembly._border_cells_by_room)
+    # suppresses this at a room-to-room border-merge seam, where the "south
+    # neighbor" is secretly real floor belonging to another room, not void.
     BORDER_TILE_INDEX = 25
 
     # basictileset.png frame 20 -- the decorated floor tile drawn under a
@@ -130,7 +132,7 @@ class WorldRenderer:
         return self._get_scaled_tile(tile_index, size_px, columns)
 
     def render(self, screen, dungeon, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
-               skip_foreground_objects=False, show_grid=True, hide_border_cells=None):
+               skip_foreground_objects=False, show_grid=True, show_border=True, hide_border_cells=None):
         zoom = camera.zoom
         tile_size = dungeon.tile_size
         # Snapped to a whole pixel count -- see _get_scaled_tile: every tile
@@ -217,16 +219,10 @@ class WorldRenderer:
             # ends up in front of them too.
             self._draw_pillar_tops(screen, dungeon, camera, hide_object_types=hide_object_types)
 
-        if show_grid:
-            hide_border_cells = hide_border_cells or ()
-            ledge_source_cells = self._get_ledge_cells(dungeon)
-            scaled_ledge = self._get_scaled_tile(self.BORDER_TILE_INDEX, tile_px, columns)
-            for x, y in ledge_source_cells:
-                if (x, y) in hide_border_cells:
-                    continue
-                south_y = y + 1
-                screen.blit(scaled_ledge, (origin_x + x * tile_px, origin_y + south_y * tile_px))
+        if show_border:
+            self._render_border(screen, dungeon, camera, hide_border_cells=hide_border_cells)
 
+        if show_grid:
             for gy in range(dungeon.height + 1):
                 world_y = gy * tile_size
                 p1 = camera.world_to_screen(0, world_y)
@@ -254,6 +250,47 @@ class WorldRenderer:
 
         if show_link_indicators:
             self._draw_link_indicators(screen, dungeon, camera)
+
+    def _render_border(self, screen, dungeon, camera, hide_border_cells=None):
+        """The south-edge ledge tile (see BORDER_TILE_INDEX's own docstring)
+        -- player-facing now, not just an F3 debug aid, so both render()
+        (single-room Creator/Explorator draw) and DungeonAssembly._render_floor
+        (via the public render_border() below, see its own docstring for why
+        that's a SEPARATE pass rather than just calling this from inside
+        render()) can call it independently of show_grid, which now only
+        gates the literal debug grid LINES."""
+        zoom = camera.zoom
+        tile_size = dungeon.tile_size
+        tile_px = round(tile_size * zoom)
+        columns = self.tileset.get_width() // TILE_SIZE
+        origin_x, origin_y = camera.world_to_screen(0, 0)
+        origin_x, origin_y = round(origin_x), round(origin_y)
+
+        hide_border_cells = hide_border_cells or ()
+        ledge_source_cells = self._get_ledge_cells(dungeon)
+        scaled_ledge = self._get_scaled_tile(self.BORDER_TILE_INDEX, tile_px, columns)
+        for x, y in ledge_source_cells:
+            if (x, y) in hide_border_cells:
+                continue
+            south_y = y + 1
+            screen.blit(scaled_ledge, (origin_x + x * tile_px, origin_y + south_y * tile_px))
+
+    def render_border(self, screen, dungeon, camera, hide_border_cells=None):
+        """Public entry point for a SEPARATE border-only pass -- see
+        DungeonAssembly._render_floor, which now draws every room's own
+        floor/objects (show_border=False) in one full loop BEFORE calling
+        this for every room in a second loop. That ordering is the actual
+        fix for a real glitch: a room whose south edge glues to another
+        room via a border merge (see core.world.assembly._border_edges) has
+        no way to know, from its own local grid alone, that its southern
+        neighbor cell is secretly real floor belonging to the OTHER room,
+        not void -- _border_cells_by_room already computes and hides
+        exactly those cells, but drawing this as a guaranteed-last pass
+        (never interleaved with any room's floor) means even a seam this
+        filter somehow missed would still end up painted OVER by real floor
+        rather than on top of it, instead of depending on happening to
+        iterate rooms in exactly the right order."""
+        self._render_border(screen, dungeon, camera, hide_border_cells=hide_border_cells)
 
     @staticmethod
     def _footprint_cells(dungeon, predicate):
@@ -316,11 +353,11 @@ class WorldRenderer:
 
     def _get_ledge_cells(self, dungeon):
         """Every (x, y) SOURCE cell (a non-empty cell whose south neighbor is
-        EMPTY, off-grid counting as EMPTY) needing the debug south-border
-        ledge tile (BORDER_TILE_INDEX) drawn one cell below it -- cached
-        against dungeon.terrain_version instead of rescanned every frame
-        (render()'s show_grid block used to be a full O(width*height) grid
-        scan every call). Keyed by the SOURCE cell, not the drawn position,
+        EMPTY, off-grid counting as EMPTY) needing the south-border ledge
+        tile (BORDER_TILE_INDEX) drawn one cell below it -- cached against
+        dungeon.terrain_version instead of rescanned every frame
+        (_render_border used to be a full O(width*height) grid scan every
+        call). Keyed by the SOURCE cell, not the drawn position,
         to match hide_border_cells' own coordinate convention
         (DungeonAssembly._south_seam_cells collects source floor cells, not
         the cell below them). terrain_version is bumped by both Dungeon.

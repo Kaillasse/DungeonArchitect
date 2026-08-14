@@ -8,6 +8,7 @@ room it's connecting from) instead of moving tiles within a floor.
 from __future__ import annotations
 
 import json
+import math
 import random
 from collections import deque
 
@@ -19,6 +20,11 @@ from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DONJONS_DIRECTORY
 
 OPPOSITE_SIDE = {"north": "south", "south": "north", "east": "west", "west": "east"}
+
+# How many full generate_assembly attempts to try before settling for the
+# best one seen -- see generate_assembly's own docstring for why whole
+# attempts are regenerated rather than steering a single one.
+GENERATION_ATTEMPTS = 25
 
 
 def _valid_entry_exits(dungeon):
@@ -362,10 +368,11 @@ class DungeonAssembly:
         own Dungeon only ever thinks in that room's local coordinates --
         same as is_global_cell_walkable converting before delegating to a
         room's ObjectManager -- so it's shifted back by that room's offset
-        here before being handed down. Each ref's `player` (the actual
-        object, for take_damage) is forwarded as-is -- no coordinate
-        transform needed since only its identity matters here, never its
-        .position (see EnemyManager/Enemy, which only ever read distances
+        here before being handed down. Each ref's `player`/`session` (the
+        actual objects, for take_damage / credit_pending_card
+        respectively) are forwarded as-is -- no coordinate transform needed
+        since only their identity matters here, never .position (see
+        EnemyManager/Enemy, which only ever read distances
         from the already-shifted hitbox).
 
         Only rooms on a floor within SHADOW_MAX_DISTANCE of some occupied
@@ -396,7 +403,9 @@ class DungeonAssembly:
                 continue
             refs_on_floor = player_refs_by_floor.get(room.floor, ())
             local_refs = [
-                PlayerRef(ref.player, ref.hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size))
+                PlayerRef(
+                    ref.player, ref.hitbox.move(-room.offset_x * tile_size, -room.offset_y * tile_size), ref.session,
+                )
                 for ref in refs_on_floor
             ]
             room.dungeon.update(
@@ -525,8 +534,20 @@ class DungeonAssembly:
         rooms = self.rooms_on_floor(floor)
         hide_border_cells_by_room = self._border_cells_by_room(floor, rooms)
 
+        # Two passes, not one -- every room's own floor/objects first
+        # (show_border=False), THEN every room's border ledge in a second,
+        # guaranteed-last loop (see WorldRenderer.render_border's own
+        # docstring). hide_border_cells_by_room already suppresses a ledge
+        # at a genuine border-merge seam, but this ordering is a real
+        # safety net on top of that filter: even a seam it somehow missed
+        # still gets painted OVER by the neighboring room's real floor
+        # (drawn in THIS SAME pass-1 loop, at a different iteration) rather
+        # than risk a stray ledge landing on top of it depending on
+        # whichever order `rooms` happens to iterate in.
+        offset_cameras = {}
         for room in rooms:
             offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
+            offset_cameras[room] = offset_camera
             room.dungeon.render(
                 screen, offset_camera,
                 hide_object_types=hide_object_types,
@@ -535,7 +556,12 @@ class DungeonAssembly:
                 skip_enemies=skip_enemies,
                 skip_npcs=skip_npcs,
                 show_grid=show_grid,
-                hide_border_cells=hide_border_cells_by_room.get(room, ()),
+                show_border=False,
+            )
+
+        for room in rooms:
+            room.dungeon.render_border(
+                screen, offset_cameras[room], hide_border_cells=hide_border_cells_by_room.get(room, ()),
             )
 
     def _border_cells_by_room(self, floor, rooms):
@@ -680,6 +706,7 @@ class DungeonAssembly:
             skip_animals=True,
             skip_enemies=True,
             show_grid=False,
+            show_border=False,
         )
         surface.fill(self.BELOW_TINT_COLOR, special_flags=pygame.BLEND_RGBA_MULT)
 
@@ -891,34 +918,171 @@ def _attach_via_border(rng, room_names, assembly, anchor_room, anchor_edge):
     return candidate_room, candidate_edge
 
 
-def generate_assembly(room_names, room_count, rng=None):
-    """Build a DungeonAssembly from up to room_count rooms drawn from room_names.
+def _room_has_dungeon_exit(dungeon):
+    """True if `dungeon` carries at least one object explicitly tagged
+    role="dungeon_exit" (an E/S or a chest, see ObjectManager.get_role) --
+    the pool-level test used to find which rooms in a player's selection
+    are even CAPABLE of ending a generated dungeon, before generate_assembly
+    tries to guarantee one gets placed (see its own docstring)."""
+    manager = dungeon.object_manager
+    return any(manager.get_role(obj) == "dungeon_exit" for obj in manager.objects)
 
-    Starts from the first room (in room_names order) that has both a spawn and
-    a way out (a gate/wall entry-exit or a border-floor edge), then repeatedly
-    attaches another room (drawn at random from room_names, repeats allowed)
-    at one of the growing assembly's still-unconnected connection points.
-    Two connection kinds are tried, tagged in the `pending` queue as
-    ("exit", obj) or ("border", edge):
 
-    - An entry-exit merge aligns two gate/wall objects onto the *same* global
-      cell (see the "exit" branch below). If that placement's tiles would
-      overlap an already-placed room on the same floor, the new room goes on
-      floor +1 instead (or -1 if that's also occupied) -- always relative to
-      the floor of the room it's connecting from, not the assembly's max/min
-      floor.
-    - A border merge (_attach_via_border) glues two rooms directly edge-to-
-      edge along a matching-length border-floor run, with no door object and
-      no floor-stepping fallback -- see its docstring for why.
+def _attach_via_exit(rng, room_names, assembly, anchor_room, anchor_exit):
+    """Try to attach a new room onto anchor_room via an entry-exit merge
+    through anchor_exit -- the "exit"-kind pending item's own placement
+    logic (aligning two same-typed gate/wall objects onto one shared global
+    cell, stepping to an adjacent floor on collision, propagating a button
+    link across the merged doorway). Returns (new PlacedRoom, the exit it
+    consumed) or None if no room in room_names has a same-typed connector.
 
-    Returns None if no room in room_names has both a spawn and a way out.
-    """
-    if rng is None:
-        rng = random
+    Extracted out of generate_assembly's own main loop (which still calls
+    this for its ordinary random draws) so the guaranteed-exit pass below
+    can reuse the EXACT same attachment mechanics against a narrower pool
+    (only rooms carrying a dungeon_exit-tagged object, see
+    _room_has_dungeon_exit) -- same "one mechanism, two callers" shape as
+    _attach_via_border already has."""
+    candidate_name = rng.choice(room_names)
+    candidate_dungeon = _load_room(candidate_name)
+    candidate_exits = _valid_entry_exits(candidate_dungeon)
+    matching_exits = [obj for obj in candidate_exits if obj["type"] == anchor_exit["type"]]
+    if not matching_exits:
+        return None
 
+    candidate_exit = rng.choice(matching_exits)
+
+    anchor_gx, anchor_gy = anchor_room.to_global(anchor_exit["x"], anchor_exit["y"])
+    offset_x = anchor_gx - candidate_exit["x"]
+    offset_y = anchor_gy - candidate_exit["y"]
+
+    candidate_index = len(assembly.rooms)
+    candidate_room = PlacedRoom(
+        candidate_dungeon, candidate_name, anchor_room.floor, offset_x, offset_y, index=candidate_index
+    )
+    candidate_cells = candidate_room.occupied_cells()
+    shared_cell = (anchor_gx, anchor_gy)
+
+    def _fits(floor):
+        return not _collides(assembly.occupied_cells_on_floor(floor), candidate_cells, ignore=shared_cell)
+
+    floor = anchor_room.floor
+    if not _fits(floor):
+        step = 1
+        while True:
+            floor = anchor_room.floor + step
+            if _fits(floor):
+                break
+            floor = anchor_room.floor - step
+            if _fits(floor):
+                break
+            step += 1
+        candidate_room.floor = floor
+
+    anchor_exit["door_target_room"] = candidate_index
+    candidate_exit["door_target_room"] = anchor_room.index
+
+    for source_obj in anchor_room.dungeon.object_manager.objects:
+        if source_obj["type"] != "button":
+            continue
+        for link_ref in source_obj.get("links", []):
+            if (link_ref["x"], link_ref["y"]) == (anchor_exit["x"], anchor_exit["y"]):
+                source_obj.setdefault("assembly_links", []).append(
+                    {"floor": floor, "x": anchor_gx, "y": anchor_gy, "room": candidate_index}
+                )
+                break
+
+    for source_obj in candidate_room.dungeon.object_manager.objects:
+        if source_obj["type"] != "button":
+            continue
+        for link_ref in source_obj.get("links", []):
+            if (link_ref["x"], link_ref["y"]) == (candidate_exit["x"], candidate_exit["y"]):
+                source_obj.setdefault("assembly_links", []).append(
+                    {"floor": anchor_room.floor, "x": anchor_gx, "y": anchor_gy, "room": anchor_room.index}
+                )
+                break
+
+    assembly.add_room(candidate_room)
+    return candidate_room, candidate_exit
+
+
+def _room_hop_distances(edge_pairs, room_count, start_index=0):
+    """BFS hop-count (edges, not rooms) from `start_index` to every other
+    room index reachable via `edge_pairs` (a list of (a, b) room-index
+    pairs recorded as generate_assembly attaches each room, both merge
+    kinds alike -- a border glue is just as much a real room-to-room
+    adjacency as a door merge, even though it stamps no door_target_room).
+    A room never reached (shouldn't happen -- every placed room attaches
+    to the growing assembly by construction) reads as float('inf'), so it
+    always sorts last/never satisfies a >= distance check."""
+    adjacency = {i: [] for i in range(room_count)}
+    for a, b in edge_pairs:
+        adjacency[a].append(b)
+        adjacency[b].append(a)
+
+    distances = {start_index: 0}
+    queue = deque([start_index])
+    while queue:
+        current = queue.popleft()
+        for neighbor in adjacency[current]:
+            if neighbor not in distances:
+                distances[neighbor] = distances[current] + 1
+                queue.append(neighbor)
+
+    return {i: distances.get(i, float("inf")) for i in range(room_count)}
+
+
+def _run_expansion(rng, room_names, assembly, pending, edges, target_count):
+    """The shared random-expansion loop -- pops a pending connection point,
+    tries to attach a new room from `room_names` there (an entry-exit merge
+    or a border glue, see generate_assembly's own docstring), and keeps
+    going until either `target_count` rooms are placed or `pending` runs
+    dry. Records every successful attachment's (anchor_index, new_index)
+    pair into `edges` (mutated in place) -- the room-to-room adjacency
+    graph _dungeon_exit_score/_finalize_dungeon_exit rank a finished
+    attempt's dungeon_exit placement by (see _room_hop_distances)."""
+    while len(assembly.rooms) < target_count and pending:
+        anchor_room, (kind, item) = pending.popleft()
+
+        if kind == "border":
+            result = _attach_via_border(rng, room_names, assembly, anchor_room, item)
+            if result is None:
+                continue
+            candidate_room, consumed_edge = result
+            edges.append((anchor_room.index, candidate_room.index))
+            for exit_obj in candidate_room.entry_exits():
+                pending.append((candidate_room, ("exit", exit_obj)))
+            for edge in candidate_room.border_edges():
+                if edge != consumed_edge:
+                    pending.append((candidate_room, ("border", edge)))
+            continue
+
+        result = _attach_via_exit(rng, room_names, assembly, anchor_room, item)
+        if result is None:
+            continue
+        candidate_room, candidate_exit = result
+        edges.append((anchor_room.index, candidate_room.index))
+
+        for exit_obj in candidate_room.entry_exits():
+            if exit_obj is not candidate_exit:
+                pending.append((candidate_room, ("exit", exit_obj)))
+        for edge in candidate_room.border_edges():
+            pending.append((candidate_room, ("border", edge)))
+
+
+def _generate_assembly_once(room_names, room_count, rng):
+    """One full, ordinary generation pass -- the original algorithm,
+    unchanged: start from a random room with both a spawn and a way out,
+    then expand via _run_expansion until room_count rooms are placed or
+    pending runs dry. No exit-guarantee logic at all; that's
+    generate_assembly's job, layered on top by calling this repeatedly (see
+    its own docstring for why repeating whole attempts, rather than trying
+    to steer a single attempt, turned out to be the robust way to do that).
+    Returns (assembly, edges) -- edges is generate_assembly's own
+    room-to-room adjacency list (see _room_hop_distances) -- or (None,
+    None) if no room in room_names has both a spawn and a way out."""
     start_name, start_dungeon = _find_start_room(room_names, rng)
     if start_name is None:
-        return None
+        return None, None
 
     assembly = DungeonAssembly()
     start_room = PlacedRoom(start_dungeon, start_name, floor=0, offset_x=0, offset_y=0, index=0)
@@ -931,143 +1095,113 @@ def generate_assembly(room_names, room_count, rng=None):
     pending = deque((start_room, ("exit", exit_obj)) for exit_obj in start_room.entry_exits())
     pending.extend((start_room, ("border", edge)) for edge in start_room.border_edges())
 
-    while len(assembly.rooms) < room_count and pending:
-        anchor_room, (kind, item) = pending.popleft()
-
-        if kind == "border":
-            result = _attach_via_border(rng, room_names, assembly, anchor_room, item)
-            if result is None:
-                continue
-            candidate_room, consumed_edge = result
-            for exit_obj in candidate_room.entry_exits():
-                pending.append((candidate_room, ("exit", exit_obj)))
-            for edge in candidate_room.border_edges():
-                if edge != consumed_edge:
-                    pending.append((candidate_room, ("border", edge)))
-            continue
-
-        anchor_exit = item
-
-        candidate_name = rng.choice(room_names)
-        candidate_dungeon = _load_room(candidate_name)
-        candidate_exits = _valid_entry_exits(candidate_dungeon)
-        # Only align onto an exit of the SAME type as the anchor's (a gate
-        # merges with a gate, a wall with a wall) -- otherwise the two halves
-        # of one physical doorway would be different objects with unrelated
-        # sprites/animations. Orientation doesn't need filtering here: two
-        # exits facing opposite directions land the candidate's interior
-        # exactly in the anchor's void (a same-floor connection), while two
-        # exits facing the same direction land the candidate's interior
-        # exactly on top of the anchor's own interior -- always a genuine
-        # FLOOR/FLOOR collision (is_valid_doorway guarantees a FLOOR neighbor
-        # right next to any doorway), so _fits() below always pushes that
-        # case to a different floor instead (a staircase-style connection).
-        # Either way the merge is coherent; _fits() is what actually decides.
-        matching_exits = [obj for obj in candidate_exits if obj["type"] == anchor_exit["type"]]
-        if not matching_exits:
-            continue
-
-        candidate_exit = rng.choice(matching_exits)
-
-        anchor_gx, anchor_gy = anchor_room.to_global(anchor_exit["x"], anchor_exit["y"])
-        offset_x = anchor_gx - candidate_exit["x"]
-        offset_y = anchor_gy - candidate_exit["y"]
-
-        candidate_index = len(assembly.rooms)
-        candidate_room = PlacedRoom(
-            candidate_dungeon, candidate_name, anchor_room.floor, offset_x, offset_y, index=candidate_index
-        )
-        candidate_cells = candidate_room.occupied_cells()
-        shared_cell = (anchor_gx, anchor_gy)
-
-        def _fits(floor):
-            return not _collides(assembly.occupied_cells_on_floor(floor), candidate_cells, ignore=shared_cell)
-
-        # Try the anchor's own floor first, then alternate +1/-1, +2/-2, ...
-        # outward until a floor with no real conflict is found. This must
-        # never give up and place the room anyway -- two rooms actually
-        # overlapping on the same floor is exactly the "several rooms
-        # superimposed" bug that lets the player walk through a wall covering
-        # another room's floor, since collision is resolved per-floor
-        # (DungeonAssembly.locate_room) assuming at most one room ever claims
-        # a given floor cell.
-        floor = anchor_room.floor
-        if not _fits(floor):
-            step = 1
-            while True:
-                floor = anchor_room.floor + step
-                if _fits(floor):
-                    break
-                floor = anchor_room.floor - step
-                if _fits(floor):
-                    break
-                step += 1
-            candidate_room.floor = floor
-
-        # Tag both halves of the merged doorway with the other side's room
-        # index, whether this connection ended up same-floor or not -- a
-        # single edge-triggered mechanism (DungeonAssembly.resolve_room_transition)
-        # handles both an ordinary same-floor E/S and a cross-floor "portal"
-        # crossing identically: stepping onto the door cell switches straight
-        # to the room on the other end (see locate_room's docstring for why
-        # this can't just fall out of FLOOR-ownership checks the way ordinary
-        # movement within one room does).
-        anchor_exit["door_target_room"] = candidate_index
-        candidate_exit["door_target_room"] = anchor_room.index
-
-        # A button in EITHER room that links (locally) to ITS OWN half of the
-        # merged doorway should also open the OTHER half -- the two halves
-        # are separate objects (one per room's own object list) that just
-        # happen to share one global cell, each with its own independent
-        # "open" flag, so opening one side alone leaves the other room's
-        # collision still reading closed. A plain local {"x", "y"} link only
-        # resolves within one room's own object list, so each direction needs
-        # a global, floor-qualified reference instead (an "assembly_link"),
-        # which DungeonAssembly.check_button_trigger knows how to follow
-        # across rooms. Only the anchor-side half of this used to be handled
-        # here, which is exactly why one physical doorway could open cleanly
-        # from one room's button but stay closed as seen from the other
-        # room's side -- whichever side happened to hold the button "won",
-        # the other never got told to open. The candidate/anchor exits' own
-        # pre-existing local links (if any) are untouched either way -- they're
-        # still valid as-is, since neither room's internal layout changes.
-        for source_obj in anchor_room.dungeon.object_manager.objects:
-            if source_obj["type"] != "button":
-                continue
-            for link_ref in source_obj.get("links", []):
-                if (link_ref["x"], link_ref["y"]) == (anchor_exit["x"], anchor_exit["y"]):
-                    source_obj.setdefault("assembly_links", []).append(
-                        {"floor": floor, "x": anchor_gx, "y": anchor_gy, "room": candidate_index}
-                    )
-                    break
-
-        for source_obj in candidate_room.dungeon.object_manager.objects:
-            if source_obj["type"] != "button":
-                continue
-            for link_ref in source_obj.get("links", []):
-                if (link_ref["x"], link_ref["y"]) == (candidate_exit["x"], candidate_exit["y"]):
-                    source_obj.setdefault("assembly_links", []).append(
-                        {"floor": anchor_room.floor, "x": anchor_gx, "y": anchor_gy, "room": anchor_room.index}
-                    )
-                    break
-
-        assembly.add_room(candidate_room)
-
-        for exit_obj in candidate_exits:
-            if exit_obj is not candidate_exit:
-                pending.append((candidate_room, ("exit", exit_obj)))
-        for edge in candidate_room.border_edges():
-            pending.append((candidate_room, ("border", edge)))
-
-    _enforce_single_dungeon_exit(assembly)
-
-    return assembly
+    edges = []
+    _run_expansion(rng, room_names, assembly, pending, edges, room_count)
+    return assembly, edges
 
 
-def _enforce_single_dungeon_exit(assembly):
+def _dungeon_exit_score(assembly, edges):
+    """-1 if no "dungeon_exit"-tagged object exists anywhere in `assembly`
+    (the "no exit at all" bug this whole mechanism exists to catch), else
+    the LARGEST room-hop-distance (see _room_hop_distances) among however
+    many dungeon_exit objects it does have -- generate_assembly's own
+    ranking of "how good is this attempt", used to pick the best of several
+    full regeneration attempts (see its own docstring)."""
+    distances = _room_hop_distances(edges, len(assembly.rooms)) if assembly.rooms else {}
+    best = -1
+    for room in assembly.rooms:
+        manager = room.dungeon.object_manager
+        for obj in room.dungeon.object_manager.objects:
+            if manager.get_role(obj) == "dungeon_exit":
+                best = max(best, distances.get(room.index, -1))
+    return best
+
+
+def generate_assembly(room_names, room_count, rng=None):
+    """Build a DungeonAssembly from up to room_count rooms drawn from room_names.
+
+    Starts from the first room (in room_names order) that has both a spawn and
+    a way out (a gate/wall entry-exit or a border-floor edge), then repeatedly
+    attaches another room (drawn at random from room_names, repeats allowed)
+    at one of the growing assembly's still-unconnected connection points.
+    Two connection kinds are tried, tagged in the `pending` queue as
+    ("exit", obj) or ("border", edge):
+
+    - An entry-exit merge aligns two gate/wall objects onto the *same* global
+      cell (see _attach_via_exit). If that placement's tiles would overlap an
+      already-placed room on the same floor, the new room goes on floor +1
+      instead (or -1 if that's also occupied) -- always relative to the floor
+      of the room it's connecting from, not the assembly's max/min floor.
+    - A border merge (_attach_via_border) glues two rooms directly edge-to-
+      edge along a matching-length border-floor run, with no door object and
+      no floor-stepping fallback -- see its docstring for why.
+
+    Guaranteed dungeon exit: if the room pool has at least one room carrying
+    a "dungeon_exit"-tagged object (see _room_has_dungeon_exit) AND
+    room_count > 1, a single ordinary generation attempt (_generate_assembly_once)
+    is run up to GENERATION_ATTEMPTS times, scored by _dungeon_exit_score
+    (-1 = no exit at all, otherwise how many room-hops away it landed), and
+    the BEST-scoring attempt is kept -- stopping early the moment one meets
+    math.ceil(room_count / 2) rooms of distance from spawn (the user's own
+    hardened rule). Earlier tries at steering a single attempt toward this
+    (reserving a room slot, then forcing an exit-capable room into it) kept
+    running into the same trap: whatever budget was reserved for "explore
+    more connectors if the first one doesn't fit" was also the ONLY budget
+    left to actually place the exit once a fit was found, so it could
+    never both explore AND still have room to land. Regenerating the WHOLE
+    attempt from scratch sidesteps that entirely -- every attempt is the
+    ordinary, already-correct algorithm, unmodified, so there's nothing new
+    to get subtly wrong; only the "which finished attempt do we keep" logic
+    is new. This is what makes "no exit at all" (a real bug the user hit)
+    vanishingly unlikely whenever the pool can support one at all -- it
+    already happens on its own within a handful of ordinary attempts most
+    of the time, and the loop still returns the best attempt seen even if
+    none ever meets the full distance target, rather than an unlucky worst
+    case forcing a hard failure. Still not a mathematical guarantee for a
+    very small/awkward room pool (a pool where the exit-capable room's own
+    connectors never once fit anywhere across every attempt stays exit-less,
+    same residual limitation _finalize_dungeon_exit documents) -- but this
+    is a world away from "essentially left to chance" the single-attempt
+    version had.
+
+    Returns None if no room in room_names has both a spawn and a way out.
+    """
+    if rng is None:
+        rng = random
+
+    exit_capable_names = (
+        [name for name in dict.fromkeys(room_names) if _room_has_dungeon_exit(_load_room(name))]
+        if room_count > 1 else []
+    )
+
+    if not exit_capable_names:
+        assembly, edges = _generate_assembly_once(room_names, room_count, rng)
+        if assembly is None:
+            return None
+        _finalize_dungeon_exit(assembly, edges)
+        return assembly
+
+    required_hops = max(0, math.ceil(room_count / 2) - 1)
+    best_assembly, best_edges, best_score = None, None, -2
+    for _ in range(GENERATION_ATTEMPTS):
+        assembly, edges = _generate_assembly_once(room_names, room_count, rng)
+        if assembly is None:
+            return None  # no valid start room at all -- no attempt count fixes that
+        score = _dungeon_exit_score(assembly, edges)
+        if score > best_score:
+            best_assembly, best_edges, best_score = assembly, edges, score
+        if score >= required_hops:
+            break
+
+    _finalize_dungeon_exit(best_assembly, best_edges)
+    return best_assembly
+
+
+def _finalize_dungeon_exit(assembly, edges):
     """At most one "dungeon_exit"-role object (an E/S or a chest --
     ObjectManager.get_role) survives across the whole assembled dungeon --
-    the first one found, in room-index order, wins; every later one is
+    every candidate is ranked by its own room's hop-distance from spawn
+    (see _room_hop_distances) and the FARTHEST one wins; every other one is
     demoted back to its type's own default role. Runs once, after every
     room is already placed, rather than tracking a "claimed" flag per
     add_room call site -- simpler and provably correct regardless of which
@@ -1077,20 +1211,36 @@ def _enforce_single_dungeon_exit(assembly):
     in-memory objects as the source room file on disk), so a room reused
     unflagged in a later, separate generation is unaffected.
 
-    Documented limitation: this is an upper bound only, not a guarantee --
-    a generation can still end up with zero dungeon_exit objects if no
-    drawn room happened to carry one. No attempt is made to force-include
-    one."""
-    claimed = False
+    Ranking by distance (not just "first found") matters even though
+    generate_assembly already tries to force a suitably-far exit room in:
+    an EARLIER room from the main expansion can independently carry its own
+    dungeon_exit tag too (nothing stops a player from using more than one
+    exit-capable room in the same pool), and the farther of the two should
+    always win regardless of placement order.
+
+    Documented limitation: still an upper bound only for a pool with no
+    exit-capable room at all -- a generation can end up with zero
+    dungeon_exit objects if none of the placed rooms happened to carry one.
+    No amount of ranking here can force one into existence; that's
+    generate_assembly's own job (see its docstring), and even that is a
+    best-effort push toward ceil(room_count / 2), not a hard guarantee, once
+    a large room_count makes for a very bushy (shallow, wide) graph."""
+    distances = _room_hop_distances(edges, len(assembly.rooms)) if assembly.rooms else {}
+    best_room, best_obj, best_distance = None, None, -1
     for room in assembly.rooms:
         for obj in room.dungeon.object_manager.objects:
-            manager = room.dungeon.object_manager
-            if manager.get_role(obj) != "dungeon_exit":
+            if room.dungeon.object_manager.get_role(obj) != "dungeon_exit":
                 continue
-            if claimed:
-                manager.set_role(obj, "connector" if manager.is_es_type(obj["type"]) else "loot")
-            else:
-                claimed = True
+            distance = distances.get(room.index, -1)
+            if distance > best_distance:
+                best_room, best_obj, best_distance = room, obj, distance
+
+    for room in assembly.rooms:
+        manager = room.dungeon.object_manager
+        for obj in room.dungeon.object_manager.objects:
+            if manager.get_role(obj) != "dungeon_exit" or obj is best_obj:
+                continue
+            manager.set_role(obj, "connector" if manager.is_es_type(obj["type"]) else "loot")
 
 
 def _donjon_path(name):

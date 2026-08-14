@@ -95,7 +95,8 @@ def _room_file_exists(room_name):
 
 
 class Card:
-    def __init__(self, card_id, name, images, card_type, effects=None, capabilities=None):
+    def __init__(self, card_id, name, images, card_type, effects=None, capabilities=None, sounds=None,
+                 sound_pitch=None):
         self.card_id = card_id
         self.name = name
         self.images = list(images) if images else []
@@ -114,6 +115,23 @@ class Card:
         # gameplay consumers (Explorator._use_interact_item/
         # ProjectileManager) read the registry directly, not through Card.
         self.capabilities = dict(capabilities) if capabilities else {}
+        # {"use"/"place"/"destroy": "filename.wav"}, relative to
+        # core.data.sound_manager.SOUND_DIRECTORY -- same generic-vocabulary
+        # spirit as capabilities/effects above. Not consumed from here
+        # directly (the hot paths that actually play a sound -- item use in
+        # Explorator._use_interact_item, object place/destroy in
+        # Creator/Explorator -- read OBJECT_TYPES/ITEM_DEFINITIONS' own
+        # "sounds" dict straight, same as effects/capabilities do, to avoid
+        # a full Card resolution per frame); stored on Card too so the
+        # Forge's display/edit UI has one consistent place to read it from.
+        self.sounds = dict(sounds) if sounds else {}
+        # {"use"/"place"/"destroy": [min, max]} -- optional random-pitch
+        # range per sound slot, see object_manager's "sound_pitch"
+        # mechanics field / core.data.sound_manager.play_card_sound. A key
+        # only means anything here if self.sounds also has that key.
+        self.sound_pitch = (
+            {key: list(value) for key, value in sound_pitch.items()} if sound_pitch else {}
+        )
 
 
 def default_card_for(card_id):
@@ -150,6 +168,7 @@ def default_card_for(card_id):
         return Card(
             card_id, name, images, config.get("card_type", "tile_decor"),
             effects=config.get("effects"), capabilities=config.get("capabilities"),
+            sounds=config.get("sounds"), sound_pitch=config.get("sound_pitch"),
         )
 
     definition = ITEM_DEFINITIONS.get(card_id)
@@ -158,6 +177,7 @@ def default_card_for(card_id):
             card_id, definition["name"], [definition["icon_path"]],
             definition.get("card_type", "item"),
             effects=definition.get("effects"), capabilities=definition.get("capabilities"),
+            sounds=definition.get("sounds"), sound_pitch=definition.get("sound_pitch"),
         )
 
     return None
@@ -266,6 +286,8 @@ class CardManager:
                     payload.get("images"),
                     payload.get("card_type", "tile"),
                     effects=payload.get("effects"),
+                    sounds=payload.get("sounds"),
+                    sound_pitch=payload.get("sound_pitch"),
                 )
 
         return default_card_for(card_id)
@@ -282,6 +304,8 @@ class CardManager:
                     "images": card.images,
                     "card_type": card.card_type,
                     "effects": card.effects,
+                    "sounds": card.sounds,
+                    "sound_pitch": card.sound_pitch,
                 },
                 handle, indent=2, ensure_ascii=False,
             )

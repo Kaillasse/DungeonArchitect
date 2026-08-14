@@ -5,7 +5,7 @@ import pygame
 
 from core.editor.autotile import EMPTY, FLOOR, WALL
 from core.data.ressources import DEFAULT_ANIM_SPEED, load_tileset_region
-from core.data.sound_manager import SoundManager
+from core.data.sound_manager import play_card_sound
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -30,6 +30,11 @@ _BUILTIN_OBJECT_TYPES = {
         "linkable": True,
         "walkable": True,
         "card_type": "tile_special",
+        # "interact" is the trigger sound (see ObjectManager.
+        # check_button_trigger) -- was a hardcoded SOUND_FILES event before
+        # the card sound system, now the card's own default, editable from
+        # the Forge like any other type's "sounds".
+        "sounds": {"interact": "buttonpressed.wav"},
     },
     "gate": {
         "asset": "tiles/gateopenclose.png",
@@ -157,6 +162,16 @@ _BUILTIN_OBJECT_TYPES = {
             "loot": {"gold": 2, "blue": 1},
             "item_loot": {"dynamite": 1},
         },
+        # Per-state sounds (see ENEMY_ANIMATIONS -- idle/movement/attack/
+        # damaged/death) -- attack/damaged were already wired via SOUND_FILES
+        # before the card sound system (see entities.py's Enemy.attack/
+        # take_damage), now the card's own defaults, editable from the
+        # Forge. "death" is wired too (Explorator._resolve_player_attacks),
+        # but has no default asset yet. idle/movement have no trigger at all
+        # (looping ambience, not a one-shot event) -- still shown as
+        # assignable slots in the Forge (see module docstring), just inert
+        # until a future pass wires a looping-sound mechanism.
+        "sounds": {"attack": "skel1attack.wav", "damaged": "skeldamaged.wav"},
     },
     "skeleton2": {
         "asset": "characters/Ennemies/skeleton2/idle.png",
@@ -174,6 +189,7 @@ _BUILTIN_OBJECT_TYPES = {
             "active_attack_frames": [11, 12],  # see skeleton1's own comment -- list, not tuple
             "loot": {"gold": 2, "blue": 1},
         },
+        "sounds": {"attack": "skel2attack.wav", "damaged": "skeldamaged.wav"},
     },
     "stairs": {
         # Sourced from basictileset.png frame 26, not a dedicated
@@ -331,7 +347,9 @@ _custom_types = _load_custom_object_types()
 # update_type_mechanics below. A builtin's mechanics can be overridden (a
 # custom_object_types.json entry marked OVERRIDE_MARKER, holding ONLY these
 # keys) without ever touching its Python-sourced visual identity.
-MECHANICS_KEYS = ("blocks_movement", "cell_modes", "interactable", "capabilities", "stats", "effects")
+MECHANICS_KEYS = (
+    "blocks_movement", "cell_modes", "interactable", "capabilities", "stats", "effects", "sounds", "sound_pitch",
+)
 DOORWAY_MECHANICS_KEYS = ("linkable", "blocks_until_open")
 OVERRIDE_MARKER = "__override_of_builtin__"
 
@@ -467,7 +485,8 @@ def _build_visual_fields(name, tileset, rect, size, archetype, frame_rects=None)
 
 
 def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
-                             interactable=False, lockable=False, capabilities=None, stats=None, effects=None):
+                             interactable=False, lockable=False, capabilities=None, stats=None, effects=None,
+                             sounds=None, sound_pitch=None):
     """Construction pure (aucune I/O) des champs mecaniques/gameplay d'une
     entree OBJECT_TYPES -- partagee par register_custom_type et
     update_type_mechanics (custom ET builtin, voir plus bas). `cell_modes`,
@@ -499,7 +518,21 @@ def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
     `effects` (meme forme que ITEM_DEFINITIONS' propre champ "effects" --
     une LISTE de {"kind": ..., ...params}, voir core.data.cards.Card) est
     le pendant "effets" de `capabilities` -- meme raisonnement, rendu
-    disponible pour n'importe quel type."""
+    disponible pour n'importe quel type.
+
+    `sounds` ({"use"/"place"/"destroy": "filename.wav"}, relatif a
+    core.data.sound_manager.SOUND_DIRECTORY) est le pendant sonore de
+    `capabilities`/`effects` -- meme vocabulaire generique, meme
+    "l'appelant (MechanicsPanelUI) decide seul ce qu'il affiche/joue pour
+    quel type de carte".
+
+    `sound_pitch` ({"use"/"place"/"destroy": [min, max]}) est optionnel et
+    purement additif par rapport a `sounds` -- une cle absente ou manquante
+    dans `sounds` veut dire "pitch normal, pas de plage" pour ce son ; une
+    entree ici n'a de sens que pour une cle qui a aussi une entree dans
+    `sounds` (voir core.data.sound_manager.play_card_sound, qui tire un
+    multiplicateur aleatoire dans cette plage a CHAQUE lecture -- jamais
+    calcule/fige une seule fois ici)."""
     fields = {}
     if cell_modes is not None:
         fields["cell_modes"] = [list(row) for row in cell_modes]
@@ -516,6 +549,10 @@ def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
         fields["effects"] = list(effects)
     if stats:
         fields["stats"] = dict(stats)
+    if sounds:
+        fields["sounds"] = dict(sounds)
+    if sound_pitch:
+        fields["sound_pitch"] = {key: list(value) for key, value in sound_pitch.items()}
     return fields
 
 
@@ -639,7 +676,8 @@ def update_type_visual(type_id, name, tileset, rect, size, archetype, frame_rect
 
 
 def update_type_mechanics(type_id, blocks_movement=False, cell_modes=None,
-                           interactable=False, lockable=False, capabilities=None, stats=None, effects=None):
+                           interactable=False, lockable=False, capabilities=None, stats=None, effects=None,
+                           sounds=None, sound_pitch=None):
     """Edite UNIQUEMENT les mecaniques/gameplay d'un type DEJA enregistre --
     contrairement a update_type_visual, fonctionne sur N'IMPORTE QUEL type
     existant, builtin OU custom (c'est le point d'entree qui rend un
@@ -658,7 +696,10 @@ def update_type_mechanics(type_id, blocks_movement=False, cell_modes=None,
     existing = OBJECT_TYPES.get(type_id)
     if existing is None:
         raise ValueError(f"'{type_id}' n'existe pas")
-    fields = _build_mechanics_fields(existing, blocks_movement, cell_modes, interactable, lockable, capabilities, stats, effects)
+    fields = _build_mechanics_fields(
+        existing, blocks_movement, cell_modes, interactable, lockable, capabilities, stats, effects, sounds,
+        sound_pitch,
+    )
     if not isinstance(existing.get("asset"), dict):
         _write_builtin_mechanics_override(type_id, fields)
         return OBJECT_TYPES[type_id]
@@ -875,6 +916,11 @@ _BUILTIN_ITEM_DEFINITIONS = {
             "throwable": {"speed": 220},
             "explosive": {"radius_tiles": 2, "damage": 1},
         },
+        # "throw" fires the moment the throw is confirmed (see
+        # Explorator._use_interact_item's "throwable" branch) -- was a
+        # hardcoded "dynamite_interact" SOUND_FILES event before the card
+        # sound system, now the card's own default.
+        "sounds": {"throw": "lightning_dyn.wav"},
     },
 }
 
@@ -928,7 +974,8 @@ def _persist_custom_item_overrides(overrides):
         json.dump(overrides, handle, indent=2, ensure_ascii=False)
 
 
-def _build_item_entry(name, slot, icon_path, icon_rect, capabilities=None, effects=None):
+def _build_item_entry(name, slot, icon_path, icon_rect, capabilities=None, effects=None, sounds=None,
+                       sound_pitch=None):
     """Construction pure (aucune I/O) d'une entree ITEM_DEFINITIONS custom --
     partagee par register_item/update_item. `card_type` toujours "item" --
     aucun autre type de carte n'utilise ce registre."""
@@ -943,6 +990,10 @@ def _build_item_entry(name, slot, icon_path, icon_rect, capabilities=None, effec
         entry["capabilities"] = dict(capabilities)
     if effects:
         entry["effects"] = list(effects)
+    if sounds:
+        entry["sounds"] = dict(sounds)
+    if sound_pitch:
+        entry["sound_pitch"] = {key: list(value) for key, value in sound_pitch.items()}
     return entry
 
 
@@ -965,7 +1016,8 @@ def is_builtin_item(item_id):
     return item_id in _BUILTIN_ITEM_DEFINITIONS
 
 
-def register_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, effects=None):
+def register_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, effects=None, sounds=None,
+                   sound_pitch=None):
     """Valide et persiste un NOUVEL item -- l'equivalent register_custom_type
     pour ITEM_DEFINITIONS. Leve ValueError sur un id invalide/deja pris ou
     un slot inconnu."""
@@ -975,7 +1027,7 @@ def register_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, 
         raise ValueError(f"'{item_id}' existe deja")
     if slot not in ("attack", "interact", "passive"):
         raise ValueError(f"Slot inconnu : {slot}")
-    entry = _build_item_entry(name, slot, icon_path, icon_rect, capabilities, effects)
+    entry = _build_item_entry(name, slot, icon_path, icon_rect, capabilities, effects, sounds, sound_pitch)
     custom = _load_custom_items()
     custom[item_id] = entry
     _persist_custom_items(custom)
@@ -983,7 +1035,8 @@ def register_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, 
     return entry
 
 
-def update_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, effects=None):
+def update_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, effects=None, sounds=None,
+                 sound_pitch=None):
     """Edite un item custom DEJA enregistre -- jamais un item integre au jeu
     (dynamite) comme register_item/update_item ne peuvent jamais l'ecraser :
     voir update_item_overrides pour editer les mecaniques d'un builtin."""
@@ -993,7 +1046,7 @@ def update_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, ef
         raise ValueError(f"'{item_id}' est un item integre au jeu, non modifiable (voir update_item_overrides)")
     if slot not in ("attack", "interact", "passive"):
         raise ValueError(f"Slot inconnu : {slot}")
-    entry = _build_item_entry(name, slot, icon_path, icon_rect, capabilities, effects)
+    entry = _build_item_entry(name, slot, icon_path, icon_rect, capabilities, effects, sounds, sound_pitch)
     custom = _load_custom_items()
     custom[item_id] = entry
     _persist_custom_items(custom)
@@ -1001,7 +1054,7 @@ def update_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, ef
     return entry
 
 
-def update_item_overrides(item_id, capabilities, effects):
+def update_item_overrides(item_id, capabilities, effects, sounds=None, sound_pitch=None):
     """Persiste un override mecanique (capacites ET/OU effets, toujours
     l'etat complet, jamais un diff partiel -- desactiver l'un ne necessite
     pas un appel separe) pour un item EXISTANT INTEGRE AU JEU (dynamite
@@ -1022,7 +1075,13 @@ def update_item_overrides(item_id, capabilities, effects):
         entry["capabilities"] = dict(capabilities)
     if effects:
         entry["effects"] = list(effects)
-    base_state = {key: base[key] for key in ("capabilities", "effects") if key in base}
+    if sounds:
+        entry["sounds"] = dict(sounds)
+    if sound_pitch:
+        entry["sound_pitch"] = {key: list(value) for key, value in sound_pitch.items()}
+    base_state = {
+        key: base[key] for key in ("capabilities", "effects", "sounds", "sound_pitch") if key in base
+    }
 
     overrides = _load_custom_item_overrides()
     if entry == base_state:
@@ -1031,7 +1090,7 @@ def update_item_overrides(item_id, capabilities, effects):
     else:
         overrides[item_id] = entry
         merged = dict(base)
-        for key in ("capabilities", "effects"):
+        for key in ("capabilities", "effects", "sounds", "sound_pitch"):
             if key in entry:
                 merged[key] = entry[key]
             else:
@@ -1709,7 +1768,11 @@ class ObjectManager:
         obj["frame"] = 0
         obj["anim_timer"] = 0.0
         self.begin_animation(obj)
-        SoundManager().play("button_pressed")
+        config = OBJECT_TYPES[obj["type"]]
+        play_card_sound(
+            config.get("sounds", {}), "interact", fallback_event="button_pressed",
+            pitch_range=config.get("sound_pitch", {}).get("interact"),
+        )
 
     @staticmethod
     def _open_if_blocking(target, object_manager):

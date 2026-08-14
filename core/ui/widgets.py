@@ -329,6 +329,11 @@ class PanelFrame:
 
     TITLE_HEIGHT = 24
     TOGGLE_SIZE = 18
+    # How many pixels of the title bar must stay on-screen horizontally --
+    # keeps a stuck-off-to-the-side panel's title bar always grabbable
+    # again, without forcing the whole (possibly much wider) panel body
+    # back on-screen too.
+    MIN_VISIBLE_X = 60
 
     def __init__(self, panel, title, on_change=None):
         self.panel = panel
@@ -353,11 +358,31 @@ class PanelFrame:
             self.TOGGLE_SIZE, self.TOGGLE_SIZE,
         )
 
+    def _clamp_panel_xy(self, x, y):
+        """Keeps the title bar -- the only handle a panel can be dragged or
+        recovered by -- fully reachable: its top edge never above the
+        screen (the bug that stranded the Forge panel, whose saved y went
+        negative and put its whole title bar above y=0 with no way to grab
+        it back) and at least MIN_VISIBLE_X of its width on-screen
+        horizontally. The panel body itself is free to hang off any edge --
+        only the drag handle needs to stay clickable. Called from both the
+        live drag path and move_to (so a stale/out-of-bounds saved layout
+        self-heals on restore instead of reproducing the same stuck panel)."""
+        surface = pygame.display.get_surface()
+        if surface is None:
+            return x, y
+        screen_w, screen_h = surface.get_size()
+        min_visible = min(self.MIN_VISIBLE_X, self.panel.width)
+        x = max(min_visible - self.panel.width, min(x, screen_w - min_visible))
+        y = max(self.TITLE_HEIGHT, min(y, screen_h - self.TITLE_HEIGHT))
+        return x, y
+
     def move_to(self, x, y):
         """Absolute reposition -- used to restore a saved layout. Delegates
         to the wrapped panel's own move(dx, dy) so both the drag path and
         the restore path share the exact same per-panel relocation logic
         (icon rects, Stepper rects, etc. all get shifted the same way)."""
+        x, y = self._clamp_panel_xy(x, y)
         self.panel.move(x - self.panel.x, y - self.panel.y)
 
     def contains(self, pos):
@@ -398,7 +423,8 @@ class PanelFrame:
         if event.type == pygame.MOUSEMOTION and self._dragging and self._drag_last_pos is not None:
             dx = event.pos[0] - self._drag_last_pos[0]
             dy = event.pos[1] - self._drag_last_pos[1]
-            self.panel.move(dx, dy)
+            target_x, target_y = self._clamp_panel_xy(self.panel.x + dx, self.panel.y + dy)
+            self.panel.move(target_x - self.panel.x, target_y - self.panel.y)
             self._drag_last_pos = event.pos
             return True
 

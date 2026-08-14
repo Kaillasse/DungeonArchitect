@@ -37,7 +37,7 @@ def _sanitize_name(name) -> str:
 
 class Profile:
     def __init__(self, name: str, xp: int = 0, generator_room_names=None, generator_room_count: int = 3,
-                 panel_layout=None, card_collection=None, admingod: bool = False):
+                 panel_layout=None, card_collection=None, admingod: bool = False, home_player_position=None):
         self.name = name
         self.xp = xp
         # Set only via `python main.py --admingod` (see main.py) -- never
@@ -71,6 +71,16 @@ class Profile:
         # list_known_card_ids()) regardless of this being empty, so the
         # panel stays useful before any gain mechanic exists.
         self.card_collection = dict(card_collection) if card_collection else {}
+        # {"x": float, "y": float} in home-room world/pixel coordinates, or
+        # None before the player has ever crossed the home zoom threshold
+        # (see Explorator._check_home_zoom_switch) -- the single source of
+        # "where is the player" Creator reads for its entity-gated tools
+        # (Generateur/Forge, see Creator._entity_in_range), since Creator
+        # itself owns no player entity. Updated only on that Explo->Creator
+        # crossing, not every movement frame -- cheap to persist and exactly
+        # matches what Creator actually needs (the position at the moment
+        # editing started), same lazy-persistence spirit as panel_layout.
+        self.home_player_position = dict(home_player_position) if home_player_position else None
 
     @property
     def level(self) -> int:
@@ -82,6 +92,9 @@ class Profile:
         before = self.level
         self.xp += amount
         return self.level > before
+
+    def set_home_player_position(self, x: float, y: float) -> None:
+        self.home_player_position = {"x": x, "y": y}
 
 
 class ProfileManager:
@@ -118,6 +131,7 @@ class ProfileManager:
             panel_layout=payload.get("panel_layout"),
             card_collection=payload.get("card_collection"),
             admingod=payload.get("admingod", False),
+            home_player_position=payload.get("home_player_position"),
         )
 
     def save(self, profile: Profile) -> Path:
@@ -134,6 +148,7 @@ class ProfileManager:
                     "panel_layout": profile.panel_layout,
                     "card_collection": profile.card_collection,
                     "admingod": profile.admingod,
+                    "home_player_position": profile.home_player_position,
                 },
                 handle, indent=2, ensure_ascii=False,
             )

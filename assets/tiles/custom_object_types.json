@@ -641,5 +641,27 @@
       "run": "course"
     },
     "card_type": "pnj"
+  },
+  "skeleton2": {
+    "stats": {
+      "health": 3,
+      "move_speed": 45,
+      "aggro_range": 6.0,
+      "attack_range": 1.2,
+      "loot": {
+        "gold": 2,
+        "blue": 1
+      },
+      "item_loot": {},
+      "active_attack_frames": [
+        11,
+        12
+      ]
+    },
+    "sounds": {
+      "attack": "skel2attack.wav",
+      "damaged": "skeldamaged.wav"
+    },
+    "__override_of_builtin__": true
   }
 }

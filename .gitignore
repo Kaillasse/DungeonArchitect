@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+
+# Generator playtest output -- assets/donjons/donjon_001.json stays tracked
+# (already in the index); anything else here is disposable "Generer" output.
+assets/donjons/donjon_0*.json

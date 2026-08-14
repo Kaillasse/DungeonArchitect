@@ -7,7 +7,7 @@ from pathlib import Path
 import pygame
 
 from core.data.ressources import WORLD_SCALE, TILE_SIZE
-from core.data.sound_manager import SoundManager
+from core.data.sound_manager import SoundManager, play_card_sound
 from core.world.object_manager import (
     ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, load_enemy_frames, load_currency_frames,
     load_dynamite_frames, load_explosion_frames, load_star_frames,
@@ -792,7 +792,7 @@ class Npc(_WanderingEntity):
         self._advance_loop_animation(dt)
 
 
-PlayerRef = namedtuple("PlayerRef", ("player", "hitbox"))
+PlayerRef = namedtuple("PlayerRef", ("player", "hitbox", "session"))
 
 
 def _entity_rect_is_free(dungeon, rect, entities, moving_entity, player_refs):
@@ -983,6 +983,12 @@ class Enemy(_WanderingEntity):
     HITBOX_WIDTH = 16
     HITBOX_HEIGHT = 10
 
+    # Seconds to hold on the death animation's own last frame (see
+    # _on_final_frame_reached/update()) before the corpse is worth
+    # despawning -- see EnemyManager.update, which is what actually removes
+    # it and spawns the reward spark once despawn_ready flips True.
+    DEATH_DESPAWN_DELAY = 3.0
+
     def __init__(self, enemy_type, grid_x, grid_y, dungeon):
         self.enemy_type = enemy_type
         self.frames = load_enemy_frames(enemy_type)
@@ -1003,6 +1009,19 @@ class Enemy(_WanderingEntity):
         self.state_timer = random.uniform(*self.IDLE_DURATION)
         self._hit_delivered_this_swing = False
         self._attack_sound_played = False
+        # Death-despawn bookkeeping -- see DEATH_DESPAWN_DELAY/update()/
+        # EnemyManager.update. _death_animation_done flips True the moment
+        # the death animation's own last frame is FIRST reached (not every
+        # frame it holds there after, see _on_final_frame_reached); only
+        # then does death_hold_timer start counting toward despawn_ready.
+        # reward_spawned guards EnemyManager against spawning the reward
+        # spark more than once for the same corpse (update() runs every
+        # frame, despawn_ready stays True for at least one more frame after
+        # it first flips before EnemyManager actually removes the entity).
+        self._death_animation_done = False
+        self.death_hold_timer = 0.0
+        self.despawn_ready = False
+        self.reward_spawned = False
 
         self._render_cache = {}
 
@@ -1026,12 +1045,15 @@ class Enemy(_WanderingEntity):
         self.health -= amount
         self.frame = 0
         self.animation_timer = 0
+        config = OBJECT_TYPES.get(self.enemy_type, {})
+        sounds, pitch = config.get("sounds", {}), config.get("sound_pitch", {})
         if self.health <= 0:
             self.alive = False
             self.state = "death"
+            play_card_sound(sounds, "death", pitch_range=pitch.get("death"))
         else:
             self.state = "damaged"
-            SoundManager().play("skeleton_damaged")
+            play_card_sound(sounds, "damaged", fallback_event="skeleton_damaged", pitch_range=pitch.get("damaged"))
 
     def _enter_state(self, state):
         if self.state == state:
@@ -1083,7 +1105,11 @@ class Enemy(_WanderingEntity):
         # (active_attack_frames, checked in update() below) actually
         # becomes live.
         if self.frame in self.stats["active_attack_frames"] and not self._attack_sound_played:
-            SoundManager().play(f"{self.enemy_type}_attack")
+            config = OBJECT_TYPES.get(self.enemy_type, {})
+            play_card_sound(
+                config.get("sounds", {}), "attack", fallback_event=f"{self.enemy_type}_attack",
+                pitch_range=config.get("sound_pitch", {}).get("attack"),
+            )
             self._attack_sound_played = True
 
     def _on_final_frame_reached(self):
@@ -1092,11 +1118,19 @@ class Enemy(_WanderingEntity):
             # update() re-evaluate distance to pick idle/movement/attack.
             self.state = "idle"
             self.frame = 0
-        # else state == "death": holds on the last frame forever.
+        elif self.state == "death":
+            # Holds on the last frame (this fires again every
+            # ANIMATION_SPEED tick after, not just once -- _death_animation_done
+            # itself only needs to flip True the first time, see update()).
+            self._death_animation_done = True
 
     def update(self, dt, is_walkable, player_refs):
         if not self.alive:
             self._advance_animation(dt)
+            if self._death_animation_done and not self.despawn_ready:
+                self.death_hold_timer += dt
+                if self.death_hold_timer >= self.DEATH_DESPAWN_DELAY:
+                    self.despawn_ready = True
             return
 
         if self.state == "damaged":
@@ -1138,10 +1172,14 @@ class EnemyManager(_EntityManager):
     _EntityManager/AnimalManager's docstrings for why this stays a separate
     list rather than folding into ObjectManager.objects). Unlike
     AnimalManager.update, a dead Enemy is never filtered out for having 0
-    health -- it stays to play out its death animation and hold on the last
-    frame. One standing over void is still removed outright, though (see
-    update()) -- there's no sensible corpse for something that fell through
-    the floor."""
+    health right away -- it plays out its death animation and holds on the
+    last frame for Enemy.DEATH_DESPAWN_DELAY seconds (see Enemy.update),
+    THEN gets removed here (see update()) the same way a destroyed tile
+    disappears: a magnetic star to the nearest player, crediting the
+    enemy's own card on arrival (see _spawn_death_reward/
+    credit_pending_card). One standing over void is still removed outright
+    with no reward at all, though -- there's no sensible corpse (or spark
+    destination) for something that fell through the floor."""
 
     ENTITY_CLASS = Enemy
     ENTITY_TYPES = ENEMY_TYPES
@@ -1158,14 +1196,49 @@ class EnemyManager(_EntityManager):
     def _entities(self, value):
         self.enemies = value
 
-    def update(self, dt, player_refs=()):
+    def update(self, dt, player_refs=(), room_offset=(0, 0)):
         for enemy in self.enemies:
             enemy.update(
                 dt,
                 lambda rect, _enemy=enemy: self._is_free(rect, _enemy, player_refs),
                 player_refs,
             )
-        self.enemies = [enemy for enemy in self.enemies if not _is_over_void(self.dungeon, enemy)]
+            if enemy.despawn_ready and not enemy.reward_spawned:
+                # Guarded by reward_spawned, not just removing the enemy
+                # immediately here, since despawn_ready can stay True for
+                # more than one frame before the list comprehension below
+                # actually drops it (were update() ever called twice before
+                # that happened) -- the spark must only ever spawn once per
+                # corpse.
+                enemy.reward_spawned = True
+                self._spawn_death_reward(enemy, player_refs, room_offset)
+        self.enemies = [
+            enemy for enemy in self.enemies
+            if not enemy.despawn_ready and not _is_over_void(self.dungeon, enemy)
+        ]
+
+    def _spawn_death_reward(self, enemy, player_refs, room_offset):
+        """Same "disappear like a destroyed tile" treatment
+        ProjectileManager._spawn_destruction_sparks already gives terrain --
+        a magnetic star to whichever player is nearest, crediting the
+        enemy's own card (enemy.enemy_type) once it arrives (see
+        credit_pending_card). No-op (corpse just vanishes, no reward) if the
+        room has no players in it right now."""
+        if not player_refs:
+            return
+        nearest = min(
+            player_refs, key=lambda ref: pygame.Vector2(ref.hitbox.center).distance_squared_to(enemy.position),
+        )
+        target_player, target_session = nearest.player, nearest.session
+        card_id = enemy.enemy_type
+
+        def _on_arrival(session=target_session, card_id=card_id):
+            credit_pending_card(session, card_id)
+
+        self.dungeon.effect_manager.spawn_destruction_spark(
+            enemy.position.x, enemy.position.y, lambda: target_player.position,
+            room_offset=room_offset, on_arrival=_on_arrival,
+        )
 
 
 def _advance_frame_once(entity, dt, duration, frame_count):
@@ -1533,10 +1606,14 @@ class ProjectileManager:
             dynamite.update(dt)
             if dynamite.exploded:
                 grid_x, grid_y = self.dungeon.world_to_grid(dynamite.position.x, dynamite.position.y)
-                destroyed_cells = self.dungeon.destroy_area(grid_x, grid_y, dynamite.blast_radius_tiles)
+                destroyed_cells, card_ids_by_cell = self.dungeon.destroy_area(
+                    grid_x, grid_y, dynamite.blast_radius_tiles,
+                )
                 self._apply_blast_damage(dynamite, player_refs)
                 self.explosions.append(Explosion(dynamite.position.x, dynamite.position.y))
-                self._spawn_destruction_sparks(destroyed_cells, dynamite.position, player_refs, room_offset)
+                self._spawn_destruction_sparks(
+                    destroyed_cells, card_ids_by_cell, dynamite.position, player_refs, room_offset,
+                )
         self.dynamites = [dynamite for dynamite in self.dynamites if not dynamite.exploded]
 
         for explosion in self.explosions:
@@ -1569,7 +1646,7 @@ class ProjectileManager:
             if enemy.alive and _in_blast(enemy.get_hitbox()):
                 enemy.take_damage(dynamite.blast_damage)
 
-    def _spawn_destruction_sparks(self, destroyed_cells, blast_position, player_refs, room_offset):
+    def _spawn_destruction_sparks(self, destroyed_cells, card_ids_by_cell, blast_position, player_refs, room_offset):
         """One DestructionSpark per grid cell destroy_area actually
         cleared, all homing toward whichever player in this room is
         closest to the blast right now -- an explosion doesn't "change
@@ -1589,15 +1666,27 @@ class ProjectileManager:
         FUTURE frames, unlike the ref wrapper which is rebuilt fresh every
         frame) -- room_offset is what lets DestructionSpark convert that
         global position back to this room's local space each frame it
-        homes (see its own update())."""
+        homes (see its own update()). Each cell's own card_ids_by_cell
+        entry (see Dungeon.destroy_area) is credited to the SAME nearest
+        session once ITS OWN spark arrives (see credit_pending_card) --
+        every cell's spark shares one target player, but each still carries
+        its own card(s)."""
         if not destroyed_cells or not player_refs:
             return
         nearest = min(player_refs, key=lambda ref: pygame.Vector2(ref.hitbox.center).distance_squared_to(blast_position))
         target_player = nearest.player
+        target_session = nearest.session
         for grid_x, grid_y in destroyed_cells:
             local_x, local_y = self.dungeon.grid_to_world(grid_x, grid_y)
+            card_ids = card_ids_by_cell.get((grid_x, grid_y), [])
+
+            def _on_arrival(session=target_session, card_ids=card_ids):
+                for card_id in card_ids:
+                    credit_pending_card(session, card_id)
+
             self.dungeon.effect_manager.spawn_destruction_spark(
                 local_x, local_y, lambda: target_player.position, room_offset=room_offset,
+                on_arrival=_on_arrival,
             )
 
     def draw(self, screen, camera):
@@ -1607,22 +1696,40 @@ class ProjectileManager:
             explosion.draw(screen, camera)
 
 
+def credit_pending_card(session, card_id):
+    """Increments session.pending_cards[card_id] -- session is duck-typed
+    here (a core.exploration.player_session.PlayerSession in practice, but
+    this module never imports that class, only mutates the plain dict
+    attribute it's already handed via PlayerRef.session/a caller's own
+    closure) since a destroyed tile/object or a dead enemy's reward needs
+    the same "credit a live SESSION, not just its Player" hook
+    PlayerRef.hitbox/.player alone can't give (see DestructionSpark's own
+    on_arrival). Only ever committed to the persisted
+    Profile.card_collection later, on a victorious run (see
+    Explorator._commit_pending_cards) -- never here."""
+    session.pending_cards[card_id] = session.pending_cards.get(card_id, 0) + 1
+
+
 class DestructionSpark:
-    """Purely visual VFX: assets/effect/star's 4 frames play once (same
-    "play once" shape as Explosion) while homing toward a live target --
-    the feedback for a tile actually being destroyed (a broken wall from
-    the player's own melee, or one cell of an explosion's blast), spawned
+    """assets/effect/star's 4 frames play once (same "play once" shape as
+    Explosion) while homing toward a live target -- the feedback for a tile
+    actually being destroyed (a broken wall from the player's own melee, or
+    one cell of an explosion's blast) or an enemy corpse despawning, spawned
     by Dungeon.destroy_wall_cell's/destroy_area's callers (Explorator._
-    resolve_player_attacks, ProjectileManager._spawn_destruction_sparks),
-    never by the destruction methods themselves (Dungeon has no notion of
-    "which player is nearby" -- that's the caller's job, see EffectManager.
-    spawn_destruction_spark)."""
+    resolve_player_attacks, ProjectileManager._spawn_destruction_sparks) or
+    EnemyManager's own despawn handling, never by the destruction/death
+    logic itself (Dungeon/Enemy have no notion of "which player is nearby"
+    -- that's the caller's job, see EffectManager.spawn_destruction_spark).
+    `on_arrival`, if given, fires exactly once, the frame this actually
+    finishes (see update()) -- the caller's own hook for crediting a card
+    (see credit_pending_card) the instant the star visually reaches the
+    player, not at the moment of destruction/death itself."""
 
     FRAME_SIZE = 32
     ANIMATION_SPEED = 0.08
     HOMING_SPEED = 260  # world px/sec -- fast enough to usually reach the player within the 4-frame animation
 
-    def __init__(self, world_x, world_y, target_getter, room_offset=(0, 0)):
+    def __init__(self, world_x, world_y, target_getter, room_offset=(0, 0), on_arrival=None):
         # self.position lives in the SAME room-local space as world_x/
         # world_y always already are (see grid_to_world's own callers --
         # never true global coordinates once inside a multi-room assembly).
@@ -1634,6 +1741,7 @@ class DestructionSpark:
         self.position = pygame.Vector2(world_x, world_y)
         self.target_getter = target_getter
         self.room_offset = pygame.Vector2(room_offset)
+        self.on_arrival = on_arrival
         self.frames = load_star_frames()
         self.frame = 0
         self.animation_timer = 0.0
@@ -1649,6 +1757,8 @@ class DestructionSpark:
             self.position = _move_toward(self.position, local_target, self.HOMING_SPEED, dt)
         if _advance_frame_once(self, dt, self.ANIMATION_SPEED, len(self.frames)):
             self.finished = True
+            if self.on_arrival is not None:
+                self.on_arrival()
 
     def draw(self, screen, camera):
         sprite = self.frames[self.frame]
@@ -1670,7 +1780,7 @@ class EffectManager:
         self.dungeon = dungeon
         self.sparks = []
 
-    def spawn_destruction_spark(self, world_x, world_y, target_getter, room_offset=(0, 0)):
+    def spawn_destruction_spark(self, world_x, world_y, target_getter, room_offset=(0, 0), on_arrival=None):
         """`target_getter` is a callable () -> Vector2-like | None, read
         EVERY frame (see DestructionSpark.update) -- true magnetism toward
         the target's CURRENT position, not a trajectory computed once at
@@ -1681,8 +1791,12 @@ class EffectManager:
         offset_y) * tile_size within a multi-room assembly (0 outside one)
         -- see DestructionSpark's own docstring for why it's needed at all
         (world_x/world_y here are room-local, but target_getter always
-        reads a Player's global position)."""
-        self.sparks.append(DestructionSpark(world_x, world_y, target_getter, room_offset=room_offset))
+        reads a Player's global position). `on_arrival`, see
+        DestructionSpark's own docstring, is this manager's own passthrough
+        for the reward hook -- EffectManager itself never inspects it."""
+        self.sparks.append(
+            DestructionSpark(world_x, world_y, target_getter, room_offset=room_offset, on_arrival=on_arrival)
+        )
 
     def update(self, dt):
         for spark in self.sparks:

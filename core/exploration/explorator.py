@@ -10,7 +10,7 @@ from core.world.dungeon import Dungeon, corner_cells
 from core.editor.autotile import FLOOR
 from core.world.assembly import load_assembly, save_assembly, generate_assembly
 from core.data.ressources import ROOMS_DIRECTORY, next_new_donjon_name
-from core.world.entities import Player, PlayerRef, _bucket_direction
+from core.world.entities import Player, PlayerRef, _bucket_direction, credit_pending_card
 from core.world.object_manager import (
     ANIMAL_TYPES, ENEMY_TYPES, npc_types, ITEM_DEFINITIONS, make_item, OBJECT_TYPES,
 )
@@ -24,7 +24,7 @@ from core.engine.input import (
 )
 from core.engine.gamestate import GameState
 from core.engine.camera import Camera
-from core.data.sound_manager import SoundManager
+from core.data.sound_manager import SoundManager, play_card_sound
 from core.data.profile_manager import ProfileManager, apply_to_fresh_profile
 from core.data.progression import XP_ENEMY_KILL, XP_ANIMAL_KILL, XP_DUNGEON_CLEAR
 from core.world.home import home_room_name, wants_creator
@@ -319,6 +319,12 @@ class Explorator(NetworkSessionMixin):
             # on the very next frame -- reset it here, same idea as
             # re-placing position at the spawn point above.
             session.player.health = session.player.MAX_HEALTH
+            # A fresh run (whether this is a genuine new attempt or just
+            # returning to home after one ended) starts with nothing
+            # pending -- see PlayerSession.pending_cards/_trigger_victory
+            # for why anything still here at this point was never
+            # committed (a defeat, or simply never having won yet).
+            session.pending_cards = {}
         # Same reasoning for victory (see _interact_with_chest) -- otherwise
         # re-entering exploration would start right back on the frozen
         # victory screen from last time.
@@ -382,6 +388,9 @@ class Explorator(NetworkSessionMixin):
             session.last_door_obj = None
             session.last_dungeon_entrance_pos = None
             session.last_dungeon_exit_pos = None
+            # Entering a dungeon is where a real "run" actually starts --
+            # see PlayerSession.pending_cards/_trigger_victory.
+            session.pending_cards = {}
 
     @staticmethod
     def _spawn_offset_x(session, tile_size):
@@ -428,7 +437,19 @@ class Explorator(NetworkSessionMixin):
         if len(self.players) != 1 or not self._is_home_room():
             return
         if wants_creator(self.camera.zoom):
-            local_position = self.players[self._local_player_id].player.position
+            session = self.players[self._local_player_id]
+            local_position = session.player.position
+            # Persisted so Creator's entity-gated tools (Generateur/Forge,
+            # see Creator._entity_in_range) can compare against it -- Creator
+            # owns no player entity of its own, so this crossing is the only
+            # moment a real position is known to save. apply_to_fresh_profile
+            # (not a direct ProfileManager().save(session.profile)) so this
+            # never clobbers a card_collection change Creator made during a
+            # previous CREATOR visit this same run, same reasoning as
+            # _grant_xp's own use of it.
+            apply_to_fresh_profile(
+                session, lambda profile: profile.set_home_player_position(local_position.x, local_position.y),
+            )
             self.game_manager.pending_room = self.current_room
             self.game_manager.pending_zoom_carry = self.camera.zoom
             self.game_manager.pending_camera_center = (local_position.x, local_position.y)
@@ -616,8 +637,7 @@ class Explorator(NetworkSessionMixin):
             return
         session.last_dungeon_exit_pos = (grid_x, grid_y)
 
-        self.victory = True
-        self._grant_xp(session, XP_DUNGEON_CLEAR)
+        self._trigger_victory(session)
 
     def _active_floors(self):
         """Every floor at least one session currently occupies, in assembly
@@ -841,7 +861,10 @@ class Explorator(NetworkSessionMixin):
             local_x = session.player.position.x - offset_x * tile_size
             local_y = session.player.position.y - offset_y * tile_size
             dungeon.projectile_manager.throw_dynamite(local_x, local_y, direction, capabilities)
-            SoundManager().play("dynamite_interact")
+            play_card_sound(
+                definition.get("sounds", {}), "throw", fallback_event="dynamite_interact",
+                pitch_range=definition.get("sound_pitch", {}).get("throw"),
+            )
 
             session.player.play_action("interact")
             return True
@@ -852,10 +875,15 @@ class Explorator(NetworkSessionMixin):
                 if effect.get("kind") == "heal":
                     session.player.heal(effect.get("amount", 1))
             session.inventory.main_slots["interact"] = None
-            # Reused placeholder -- no dedicated "item consumed" sound
-            # exists yet, "blue_collect" (currency pickup chime) is the
-            # closest existing positive-feedback cue.
-            SoundManager().play("blue_collect")
+            # A card-authored "use" sound (see ITEM_DEFINITIONS' own
+            # "sounds" mechanics field / MechanicsPanelUI's "Son :
+            # Utilisation" row) wins if the item was given one; otherwise
+            # "blue_collect" (currency pickup chime) stays the generic
+            # positive-feedback fallback, same as before this field existed.
+            play_card_sound(
+                definition.get("sounds", {}), "use", fallback_event="blue_collect",
+                pitch_range=definition.get("sound_pitch", {}).get("use"),
+            )
             session.player.play_action("interact")
             return True
 
@@ -901,8 +929,7 @@ class Explorator(NetworkSessionMixin):
 
         session.player.play_action("interact")
         if dungeon.object_manager.get_role(obj) == "dungeon_exit":
-            self.victory = True
-            self._grant_xp(session, XP_DUNGEON_CLEAR)
+            self._trigger_victory(session)
         return True
 
     def _is_walkable(self, rect, moving_session, debug_label=None, visible_animals=None, visible_enemies=None):
@@ -1215,7 +1242,9 @@ class Explorator(NetworkSessionMixin):
             session.input = state
 
     def _player_refs(self):
-        return [PlayerRef(session.player, session.player.get_hitbox()) for session in self.players.values()]
+        return [
+            PlayerRef(session.player, session.player.get_hitbox(), session) for session in self.players.values()
+        ]
 
     def _player_refs_by_floor(self):
         """Every session's PlayerRef, grouped by session.current_placed_room.
@@ -1233,7 +1262,7 @@ class Explorator(NetworkSessionMixin):
             if session.current_placed_room is None:
                 continue
             floor = session.current_placed_room.floor
-            grouped.setdefault(floor, []).append(PlayerRef(session.player, session.player.get_hitbox()))
+            grouped.setdefault(floor, []).append(PlayerRef(session.player, session.player.get_hitbox(), session))
         return grouped
 
     def _apply_requested_actions(self, session):
@@ -1394,6 +1423,43 @@ class Explorator(NetworkSessionMixin):
         file always up to date."""
         apply_to_fresh_profile(session, lambda profile: profile.add_xp(amount))
 
+    def _commit_pending_cards(self, session):
+        """Merges session.pending_cards (see PlayerSession's own docstring/
+        credit_pending_card) into the persisted Profile.card_collection and
+        clears it -- called only from _trigger_victory, once per session,
+        the moment ANY session reaches the dungeon_exit (co-op is a shared
+        win). Same apply_to_fresh_profile pattern as _grant_xp, for the
+        exact same reason: a fresh reload before mutating avoids clobbering
+        a card_collection change Creator made mid-run. A no-op if nothing
+        was earned (empty dict) or this session has no profile at all."""
+        if not session.pending_cards:
+            return
+        gained = session.pending_cards
+        session.pending_cards = {}
+
+        def _mutate(profile):
+            for card_id, count in gained.items():
+                profile.card_collection[card_id] = profile.card_collection.get(card_id, 0) + count
+
+        apply_to_fresh_profile(session, _mutate)
+
+    def _trigger_victory(self, session):
+        """Sets self.victory (whole-session -- see its own field comment,
+        co-op shares one win) and grants the triggering session's own
+        XP_DUNGEON_CLEAR, same as before this existed -- plus commits EVERY
+        connected session's own pending_cards (see _commit_pending_cards),
+        not just the triggering one's, since co-op is a shared win. A
+        defeat (_game_over) never calls this, so cards earned that run are
+        simply never committed -- they vanish along with the rest of
+        pending_cards on the next open_room/_enter_assembly reset, matching
+        "garde l'inventaire en cas de victoire, le perd en cas de defaite."
+        Shared by both dungeon_exit triggers (_check_dungeon_exit and
+        _interact_with_chest's own chest branch)."""
+        self.victory = True
+        self._grant_xp(session, XP_DUNGEON_CLEAR)
+        for other_session in self.players.values():
+            self._commit_pending_cards(other_session)
+
     def _resolve_player_attacks(self):
         """Every session's attack, checked against the same one
         _visible_enemies_global()/_visible_animals_global() snapshots
@@ -1424,7 +1490,8 @@ class Explorator(NetworkSessionMixin):
             local_x = attack_hitbox.centerx - offset_x * tile_size
             local_y = attack_hitbox.centery - offset_y * tile_size
             grid_x, grid_y = dungeon.world_to_grid(local_x, local_y)
-            if dungeon.destroy_wall_cell(grid_x, grid_y):
+            broke, card_ids = dungeon.destroy_wall_cell(grid_x, grid_y)
+            if broke:
                 hit_landed = True
                 # grid_to_world returns room-LOCAL coordinates, matching
                 # what DestructionSpark itself stores as self.position --
@@ -1432,16 +1499,22 @@ class Explorator(NetworkSessionMixin):
                 # player.position (always GLOBAL) each frame it homes, see
                 # DestructionSpark's own docstring.
                 local_wall_x, local_wall_y = dungeon.grid_to_world(grid_x, grid_y)
-                # player=player defaults the closure's argument at
-                # definition time -- without it, every spark spawned across
-                # different iterations of this loop would share the same
-                # late-bound `player`, ending up all reading whichever
-                # session happened to be last once this whole loop finishes
-                # (the classic Python closure-in-a-loop pitfall).
+                # player=player/session=session/card_ids=card_ids default
+                # the closures' arguments at definition time -- without it,
+                # every spark spawned across different iterations of this
+                # loop would share the same late-bound values, ending up
+                # all reading whichever session happened to be last once
+                # this whole loop finishes (the classic Python
+                # closure-in-a-loop pitfall).
+                def _on_arrival(session=session, card_ids=card_ids):
+                    for card_id in card_ids:
+                        credit_pending_card(session, card_id)
+
                 dungeon.effect_manager.spawn_destruction_spark(
                     local_wall_x, local_wall_y,
                     lambda player=player: player.position,
                     room_offset=(offset_x * tile_size, offset_y * tile_size),
+                    on_arrival=_on_arrival,
                 )
 
             for enemy, enemy_rect, enemy_dungeon in enemies:

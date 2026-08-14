@@ -103,6 +103,16 @@ class PlayerSession:
         # camera is simply never used for rendering (only the local
         # session(s) ever get a viewport), but costs nothing to have.
         self.camera = Camera(zoom=1.0)
+        # {card_id: count} earned THIS run -- a destroyed tile/object's own
+        # DestructionSpark, or a dead enemy's own despawn spark, credits
+        # here on arrival (see core.world.entities.credit_pending_card),
+        # never straight into self.profile.card_collection. Only actually
+        # persisted on a victorious run (Explorator._commit_pending_cards,
+        # called from _trigger_victory) -- a defeat (_game_over) never
+        # reaches that, so this simply gets reset to {} on the next
+        # open_room/_enter_assembly and is lost, matching "garde
+        # l'inventaire en cas de victoire, le perd en cas de defaite."
+        self.pending_cards = {}
 
     def update_frozen(self, dt):
         """Ticks idle animation only -- shared by Explorator.update()'s

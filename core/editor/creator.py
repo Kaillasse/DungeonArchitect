@@ -14,7 +14,8 @@ from core.data.ressources import FLOOR, next_new_donjon_name
 from core.editor.autotile import WALL, LOCAL_EDIT_SPRITE_RADIUS
 from core.data.profile_manager import ProfileManager, ADMINGOD_STOCK
 from core.data.cards import room_name_from_card_id, room_card_manifest
-from core.world.object_manager import ITEM_DEFINITIONS
+from core.world.object_manager import ITEM_DEFINITIONS, OBJECT_TYPES
+from core.data.sound_manager import play_card_sound
 from core.world.home import home_room_name, wants_exploration
 from core.editor.ui import (
     GeneratorPanelUI, RoomPanelUI, ChestPanelUI, RolePanelUI, CardPanelUI, CardRenderer,
@@ -433,7 +434,7 @@ class Creator:
             # -- the only meaningful drop target is the Generator, which
             # toggles pool membership. Dropping anywhere else just cancels,
             # same as any other drag that misses its target.
-            if self.generator_frame.contains(event.pos):
+            if self.generator_frame.contains(event.pos) and self._generator_unlocked():
                 self._toggle_room_in_pool(room_name)
         elif card_id in ITEM_DEFINITIONS:
             # An item-card is never placeable in the world grid either
@@ -441,9 +442,9 @@ class Creator:
             # add_object -- _try_place_object would KeyError on an id it
             # doesn't know) -- the only meaningful drop target is the
             # Forge, to inspect/edit its capacites/effets.
-            if self.mechanics_frame.contains(event.pos):
+            if self.mechanics_frame.contains(event.pos) and self._forge_unlocked():
                 self.mechanics_panel.open(card_id)
-        elif self.mechanics_frame.contains(event.pos):
+        elif self.mechanics_frame.contains(event.pos) and self._forge_unlocked():
             # MechanicsPanelUI.open() already refuses (stays empty) for
             # anything that isn't a real OBJECT_TYPES/ITEM_DEFINITIONS id --
             # no extra guard needed here.
@@ -733,6 +734,12 @@ class Creator:
         if not self.dungeon.object_manager.add_object(object_type, grid_x, grid_y):
             return False
 
+        placed_config = OBJECT_TYPES.get(object_type, {})
+        play_card_sound(
+            placed_config.get("sounds", {}), "place",
+            pitch_range=placed_config.get("sound_pitch", {}).get("place"),
+        )
+
         if admingod:
             self._active_profile.card_collection[object_type] = ADMINGOD_STOCK
         else:
@@ -837,6 +844,76 @@ class Creator:
             for name, frame in self._panel_frames_by_name.items()
         }
         ProfileManager().save(profile)
+
+    # Entity-gated tools -- Generateur unlocks near a placed "djepeto",
+    # Forge unlocks near a placed "totem3" (first pass of attributing
+    # editor tools to specific in-world entities instead of leaving every
+    # tool globally available). Creator itself owns no player entity (only
+    # a camera) -- see Profile.home_player_position/
+    # Explorator._check_home_zoom_switch for where the position this reads
+    # actually comes from.
+    GENERATOR_ENTITY_TYPE = "djepeto"
+    FORGE_ENTITY_TYPE = "totem3"
+
+    def _entity_field_radius(self):
+        """Mirrors Explorator._magnet_radius's exact 'champ de vision'
+        formula (half the screen's smaller dimension, scaled by zoom) so an
+        entity-gated tool unlocks at the same in-game distance regardless
+        of whether the check happens in Explo or here."""
+        return min(self.screen.get_width(), self.screen.get_height()) / (2 * self.camera.zoom)
+
+    def _player_position(self):
+        """Last position saved when the player crossed from Exploration into
+        Creator on the home room (Profile.home_player_position) -- None if
+        that has never happened yet (fresh profile, headless smoke test, or
+        no local identity), which fails every entity gate closed rather than
+        guessing a position."""
+        if self._active_profile is None:
+            return None
+        saved = self._active_profile.home_player_position
+        if saved is None:
+            return None
+        return saved.get("x"), saved.get("y")
+
+    def _entity_in_range(self, object_type):
+        """True if the currently open room has at least one placed object of
+        `object_type` within _entity_field_radius of the saved player
+        position. No saved position, or no such object placed in this room,
+        both fail closed -- a tool tied to an entity that was never
+        approached (or isn't even placed here) stays locked."""
+        player_pos = self._player_position()
+        if player_pos is None:
+            return False
+        px, py = player_pos
+        radius_sq = self._entity_field_radius() ** 2
+        for obj in self.dungeon.object_manager.objects:
+            if obj["type"] != object_type:
+                continue
+            ox, oy = self.dungeon.grid_to_world(obj["x"], obj["y"])
+            if (ox - px) ** 2 + (oy - py) ** 2 <= radius_sq:
+                return True
+        return False
+
+    def _generator_unlocked(self):
+        return self._entity_in_range(self.GENERATOR_ENTITY_TYPE)
+
+    def _forge_unlocked(self):
+        return self._entity_in_range(self.FORGE_ENTITY_TYPE)
+
+    def _draw_panel_lock_overlay(self, frame, message):
+        """Dims a docked panel's body and explains why it's inaccessible --
+        the title bar stays undimmed/draggable (PanelFrame.handle_title_event
+        never checks lock state), so a locked panel can still be repositioned
+        or collapsed, it just refuses interaction until the matching entity
+        is back in range."""
+        if frame.collapsed:
+            return
+        body_rect = pygame.Rect(frame.panel.x, frame.panel.y, frame.panel.width, frame.panel.height)
+        overlay = pygame.Surface(body_rect.size, pygame.SRCALPHA)
+        overlay.fill((10, 10, 16, 215))
+        self.screen.blit(overlay, body_rect.topleft)
+        label = self.assembly_hint_font.render(message, True, (255, 205, 110))
+        self.screen.blit(label, label.get_rect(center=body_rect.center))
 
     def _is_quit_event(self, event):
         """QUIT must always work even while a modal panel (chest/role/
@@ -1001,7 +1078,7 @@ class Creator:
                         if room_action is not None:
                             self._apply_room_action(room_action)
 
-                    if not self.generator_frame.collapsed:
+                    if not self.generator_frame.collapsed and self._generator_unlocked():
                         generation_request = self.generator_panel.handle_event(event)
 
                         if generation_request is not None:
@@ -1017,7 +1094,7 @@ class Creator:
                         if drag_card_id is not None:
                             self.object_tool.start_drag(drag_card_id, event.pos)
 
-                    if not self.mechanics_frame.collapsed:
+                    if not self.mechanics_frame.collapsed and self._forge_unlocked():
                         saved_type_id = self.mechanics_panel.handle_event(event)
                         if saved_type_id is not None:
                             self._refresh_card_panel()
@@ -1247,6 +1324,8 @@ class Creator:
                     # just by precisely grabbing the thin slider thumb.
                     if not self.card_frame.collapsed and self.card_panel.handle_wheel(mouse_pos, event.y):
                         continue
+                    if not self.mechanics_frame.collapsed and self.mechanics_panel.handle_wheel(mouse_pos, event.y):
+                        continue
                     self.camera.zoom_at(mouse_pos[0], mouse_pos[1], event.y, self.screen.get_width(), self.screen.get_height())
                     self.grid_zoom = self.camera.zoom
 
@@ -1388,6 +1467,10 @@ class Creator:
                     )
                 else:
                     frame.render(self.screen)
+                if frame is self.generator_frame and not self._generator_unlocked():
+                    self._draw_panel_lock_overlay(frame, "Approchez-vous de Djepeto")
+                elif frame is self.mechanics_frame and not self._forge_unlocked():
+                    self._draw_panel_lock_overlay(frame, "Approchez-vous du Totem 3")
             self.chest_panel.render(self.screen)
             self.role_panel.render(self.screen)
             self.autotile_theme_panel.render(self.screen)

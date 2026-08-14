@@ -1,8 +1,9 @@
-from core.world.object_manager import ObjectManager
+from core.world.object_manager import ObjectManager, OBJECT_TYPES
 from core.world.entities import AnimalManager, EnemyManager, NpcManager, PickupManager, ProjectileManager, EffectManager
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
 from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
+from core.data.sound_manager import play_card_sound
 from core.editor.autotile import (
     EMPTY, FLOOR, WALL, build_walls_around, unbuild_walls_around, erase_at,
     resolve_sprite_grid, resolve_sprite_grid_region, LOCAL_EDIT_SPRITE_RADIUS,
@@ -210,13 +211,50 @@ class Dungeon:
     def update(self, dt: float, player_refs=(), magnet_radius: float = 0, room_offset=(0, 0)) -> None:
         self.object_manager.update(dt)
         self.animal_manager.update(dt, player_refs=player_refs)
-        self.enemy_manager.update(dt, player_refs=player_refs)
+        self.enemy_manager.update(dt, player_refs=player_refs, room_offset=room_offset)
         self.npc_manager.update(dt, player_refs=player_refs)
         self.pickup_manager.update(dt, player_refs=player_refs, magnet_radius=magnet_radius)
         self.projectile_manager.update(dt, player_refs=player_refs, room_offset=room_offset)
         self.effect_manager.update(dt)
 
-    def destroy_area(self, center_x: int, center_y: int, radius_tiles: int) -> list:
+    def _play_destroy_sound_at(self, x: int, y: int) -> None:
+        """Plays whichever OBJECT_TYPES card sits at (x, y)'s own "sounds.
+        destroy" (see MechanicsPanelUI's "Son : Casse" row), if any -- must
+        run BEFORE the cell is cleared/prune_invalid drops the object (see
+        both callers below), since get_object_at can't find it afterward.
+        A silent no-op for a bare terrain cell (tile_floor/tile_wall carry
+        no card sound yet, see CLAUDE.md's Card system scope) or an object
+        that never had one assigned."""
+        obj = self.object_manager.get_object_at(x, y)
+        if obj is None:
+            return
+        config = OBJECT_TYPES.get(obj["type"], {})
+        play_card_sound(config.get("sounds", {}), "destroy", pitch_range=config.get("sound_pitch", {}).get("destroy"))
+
+    def _cell_card_ids(self, x: int, y: int) -> list:
+        """Card id(s) destroyed at (x, y) if cleared right now -- the
+        terrain's own tile_floor/tile_wall card (see core.data.cards.
+        BASE_TILE_CARDS), plus whatever OBJECT_TYPES card (if any) sits on
+        that cell too (see ObjectManager.get_object_at) -- both destroyed
+        together by the same explosion/melee swing, so both are worth a
+        card. Must run BEFORE the cell is actually cleared (same ordering
+        _play_destroy_sound_at already requires, see both callers below).
+        Used to credit the player a card once the corresponding
+        DestructionSpark finishes (see Explorator/ProjectileManager +
+        core.world.entities.credit_pending_card), not at destruction time
+        itself."""
+        card_ids = []
+        cell = self.logical_grid[y][x]
+        if cell == FLOOR:
+            card_ids.append("tile_floor")
+        elif cell == WALL:
+            card_ids.append("tile_wall")
+        obj = self.object_manager.get_object_at(x, y)
+        if obj is not None:
+            card_ids.append(obj["type"])
+        return card_ids
+
+    def destroy_area(self, center_x: int, center_y: int, radius_tiles: int):
         """Carves a circular hole into the terrain -- both FLOOR and WALL
         cells within `radius_tiles` of (center_x, center_y) become EMPTY.
         Unlike paint_cell, this never re-walls the boundary afterwards
@@ -224,18 +262,23 @@ class Dungeon:
         explosion (see ProjectileManager) is meant to leave a permanent gap,
         not perform an edit. prune_invalid() then drops any object (a vase,
         a torch, a gate...) that no longer sits on a cell its placement rule
-        allows, same as any other terrain edit. Returns the (x, y) grid
-        cells actually cleared (already-EMPTY cells in the circle are
-        skipped, not double-counted) -- ProjectileManager uses this to spawn
-        one destruction VFX per real cell, not per cell of the theoretical
-        radius."""
+        allows, same as any other terrain edit. Returns (destroyed,
+        card_ids_by_cell): the (x, y) grid cells actually cleared
+        (already-EMPTY cells in the circle are skipped, not double-counted)
+        -- ProjectileManager uses this to spawn one destruction VFX per real
+        cell, not per cell of the theoretical radius -- and {(x, y):
+        [card_id, ...]} for exactly those same cells (see _cell_card_ids),
+        used to credit a card once each cell's own spark arrives."""
         destroyed = []
+        card_ids_by_cell = {}
         for dy in range(-radius_tiles, radius_tiles + 1):
             for dx in range(-radius_tiles, radius_tiles + 1):
                 if dx * dx + dy * dy > radius_tiles * radius_tiles:
                     continue
                 x, y = center_x + dx, center_y + dy
                 if 0 <= x < self.width and 0 <= y < self.height and self.logical_grid[y][x] != EMPTY:
+                    card_ids_by_cell[(x, y)] = self._cell_card_ids(x, y)
+                    self._play_destroy_sound_at(x, y)
                     self.logical_grid[y][x] = EMPTY
                     destroyed.append((x, y))
 
@@ -248,16 +291,21 @@ class Dungeon:
         )
         self.object_manager.prune_invalid()
         self.terrain_version += 1
-        return destroyed
+        return destroyed, card_ids_by_cell
 
-    def destroy_wall_cell(self, x: int, y: int) -> bool:
+    def destroy_wall_cell(self, x: int, y: int):
         """Single-cell destruction for the player's own melee attack (see
         Explorator._resolve_player_attacks) -- unlike destroy_area, only
         ever clears a WALL cell, never FLOOR: a punch shouldn't carve a pit
         into open ground, only break down an actual wall in front of the
-        player. Returns whether a wall was actually there to break."""
+        player. Returns (success, card_ids) -- whether a wall was actually
+        there to break, and (see _cell_card_ids) whichever card(s) that
+        break is worth, for the caller to credit once its own spark
+        arrives; card_ids is always [] when success is False."""
         if not (0 <= x < self.width and 0 <= y < self.height) or self.logical_grid[y][x] != WALL:
-            return False
+            return False, []
+        card_ids = self._cell_card_ids(x, y)
+        self._play_destroy_sound_at(x, y)
         self.logical_grid[y][x] = EMPTY
         resolve_sprite_grid_region(
             self.logical_grid, self.sprite_grid, x, y, radius=1,
@@ -265,7 +313,7 @@ class Dungeon:
         )
         self.object_manager.prune_invalid()
         self.terrain_version += 1
-        return True
+        return True, card_ids
 
     def grow(self, left: int = 0, right: int = 0, top: int = 0, bottom: int = 0) -> bool:
         """Extends the grid in any combination of the 4 directions --
@@ -406,7 +454,7 @@ class Dungeon:
 
     def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
                skip_foreground_objects=False, skip_animals=False, skip_enemies=False, skip_npcs=False,
-               show_grid=True, hide_border_cells=None):
+               show_grid=True, show_border=True, hide_border_cells=None):
         self.renderer.render(
             screen, self, camera,
             spawn_preview=spawn_preview,
@@ -414,6 +462,7 @@ class Dungeon:
             show_link_indicators=show_link_indicators,
             skip_foreground_objects=skip_foreground_objects,
             show_grid=show_grid,
+            show_border=show_border,
             hide_border_cells=hide_border_cells,
         )
         if not skip_animals:
@@ -429,3 +478,10 @@ class Dungeon:
     def render_foreground(self, screen, camera, hide_object_types=None):
         """Objects flagged draw_after_player (e.g. torch), meant to be drawn after the player sprite."""
         self.renderer.render_foreground_objects(screen, self, camera, hide_object_types=hide_object_types)
+
+    def render_border(self, screen, camera, hide_border_cells=None):
+        """The south-edge ledge tile only -- see WorldRenderer.render_border/
+        DungeonAssembly._render_floor for why this is called as its own
+        separate, guaranteed-last pass across every room in an assembly
+        rather than folded into each room's own render() call."""
+        self.renderer.render_border(screen, self, camera, hide_border_cells=hide_border_cells)
