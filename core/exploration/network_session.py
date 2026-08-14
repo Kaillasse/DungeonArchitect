@@ -22,7 +22,7 @@ import threading
 
 import pygame
 
-from core.world.entities import Animal, Enemy, Pickup, ItemPickup, ThrownDynamite, Explosion
+from core.world.entities import Mob, Pickup, ItemPickup, ThrownDynamite, Explosion
 from core.world.object_manager import make_item
 from core.exploration.player_session import PlayerSession
 from core.engine.gamestate import GameState
@@ -168,8 +168,8 @@ class NetworkSessionMixin:
         # Before the open_room/open_donjon call right below -- see
         # self.is_network_client's own docstring for why order matters here
         # (it must already be True by the time either of those runs, so
-        # they skip locally spawning animals/enemies that would otherwise
-        # double up with apply_network_snapshot's own mirrored ones).
+        # they skip locally spawning mobs that would otherwise double up
+        # with apply_network_snapshot's own mirrored ones).
         self.is_network_client = True
         if welcome["room_kind"] == "donjon":
             self.open_donjon(welcome["room_name"])
@@ -230,7 +230,7 @@ class NetworkSessionMixin:
     @staticmethod
     def _sync_mirror_list(mirror_map, live_list, entries, factory, updater):
         """Reconciles one dungeon's live entity list (e.g.
-        animal_manager.animals) against this tick's snapshot entries for it:
+        mob_manager.mobs) against this tick's snapshot entries for it:
         creates a local mirror object the first time a network id is seen,
         updates it every time, and drops any mirror whose id no longer
         appears (despawned/died server-side). `mirror_map` is
@@ -269,22 +269,14 @@ class NetworkSessionMixin:
         entity that disappears -- it simply stops being re-added."""
         self._network_targets[id(entity)] = (entity, x, y)
 
-    def _apply_animal_entry(self, animal, entry):
-        self._register_network_target(animal, entry["x"], entry["y"])
-        animal.state = entry["state"]
-        animal.direction = pygame.Vector2(entry["dir_x"], entry["dir_y"])
-        animal.flip = entry["flip"]
-        animal.frame = entry["frame"]
-        animal.health = entry["health"]
-
-    def _apply_enemy_entry(self, enemy, entry):
-        self._register_network_target(enemy, entry["x"], entry["y"])
-        enemy.state = entry["state"]
-        enemy.direction = pygame.Vector2(entry["dir_x"], entry["dir_y"])
-        enemy.flip = entry["flip"]
-        enemy.frame = entry["frame"]
-        enemy.health = entry["health"]
-        enemy.alive = entry["alive"]
+    def _apply_mob_entry(self, mob, entry):
+        self._register_network_target(mob, entry["x"], entry["y"])
+        mob.state = entry["state"]
+        mob.direction = pygame.Vector2(entry["dir_x"], entry["dir_y"])
+        mob.flip = entry["flip"]
+        mob.frame = entry["frame"]
+        mob.health = entry["health"]
+        mob.alive = entry["alive"]
 
     def _apply_pickup_entry(self, pickup, entry):
         self._register_network_target(pickup, entry["x"], entry["y"])
@@ -389,16 +381,15 @@ class NetworkSessionMixin:
 
         last_acked = entry.get("last_input_seq", 0)
         session.pending_inputs = [item for item in session.pending_inputs if item[0] > last_acked]
-        # One shared visible-animal/enemy snapshot for the whole replay batch
-        # below (see _resolve_movement_step) instead of every replayed input
+        # One shared visible-mob snapshot for the whole replay batch below
+        # (see _resolve_movement_step) instead of every replayed input
         # redoing the same room-wide scan -- this replay is a synchronous
         # catch-up over already-buffered inputs, not real elapsed time, so
-        # animals/enemies genuinely haven't moved between iterations.
-        visible_animals = self._visible_animals_global()
-        visible_enemies = self._visible_enemies_global()
+        # mobs genuinely haven't moved between iterations.
+        visible_mobs = self._visible_mobs_global()
         for _seq, direction, running, replay_dt in session.pending_inputs:
             self._resolve_movement_step(session, direction, running, replay_dt, predicting=True, advance_animation=False,
-                                         visible_animals=visible_animals, visible_enemies=visible_enemies)
+                                         visible_mobs=visible_mobs)
 
     def _smooth_network_entities(self, dt):
         """Client-side only (Phase 4), called once per render frame from
@@ -491,7 +482,7 @@ class NetworkSessionMixin:
             del self.players[stale_id]
 
         grouped = {}
-        for category in ("animals", "enemies", "pickups", "dynamites", "explosions"):
+        for category in ("mobs", "pickups", "dynamites", "explosions"):
             for entry in payload[category]:
                 grouped.setdefault(entry["room"], {}).setdefault(category, []).append(entry)
 
@@ -500,7 +491,7 @@ class NetworkSessionMixin:
             if dungeon is None:
                 continue
             mirrors = self._network_mirrors.setdefault(room_ref, {
-                "animals": {}, "enemies": {}, "pickups": {}, "item_pickups": {},
+                "mobs": {}, "pickups": {}, "item_pickups": {},
                 "dynamites": {}, "explosions": {},
             })
 
@@ -508,14 +499,9 @@ class NetworkSessionMixin:
             item_entries = [e for e in categories.get("pickups", []) if e["kind"] == "item"]
 
             self._sync_mirror_list(
-                mirrors["animals"], dungeon.animal_manager.animals, categories.get("animals", []),
-                factory=lambda e, d=dungeon: Animal(e["animal_type"], 0, 0, d),
-                updater=self._apply_animal_entry,
-            )
-            self._sync_mirror_list(
-                mirrors["enemies"], dungeon.enemy_manager.enemies, categories.get("enemies", []),
-                factory=lambda e, d=dungeon: Enemy(e["enemy_type"], 0, 0, d),
-                updater=self._apply_enemy_entry,
+                mirrors["mobs"], dungeon.mob_manager.mobs, categories.get("mobs", []),
+                factory=lambda e, d=dungeon: Mob(e["mob_type"], 0, 0, d),
+                updater=self._apply_mob_entry,
             )
             self._sync_mirror_list(
                 mirrors["pickups"], dungeon.pickup_manager.pickups, currency_entries,

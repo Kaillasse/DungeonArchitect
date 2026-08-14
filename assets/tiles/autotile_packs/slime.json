@@ -1,0 +1,284 @@
+{
+  "kind": "entity",
+  "role": null,
+  "tileset": "characters/slime/Slime_Green.png",
+  "columns": 8,
+  "tiles": [
+    {
+      "index": 0,
+      "rect": [
+        0,
+        0,
+        64,
+        64
+      ],
+      "action": "idle",
+      "direction": "front",
+      "order": 0
+    },
+    {
+      "index": 1,
+      "rect": [
+        64,
+        0,
+        64,
+        64
+      ],
+      "action": "idle",
+      "direction": "front",
+      "order": 1
+    },
+    {
+      "index": 2,
+      "rect": [
+        128,
+        0,
+        64,
+        64
+      ],
+      "action": "idle",
+      "direction": "front",
+      "order": 2
+    },
+    {
+      "index": 3,
+      "rect": [
+        192,
+        0,
+        64,
+        64
+      ],
+      "action": "idle",
+      "direction": "front",
+      "order": 3
+    },
+    {
+      "index": 4,
+      "rect": [
+        256,
+        0,
+        64,
+        64
+      ]
+    },
+    {
+      "index": 5,
+      "rect": [
+        320,
+        0,
+        64,
+        64
+      ]
+    },
+    {
+      "index": 6,
+      "rect": [
+        384,
+        0,
+        64,
+        64
+      ]
+    },
+    {
+      "index": 7,
+      "rect": [
+        448,
+        0,
+        64,
+        64
+      ]
+    },
+    {
+      "index": 8,
+      "rect": [
+        0,
+        64,
+        64,
+        64
+      ],
+      "action": "move",
+      "direction": "front",
+      "order": 0
+    },
+    {
+      "index": 9,
+      "rect": [
+        64,
+        64,
+        64,
+        64
+      ],
+      "action": "move",
+      "direction": "front",
+      "order": 1
+    },
+    {
+      "index": 10,
+      "rect": [
+        128,
+        64,
+        64,
+        64
+      ],
+      "action": "move",
+      "direction": "front",
+      "order": 2
+    },
+    {
+      "index": 11,
+      "rect": [
+        192,
+        64,
+        64,
+        64
+      ],
+      "action": "move",
+      "direction": "front",
+      "order": 3
+    },
+    {
+      "index": 12,
+      "rect": [
+        256,
+        64,
+        64,
+        64
+      ],
+      "action": "move",
+      "direction": "front",
+      "order": 4
+    },
+    {
+      "index": 13,
+      "rect": [
+        320,
+        64,
+        64,
+        64
+      ],
+      "action": "move",
+      "direction": "front",
+      "order": 5
+    },
+    {
+      "index": 14,
+      "rect": [
+        384,
+        64,
+        64,
+        64
+      ],
+      "action": "move",
+      "direction": "front",
+      "order": 6
+    },
+    {
+      "index": 15,
+      "rect": [
+        448,
+        64,
+        64,
+        64
+      ],
+      "action": "move",
+      "direction": "front",
+      "order": 7
+    },
+    {
+      "index": 16,
+      "rect": [
+        0,
+        128,
+        64,
+        64
+      ],
+      "action": "mort",
+      "direction": "front",
+      "order": 0
+    },
+    {
+      "index": 17,
+      "rect": [
+        64,
+        128,
+        64,
+        64
+      ],
+      "action": "mort",
+      "direction": "front",
+      "order": 1
+    },
+    {
+      "index": 18,
+      "rect": [
+        128,
+        128,
+        64,
+        64
+      ],
+      "action": "mort",
+      "direction": "front",
+      "order": 2
+    },
+    {
+      "index": 19,
+      "rect": [
+        192,
+        128,
+        64,
+        64
+      ],
+      "action": "mort",
+      "direction": "front",
+      "order": 3
+    },
+    {
+      "index": 20,
+      "rect": [
+        256,
+        128,
+        64,
+        64
+      ],
+      "action": "mort",
+      "direction": "front",
+      "order": 4
+    },
+    {
+      "index": 21,
+      "rect": [
+        320,
+        128,
+        64,
+        64
+      ],
+      "action": "mort",
+      "direction": "front",
+      "order": 5
+    },
+    {
+      "index": 22,
+      "rect": [
+        384,
+        128,
+        64,
+        64
+      ],
+      "action": "mort",
+      "direction": "front",
+      "order": 6
+    },
+    {
+      "index": 23,
+      "rect": [
+        448,
+        128,
+        64,
+        64
+      ],
+      "action": "mort",
+      "direction": "front",
+      "order": 7
+    }
+  ]
+}

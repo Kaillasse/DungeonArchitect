@@ -356,7 +356,7 @@ class DungeonAssembly:
 
     def update(self, dt, player_refs_by_floor=None, magnet_radius=0):
         """player_refs_by_floor ({floor: [PlayerRef, ...]}) only ever gets
-        passed down to rooms on a matching floor -- an animal/enemy on
+        passed down to rooms on a matching floor -- a mob on
         another floor has no business colliding (or, for enemies, aggroing)
         with a player who isn't physically there (mirrors locate_room's
         per-floor scoping). Grouped by floor rather than one scalar
@@ -372,14 +372,14 @@ class DungeonAssembly:
         actual objects, for take_damage / whichever session a future
         combat-adjacent feature needs) are forwarded as-is -- no coordinate
         transform needed since only their identity matters here, never .position (see
-        EnemyManager/Enemy, which only ever read distances
+        MobManager/Mob, which only ever read distances
         from the already-shifted hitbox).
 
         Only rooms on a floor within SHADOW_MAX_DISTANCE of some occupied
         floor are actually simulated -- a room nobody is near (no player on
         its floor, and not even visible as a tinted shadow/below floor,
         since that's exactly what SHADOW_MAX_DISTANCE bounds -- see render())
-        has its object animations/animal wandering/enemy AI frozen instead of
+        has its object animations/mob wandering/aggro AI frozen instead of
         ticking every frame for no one to see. This used to simulate every
         room in the whole assembly unconditionally, which scales as O(total
         rooms x entities) regardless of how much of the dungeon is actually
@@ -415,7 +415,7 @@ class DungeonAssembly:
 
     # ------------------------------------------------------------------
     # Rendering -- the active floor is drawn normally (full tiles/objects/
-    # animals); every other floor is drawn as a cheap cached "shadow" of its
+    # mobs); every other floor is drawn as a cheap cached "shadow" of its
     # rooms' logical footprints only (see _render_floor_shadow), never a full
     # re-render, since it's never interacted with directly. Floor distance
     # from active_floor picks both the tint (black above, grey below) and the
@@ -443,8 +443,7 @@ class DungeonAssembly:
     VISION_FALLOFF_TILES = 1.5  # width of the soft edge just inside VISION_RADIUS_TILES
 
     def render(self, screen, camera, active_floor, player_world_pos=None, hide_object_types=None,
-               skip_active_floor_foreground=False, skip_active_floor_animals=False,
-               skip_active_floor_enemies=False, skip_active_floor_npcs=False, show_grid=True):
+               skip_active_floor_foreground=False, skip_active_floor_mobs=False, show_grid=True):
         """Draw every floor relative to active_floor: floors below first
         (flat-tinted shadow, no hole), the active floor with full detail,
         floors above last (shadow with a soft hole around player_world_pos --
@@ -455,13 +454,11 @@ class DungeonAssembly:
         sprite (Explorator) leave out active_floor's foreground objects (an
         L/R torch) here and draw them afterwards via
         render_active_floor_foreground(), so the player ends up behind them.
-        skip_active_floor_animals/skip_active_floor_enemies/
-        skip_active_floor_npcs work the same way for active_floor's live
-        Animals/Enemies/Npcs, letting Explorator draw them together with the
-        player via render_active_floor_entities() instead, sorted by feet
-        position so whichever is lower on screen draws in front. Creator,
-        which draws no player sprite, leaves all of them off and gets
-        everything in one pass.
+        skip_active_floor_mobs works the same way for active_floor's live
+        Mobs, letting Explorator draw them together with the player via
+        render_active_floor_entities() instead, sorted by feet position so
+        whichever is lower on screen draws in front. Creator, which draws
+        no player sprite, leaves both off and gets everything in one pass.
         """
         for floor in self.floors():
             if floor < active_floor:
@@ -471,9 +468,7 @@ class DungeonAssembly:
             screen, camera, active_floor,
             hide_object_types=hide_object_types,
             skip_foreground=skip_active_floor_foreground,
-            skip_animals=skip_active_floor_animals,
-            skip_enemies=skip_active_floor_enemies,
-            skip_npcs=skip_active_floor_npcs,
+            skip_mobs=skip_active_floor_mobs,
             show_grid=show_grid,
         )
 
@@ -489,37 +484,28 @@ class DungeonAssembly:
             room.dungeon.render_foreground(screen, offset_camera, hide_object_types=hide_object_types)
 
     def render_active_floor_entities(self, screen, camera, active_floor, players):
-        """Y-sorted draw of every live Animal/Enemy/Npc on active_floor plus
-        every player in `players`: whichever entity's feet (.position.y, in
-        the same world-pixel sense Animal/Enemy/Npc/Player.get_hitbox()
-        anchor their hitbox to) sit lower on screen draws in front, matching
-        how a top-down scene actually reads. Call after render(...,
-        skip_active_floor_animals=True, skip_active_floor_enemies=True,
-        skip_active_floor_npcs=True) and before
-        render_active_floor_foreground() -- same slot a single player used
-        to occupy alone via a plain player.draw().
+        """Y-sorted draw of every live Mob on active_floor plus every player
+        in `players`: whichever entity's feet (.position.y, in the same
+        world-pixel sense Mob/Player.get_hitbox() anchor their hitbox to)
+        sit lower on screen draws in front, matching how a top-down scene
+        actually reads. Call after render(..., skip_active_floor_mobs=True)
+        and before render_active_floor_foreground() -- same slot a single
+        player used to occupy alone via a plain player.draw().
 
-        An animal's/enemy's/npc's .position is local to its own room's
-        Dungeon (no offset baked in, unlike a player's, which is already
-        global -- see DungeonAssembly.update's docstring), so it's converted
-        to a global y here purely for comparison; drawing itself still goes
-        through that room's own offset camera, same as every other per-room
-        draw call.
+        A mob's .position is local to its own room's Dungeon (no offset
+        baked in, unlike a player's, which is already global -- see
+        DungeonAssembly.update's docstring), so it's converted to a global y
+        here purely for comparison; drawing itself still goes through that
+        room's own offset camera, same as every other per-room draw call.
         """
         tile_size = Dungeon.TILE_SIZE
         entries = []
 
         for room in self.rooms_on_floor(active_floor):
             offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
-            for animal in room.dungeon.animal_manager.animals:
-                global_y = animal.position.y + room.offset_y * tile_size
-                entries.append((global_y, animal, offset_camera))
-            for enemy in room.dungeon.enemy_manager.enemies:
-                global_y = enemy.position.y + room.offset_y * tile_size
-                entries.append((global_y, enemy, offset_camera))
-            for npc in room.dungeon.npc_manager.npcs:
-                global_y = npc.position.y + room.offset_y * tile_size
-                entries.append((global_y, npc, offset_camera))
+            for mob in room.dungeon.mob_manager.mobs:
+                global_y = mob.position.y + room.offset_y * tile_size
+                entries.append((global_y, mob, offset_camera))
 
         for player in players:
             entries.append((player.position.y, player, camera))
@@ -529,7 +515,7 @@ class DungeonAssembly:
             entity.draw(screen, entity_camera)
 
     def _render_floor(self, screen, camera, floor, hide_object_types=None, skip_foreground=False,
-                       skip_animals=False, skip_enemies=False, skip_npcs=False, show_grid=True):
+                       skip_mobs=False, show_grid=True):
         tile_size = Dungeon.TILE_SIZE
         rooms = self.rooms_on_floor(floor)
         hide_border_cells_by_room = self._border_cells_by_room(floor, rooms)
@@ -552,9 +538,7 @@ class DungeonAssembly:
                 screen, offset_camera,
                 hide_object_types=hide_object_types,
                 skip_foreground_objects=skip_foreground,
-                skip_animals=skip_animals,
-                skip_enemies=skip_enemies,
-                skip_npcs=skip_npcs,
+                skip_mobs=skip_mobs,
                 show_grid=show_grid,
                 show_border=False,
             )
@@ -671,7 +655,7 @@ class DungeonAssembly:
 
     def _get_below_render(self, room, zoom, hide_object_types):
         """A cached, blue-tinted render of `room`'s actual tiles/objects (not
-        just its logical footprint, unlike _get_shadow) -- animals/enemies are
+        just its logical footprint, unlike _get_shadow) -- mobs are
         excluded since this cache isn't refreshed every frame, so a live
         position baked into it would go stale immediately. Rendered onto its
         own zero-offset surface via _ZoomOnlyCamera, independent of the real
@@ -703,8 +687,7 @@ class DungeonAssembly:
         room.dungeon.render(
             surface, _ZoomOnlyCamera(zoom),
             hide_object_types=hide_object_types,
-            skip_animals=True,
-            skip_enemies=True,
+            skip_mobs=True,
             show_grid=False,
             show_border=False,
         )
@@ -716,7 +699,7 @@ class DungeonAssembly:
     def _get_shadow(self, room, color, zoom):
         """A cached, pre-tinted silhouette of `room`'s logical footprint --
         every non-EMPTY cell filled with `color` (an (r, g, b, alpha) tuple),
-        no tiles/objects/animals at all -- scaled to `zoom`. Built once per
+        no tiles/objects/mobs at all -- scaled to `zoom`. Built once per
         (room, color, zoom): color is fully determined by floor distance and
         direction (see _render_floor_shadow), so at most 2*SHADOW_MAX_DISTANCE
         variants of a given room's shadow are ever cached, each a single blit

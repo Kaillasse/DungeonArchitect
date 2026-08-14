@@ -1,5 +1,5 @@
 from core.world.object_manager import ObjectManager, OBJECT_TYPES
-from core.world.entities import AnimalManager, EnemyManager, NpcManager, PickupManager, ProjectileManager, EffectManager
+from core.world.entities import MobManager, PickupManager, ProjectileManager, EffectManager
 from core.rendering.world_renderer import WorldRenderer
 from core.data.save_manager import SaveManager
 from core.data.ressources import TILE_SIZE as SOURCE_TILE_SIZE, WORLD_SCALE
@@ -90,9 +90,7 @@ class Dungeon:
         self.wall_theme = None
 
         self.object_manager = ObjectManager(self)
-        self.animal_manager = AnimalManager(self)
-        self.enemy_manager = EnemyManager(self)
-        self.npc_manager = NpcManager(self)
+        self.mob_manager = MobManager(self)
         self.pickup_manager = PickupManager(self)
         self.projectile_manager = ProjectileManager(self)
         self.effect_manager = EffectManager(self)
@@ -210,9 +208,7 @@ class Dungeon:
 
     def update(self, dt: float, player_refs=(), magnet_radius: float = 0, room_offset=(0, 0)) -> None:
         self.object_manager.update(dt)
-        self.animal_manager.update(dt, player_refs=player_refs, room_offset=room_offset)
-        self.enemy_manager.update(dt, player_refs=player_refs, room_offset=room_offset)
-        self.npc_manager.update(dt, player_refs=player_refs)
+        self.mob_manager.update(dt, player_refs=player_refs, room_offset=room_offset)
         self.pickup_manager.update(dt, player_refs=player_refs, magnet_radius=magnet_radius)
         self.projectile_manager.update(dt, player_refs=player_refs, room_offset=room_offset)
         self.effect_manager.update(dt)
@@ -371,21 +367,14 @@ class Dungeon:
         self.terrain_version += 1
         return True
 
-    def spawn_animals(self) -> None:
-        """(Re)build the live wandering Animal entities for this room's placed
-        animal objects -- call once after loading, not on every edit. See
-        AnimalManager.spawn(); Creator never calls this, so its static preview
-        only ever shows a placed animal's frame-0 icon, not a live one."""
-        self.animal_manager.spawn()
-
-    def spawn_enemies(self) -> None:
-        """Same rule as spawn_animals -- EnemyManager.spawn(), only ever
-        called by Explorator after loading a room."""
-        self.enemy_manager.spawn()
-
-    def spawn_npcs(self) -> None:
-        """Same rule as spawn_animals/spawn_enemies -- NpcManager.spawn()."""
-        self.npc_manager.spawn()
+    def spawn_mobs(self) -> None:
+        """(Re)build the live wandering Mob entities for this room's placed
+        mob objects -- call once after loading, not on every edit. See
+        MobManager.spawn(); Creator never calls this, so its static preview
+        only ever shows a placed mob's frame-0 icon, not a live one.
+        Replaces the old spawn_animals/spawn_enemies/spawn_npcs trio now
+        that a single MobManager covers what all three used to."""
+        self.mob_manager.spawn()
 
     # ------------------------------------------------------------------
     # Sauvegarde
@@ -441,9 +430,9 @@ class Dungeon:
         """True if (grid_x, grid_y) is out of this dungeon's own bounds or an
         EMPTY logical cell -- e.g. a hole carved by destroy_area, or simply
         past the room's edge. Shared by every live entity manager's own
-        void-culling (AnimalManager/EnemyManager/PickupManager.update) and
-        by Explorator._is_void_at's single-room branch, which used to
-        duplicate this exact check locally."""
+        void-culling (MobManager/PickupManager.update) and by Explorator.
+        _is_void_at's single-room branch, which used to duplicate this
+        exact check locally."""
         if not (0 <= grid_x < self.width and 0 <= grid_y < self.height):
             return True
         return self.logical_grid[grid_y][grid_x] == EMPTY
@@ -453,7 +442,7 @@ class Dungeon:
     # ------------------------------------------------------------------
 
     def render(self, screen, camera, spawn_preview=None, hide_object_types=None, show_link_indicators=False,
-               skip_foreground_objects=False, skip_animals=False, skip_enemies=False, skip_npcs=False,
+               skip_foreground_objects=False, skip_mobs=False,
                show_grid=True, show_border=True, hide_border_cells=None):
         self.renderer.render(
             screen, self, camera,
@@ -465,12 +454,8 @@ class Dungeon:
             show_border=show_border,
             hide_border_cells=hide_border_cells,
         )
-        if not skip_animals:
-            self.animal_manager.draw(screen, camera)
-        if not skip_enemies:
-            self.enemy_manager.draw(screen, camera)
-        if not skip_npcs:
-            self.npc_manager.draw(screen, camera)
+        if not skip_mobs:
+            self.mob_manager.draw(screen, camera)
         self.pickup_manager.draw(screen, camera)
         self.projectile_manager.draw(screen, camera)
         self.effect_manager.draw(screen, camera)

@@ -12,7 +12,7 @@ from core.world.assembly import load_assembly, save_assembly, generate_assembly
 from core.data.ressources import ROOMS_DIRECTORY, next_new_donjon_name
 from core.world.entities import Player, PlayerRef, _bucket_direction, _spawn_loot_pickups
 from core.world.object_manager import (
-    ANIMAL_TYPES, ENEMY_TYPES, npc_types, ITEM_DEFINITIONS, make_item, OBJECT_TYPES,
+    mob_types, ITEM_DEFINITIONS, make_item, OBJECT_TYPES,
 )
 from core.exploration.player_session import PlayerSession
 from core.exploration.multiplayer_ui import MultiplayerPanelUI
@@ -30,18 +30,16 @@ from core.data.progression import XP_ENEMY_KILL, XP_ANIMAL_KILL, XP_DUNGEON_CLEA
 from core.world.home import home_room_name, wants_creator
 
 # Placed objects that are only ever markers during exploration -- a spawn
-# point and each animal's/enemy's placement cell -- and get replaced by a
-# live entity (the Player, an AnimalManager-owned Animal, an
-# EnemyManager-owned Enemy, a NpcManager-owned Npc) instead of being drawn
-# as a static object sprite. A FUNCTION, not a frozen set -- unlike
-# ANIMAL_TYPES/ENEMY_TYPES (hand-authored, never change at runtime),
-# npc_types() is itself dynamic (an NPC type is registered entirely
-# in-session via the sprite editor -- see object_manager.npc_types' own
-# docstring), so freezing this whole set once at import would never see a
-# type registered afterward and its placed icon would never get hidden
-# during exploration. Call hidden_object_types() fresh at each use.
+# point and each mob's placement cell -- and get replaced by a live entity
+# (the Player, or a MobManager-owned Mob) instead of being drawn as a
+# static object sprite. A FUNCTION, not a frozen set -- mob_types() is
+# itself dynamic (a mob type can be registered entirely in-session via the
+# sprite editor's PNJ-style registration -- see object_manager.mob_types'
+# own docstring), so freezing this whole set once at import would never
+# see a type registered afterward and its placed icon would never get
+# hidden during exploration. Call hidden_object_types() fresh at each use.
 def hidden_object_types():
-    return {"spawn", *ANIMAL_TYPES, *ENEMY_TYPES, *npc_types()}
+    return {"spawn", *mob_types()}
 
 
 def _doorway_interior_offset(dungeon, grid_x, grid_y):
@@ -263,25 +261,24 @@ class Explorator(NetworkSessionMixin):
         # (not lazily) so a client's very first render, before any snapshot
         # has arrived, has an empty-but-real dict to iterate rather than
         # needing an AttributeError guard.
-        self._network_mirrors = {}  # room_ref -> {"animals": {...}, ...}
+        self._network_mirrors = {}  # room_ref -> {"mobs": {...}, ...}
         self._network_targets = {}  # id(entity) -> (entity, target_x, target_y)
 
         # True once _finish_connecting has run (a thin network client --
         # start_hosting's own loopback client included, see its docstring)
         # -- False for the authoritative Explorator (solo local play, or
         # GameServer's own headless instance). open_room/_enter_assembly
-        # check this to skip spawn_animals()/spawn_enemies(): a client's
-        # animals/enemies are entirely mirrored from the server's snapshot
-        # (apply_network_snapshot's _sync_mirror_list), so locally spawning
-        # a real, separate set too used to leave a second, never-updated
-        # (frame-0, standing still) Animal/Enemy sitting right on top of
-        # every mirrored one -- exactly the "double sur leur point de spawn"
-        # bug reported after the dungeon-entrance sync barrier started
-        # calling open_donjon mid-session on clients too (see
-        # apply_network_snapshot), though the same gap already existed at
-        # ordinary connect time (_finish_connecting's own open_room/
-        # open_donjon call) for any room/donjon that happened to have
-        # animals/enemies placed in it.
+        # check this to skip spawn_mobs(): a client's mobs are entirely
+        # mirrored from the server's snapshot (apply_network_snapshot's
+        # _sync_mirror_list), so locally spawning a real, separate set too
+        # used to leave a second, never-updated (frame-0, standing still)
+        # Mob sitting right on top of every mirrored one -- exactly the
+        # "double sur leur point de spawn" bug reported after the
+        # dungeon-entrance sync barrier started calling open_donjon
+        # mid-session on clients too (see apply_network_snapshot), though
+        # the same gap already existed at ordinary connect time
+        # (_finish_connecting's own open_room/open_donjon call) for any
+        # room/donjon that happened to have mobs placed in it.
         self.is_network_client = False
 
         # The room this session should return to on death/victory (see
@@ -304,11 +301,9 @@ class Explorator(NetworkSessionMixin):
         self.dungeon.load_from_json(name)
         # Skipped for a network client -- see self.is_network_client's own
         # docstring for why locally spawning here too would double up with
-        # the mirrored animals/enemies apply_network_snapshot creates.
+        # the mirrored mobs apply_network_snapshot creates.
         if not self.is_network_client:
-            self.dungeon.spawn_animals()
-            self.dungeon.spawn_enemies()
-            self.dungeon.spawn_npcs()
+            self.dungeon.spawn_mobs()
         for session in self.players.values():
             self._position_player_at_spawn(session)
             session.current_placed_room = None
@@ -363,9 +358,7 @@ class Explorator(NetworkSessionMixin):
         # docstring.
         if not self.is_network_client:
             for room in self.assembly.rooms:
-                room.dungeon.spawn_animals()
-                room.dungeon.spawn_enemies()
-                room.dungeon.spawn_npcs()
+                room.dungeon.spawn_mobs()
 
         start_room = next(
             (room for room in self.assembly.rooms if room.has_spawn()),
@@ -653,7 +646,7 @@ class Explorator(NetworkSessionMixin):
         idea which room/floor another player is actually on), and this used
         to crash outright the instant a second player connected and either
         client tried to move (_predict_local_movement -> _is_walkable ->
-        _visible_animals_global -> here)."""
+        _visible_mobs_global -> here)."""
         if self.assembly is None:
             return {None}
         return {
@@ -669,8 +662,8 @@ class Explorator(NetworkSessionMixin):
         player is registered as standing in, so combat/pickups/etc. need to
         look at all of them too), or just self.dungeon (offset (0, 0), one
         yield regardless of `floors`) in single-room mode. Shared by
-        _visible_animals_global/_visible_enemies_global/_collect_pickups,
-        which otherwise each re-derive this identically."""
+        _visible_mobs_global/_collect_pickups, which otherwise each
+        re-derive this identically."""
         if self.assembly is not None:
             tile_size = Dungeon.TILE_SIZE
             for floor in floors:
@@ -679,31 +672,24 @@ class Explorator(NetworkSessionMixin):
         else:
             yield self.dungeon, 0, 0
 
-    def _visible_animals_global(self):
-        """(animal, hitbox) pairs for every animal that could plausibly
-        collide with a player right now, hitbox already in global/world
-        coordinates."""
-        pairs = []
-        for dungeon, offset_x, offset_y in self._rooms_with_offset(self._active_floors()):
-            for animal in dungeon.animal_manager.animals:
-                pairs.append((animal, animal.get_hitbox().move(offset_x, offset_y)))
-        return pairs
-
-    def _visible_enemies_global(self):
-        """Same idea as _visible_animals_global, but for live (alive) Enemy
-        entities -- a corpse doesn't block a player, mirroring
-        EnemyManager._is_free's own "other.alive" check for enemy-vs-enemy.
-        Yields (enemy, hitbox, dungeon) rather than just (enemy, hitbox) --
-        the third element is whichever room's own Dungeon actually owns this
-        enemy, needed by the combat code below to drop loot into the right
-        room's PickupManager rather than always self.dungeon (wrong in
-        assembly mode for any enemy outside whichever room the attacking
-        session itself is currently in)."""
+    def _visible_mobs_global(self):
+        """(mob, hitbox, dungeon) triples for every ALIVE mob that could
+        plausibly collide with a player right now, hitbox already in
+        global/world coordinates -- a dead one (mid despawn-hold, see
+        Mob.DEATH_DESPAWN_DELAY) doesn't block, mirroring MobManager.
+        _is_free's own "other.alive" check for mob-vs-mob. `dungeon` is
+        whichever room's own Dungeon actually owns this mob, needed by
+        combat code to drop loot/pickups into the right room's
+        PickupManager rather than always self.dungeon (wrong in assembly
+        mode for any mob outside whichever room the attacking session
+        itself is currently in). Replaces the old separate
+        _visible_animals_global/_visible_enemies_global now that a single
+        MobManager covers both."""
         triples = []
         for dungeon, offset_x, offset_y in self._rooms_with_offset(self._active_floors()):
-            for enemy in dungeon.enemy_manager.enemies:
-                if enemy.alive:
-                    triples.append((enemy, enemy.get_hitbox().move(offset_x, offset_y), dungeon))
+            for mob in dungeon.mob_manager.mobs:
+                if mob.alive:
+                    triples.append((mob, mob.get_hitbox().move(offset_x, offset_y), dungeon))
         return triples
 
     @staticmethod
@@ -733,27 +719,30 @@ class Explorator(NetworkSessionMixin):
                 )
 
     @staticmethod
-    def _spawn_loot(enemy, enemy_dungeon):
-        """Drops OBJECT_TYPES[enemy.enemy_type]["stats"]'s currency loot
-        around the death spot via _scatter_loot -- item drops are no longer
-        part of this (see mechanics_panel.py's own comment on retiring
-        mob_item_loot): an enemy's card-based reward, including any real
-        item it's configured to also drop, is handled separately by
-        EnemyManager._spawn_death_reward/_spawn_loot_pickups once its
-        despawn spark lands, not here. enemy.position is already local to
-        enemy_dungeon (never offset-translated -- see Animal/Enemy's own
-        coordinate convention), so no conversion is needed before handing
-        it to that same dungeon's PickupManager."""
-        stats = OBJECT_TYPES[enemy.enemy_type]["stats"]
+    def _spawn_loot(mob, mob_dungeon):
+        """Drops mob.stats' currency loot around the death spot via
+        _scatter_loot -- item drops are no longer part of this (see
+        mechanics_panel.py's own comment on retiring mob_item_loot): a
+        mob's card-based reward, including any real item it's configured
+        to also drop, is handled separately by MobManager.
+        _spawn_death_reward/_spawn_loot_pickups once its despawn spark
+        lands, not here. Fires for any combat-capable mob that dies, not
+        just a former "enemy" -- a mob with no "loot" in its stats (every
+        animal-style one today) is simply a no-op, same net effect as the
+        old animal-never-drops-currency behavior, now via data absence
+        rather than a separate code path. mob.position is already local to
+        mob_dungeon (never offset-translated -- see Mob's own coordinate
+        convention), so no conversion is needed before handing it to that
+        same dungeon's PickupManager."""
         Explorator._scatter_loot(
-            enemy_dungeon, enemy.position.x, enemy.position.y,
-            stats.get("loot", {}), {}, spread=10,
+            mob_dungeon, mob.position.x, mob.position.y,
+            mob.stats.get("loot", {}), {}, spread=10,
         )
 
     def _collect_pickups(self, player_hitbox, inventory):
         """Credits inventory.currency for every ground Pickup player_hitbox
         touches this frame, across whichever room(s) that's meaningful for --
-        same per-floor scope as _visible_animals_global. `inventory` is the
+        same per-floor scope as _visible_mobs_global. `inventory` is the
         calling session's own Inventory (see _resolve_pickups), not a shared
         singleton."""
         for dungeon, offset_x, offset_y in self._rooms_with_offset(self._active_floors()):
@@ -937,20 +926,20 @@ class Explorator(NetworkSessionMixin):
             self._trigger_victory(session)
         return True
 
-    def _is_walkable(self, rect, moving_session, debug_label=None, visible_animals=None, visible_enemies=None):
+    def _is_walkable(self, rect, moving_session, debug_label=None, visible_mobs=None):
         """debug_label, only used when self.debug_mode is True, tags a
         printed message identifying which candidate move (e.g. "x"/"y") this
-        check was for, so a blocked move's cause (wall vs. animal/enemy/
+        check was for, so a blocked move's cause (wall vs. mob/
         another player) shows up in the console instead of only being
         inferred from what's on screen.
 
-        visible_animals/visible_enemies let a caller that's about to run
-        several of these checks back-to-back (both movement axes in
-        _resolve_movement_step, or a whole replay batch in
-        _reconcile_local_player) pass in one shared _visible_animals_global()/
-        _visible_enemies_global() snapshot instead of each check redoing that
-        same room-scan from scratch. Left None (the default) for any other
-        caller, which just computes its own snapshot as before.
+        visible_mobs lets a caller that's about to run several of these
+        checks back-to-back (both movement axes in _resolve_movement_step,
+        or a whole replay batch in _reconcile_local_player) pass in one
+        shared _visible_mobs_global() snapshot instead of each check
+        redoing that same room-scan from scratch. Left None (the default)
+        for any other caller, which just computes its own snapshot as
+        before.
 
         Checks each of the 4 corners individually (not a single aggregate
         is_rect_walkable call) so a corner that has crossed into void (see
@@ -975,18 +964,11 @@ class Explorator(NetworkSessionMixin):
             self._debug_log(debug_label, "wall")
             return False
 
-        if visible_animals is None:
-            visible_animals = self._visible_animals_global()
-        for animal, animal_rect in visible_animals:
-            if rect.colliderect(animal_rect):
-                self._debug_log(debug_label, f"animal({animal.animal_type} at {animal_rect.center})")
-                return False
-
-        if visible_enemies is None:
-            visible_enemies = self._visible_enemies_global()
-        for enemy, enemy_rect, _dungeon in visible_enemies:
-            if rect.colliderect(enemy_rect):
-                self._debug_log(debug_label, f"enemy({enemy.enemy_type} at {enemy_rect.center})")
+        if visible_mobs is None:
+            visible_mobs = self._visible_mobs_global()
+        for mob, mob_rect, _dungeon in visible_mobs:
+            if rect.colliderect(mob_rect):
+                self._debug_log(debug_label, f"mob({mob.mob_type} at {mob_rect.center})")
                 return False
 
         for other_session in self.players.values():
@@ -1209,9 +1191,7 @@ class Explorator(NetworkSessionMixin):
             if self.dungeon.get_spawn_world_position() is not None:
 
                 print(f"Spawn trouvé dans : {room.stem}")
-                self.dungeon.spawn_animals()
-                self.dungeon.spawn_enemies()
-                self.dungeon.spawn_npcs()
+                self.dungeon.spawn_mobs()
                 return True
 
         print("Aucune salle ne contient de spawn.")
@@ -1308,7 +1288,7 @@ class Explorator(NetworkSessionMixin):
             SoundManager().play(f"player_footstep_{session.footstep_alt + 1}")
             session.footstep_alt = 1 - session.footstep_alt
 
-    def _resolve_movement_step(self, session, direction, running, dt, predicting=False, advance_animation=True, visible_animals=None, visible_enemies=None):
+    def _resolve_movement_step(self, session, direction, running, dt, predicting=False, advance_animation=True, visible_mobs=None):
         """The collision-tested core of moving a player, shared by the real
         per-frame simulation (_simulate_movement, predicting=False) and Phase
         4's client-side prediction/replay (_predict_local_movement/
@@ -1317,10 +1297,10 @@ class Explorator(NetworkSessionMixin):
         transitions, falling into the void, footstep audio -- so a
         speculative client-side replay never triggers a side effect the
         server hasn't actually confirmed yet; only position/facing/animation
-        are ever computed speculatively. `_is_walkable`'s own wall/animal/
-        enemy/other-player checks work unchanged under prediction, since the
+        are ever computed speculatively. `_is_walkable`'s own wall/mob/
+        other-player checks work unchanged under prediction, since the
         client's mirror world (static terrain loaded once at connect, plus
-        animals/enemies/other players kept in sync by apply_network_snapshot)
+        mobs/other players kept in sync by apply_network_snapshot)
         already carries everything that check needs -- no duplicated
         collision logic between server tick and client prediction.
 
@@ -1336,20 +1316,17 @@ class Explorator(NetworkSessionMixin):
         per-frame animation advancement only ever happens once, from
         _predict_local_movement's own (non-replayed) call.
 
-        visible_animals/visible_enemies (see _is_walkable) are computed once
-        here if not supplied, then shared by both the X and Y candidate move
-        below instead of each _is_walkable call redoing its own room-wide
-        animal/enemy scan -- callers running several of these steps
-        back-to-back (the per-frame session loop in update(), or
-        _reconcile_local_player's replay of buffered inputs) can pass one
-        shared snapshot in to avoid repeating that scan per session/replay
-        too."""
+        visible_mobs (see _is_walkable) is computed once here if not
+        supplied, then shared by both the X and Y candidate move below
+        instead of each _is_walkable call redoing its own room-wide mob
+        scan -- callers running several of these steps back-to-back (the
+        per-frame session loop in update(), or _reconcile_local_player's
+        replay of buffered inputs) can pass one shared snapshot in to avoid
+        repeating that scan per session/replay too."""
         player = session.player
 
-        if visible_animals is None:
-            visible_animals = self._visible_animals_global()
-        if visible_enemies is None:
-            visible_enemies = self._visible_enemies_global()
+        if visible_mobs is None:
+            visible_mobs = self._visible_mobs_global()
 
         if direction.length_squared() > 0:
 
@@ -1371,13 +1348,13 @@ class Explorator(NetworkSessionMixin):
             future_hitbox = player.get_hitbox()
             future_hitbox.x += movement.x
             if self._is_walkable(future_hitbox, session, debug_label=None if predicting else "x",
-                                  visible_animals=visible_animals, visible_enemies=visible_enemies):
+                                  visible_mobs=visible_mobs):
                 player.position.x += movement.x
 
             future_hitbox = player.get_hitbox()
             future_hitbox.y += movement.y
             if self._is_walkable(future_hitbox, session, debug_label=None if predicting else "y",
-                                  visible_animals=visible_animals, visible_enemies=visible_enemies):
+                                  visible_mobs=visible_mobs):
                 player.position.y += movement.y
 
             if not predicting:
@@ -1412,9 +1389,9 @@ class Explorator(NetworkSessionMixin):
         if advance_animation:
             player.update(dt)
 
-    def _simulate_movement(self, session, dt, visible_animals=None, visible_enemies=None):
+    def _simulate_movement(self, session, dt, visible_mobs=None):
         self._resolve_movement_step(session, session.input.move_direction, session.input.running, dt,
-                                     visible_animals=visible_animals, visible_enemies=visible_enemies)
+                                     visible_mobs=visible_mobs)
 
     def _grant_xp(self, session, amount):
         """Awards XP earned from an already-authoritative event (enemy/animal
@@ -1472,22 +1449,19 @@ class Explorator(NetworkSessionMixin):
 
     def _resolve_player_attacks(self):
         """Every session's attack, checked against the same one
-        _visible_enemies_global()/_visible_animals_global() snapshots
-        (computed once, shared across sessions -- was already implicitly
-        frame-shared with 1 player). Animals take damage the same as
-        enemies (no loot table of their own, so no _spawn_loot call for
-        them) -- previously only enemies were ever checked here, so a
-        melee swing could never actually kill an animal, only a dynamite
-        blast could (see ProjectileManager._apply_blast_damage).
+        _visible_mobs_global() snapshot (computed once, shared across
+        sessions -- was already implicitly frame-shared with 1 player).
+        Every mob takes the same take_damage(1) call -- a no-op for a
+        non-combat-capable one (see Mob.take_damage), so there's no need
+        to separately gate a PNJ/plain decorative mob out of this loop.
         self.pvp_enabled additionally checks every *other* session's hitbox
         -- off by default (see run()'s F4 toggle), since normal co-op play
         shouldn't have players accidentally hurting each other. Also checks
         the wall cell right in front of the attack hitbox (see
         Dungeon.destroy_wall_cell) -- a swing that breaks a wall still only
         counts as one hit for _hit_delivered_this_swing, same "once per
-        swing" rule as hitting an enemy."""
-        enemies = self._visible_enemies_global()
-        animals = self._visible_animals_global()
+        swing" rule as hitting a mob."""
+        mobs = self._visible_mobs_global()
         for session in self.players.values():
             player = session.player
             if not player.is_attack_active():
@@ -1526,22 +1500,17 @@ class Explorator(NetworkSessionMixin):
                     on_arrival=_on_arrival,
                 )
 
-            for enemy, enemy_rect, enemy_dungeon in enemies:
-                if attack_hitbox.colliderect(enemy_rect):
-                    was_alive = enemy.alive
-                    enemy.take_damage(1)
+            for mob, mob_rect, mob_dungeon in mobs:
+                if attack_hitbox.colliderect(mob_rect):
+                    was_alive = mob.alive
+                    mob.take_damage(1)
                     hit_landed = True
-                    if was_alive and not enemy.alive:
-                        self._spawn_loot(enemy, enemy_dungeon)
-                        self._grant_xp(session, XP_ENEMY_KILL)
-
-            for animal, animal_rect in animals:
-                if attack_hitbox.colliderect(animal_rect):
-                    was_alive = animal.alive
-                    animal.take_damage(1)
-                    hit_landed = True
-                    if was_alive and not animal.alive:
-                        self._grant_xp(session, XP_ANIMAL_KILL)
+                    if was_alive and not mob.alive:
+                        if mob.aggro_capable:
+                            self._spawn_loot(mob, mob_dungeon)
+                            self._grant_xp(session, XP_ENEMY_KILL)
+                        else:
+                            self._grant_xp(session, XP_ANIMAL_KILL)
 
             if self.pvp_enabled:
                 for other_session in self.players.values():
@@ -1826,18 +1795,17 @@ class Explorator(NetworkSessionMixin):
         # (idle animation ticking) -- everyone else (other sessions,
         # animals/enemies/the world) keeps going.
         #
-        # One shared visible-animal/enemy snapshot for the whole loop below
-        # (see _resolve_movement_step) instead of every session's own X/Y
-        # move recomputing the same room-wide scan. A session crossing a
-        # door mid-loop (_update_current_room) can technically add a floor
-        # to the active set after this snapshot was taken, so a session
+        # One shared visible-mob snapshot for the whole loop below (see
+        # _resolve_movement_step) instead of every session's own X/Y move
+        # recomputing the same room-wide scan. A session crossing a door
+        # mid-loop (_update_current_room) can technically add a floor to
+        # the active set after this snapshot was taken, so a session
         # processed later in the same frame could miss one frame's worth of
         # collision against whatever's on that newly-entered floor --
         # accepted the same way _resolve_player_attacks below already
         # shares one frame-stale snapshot across every session's attack.
         # Self-corrects the very next frame either way.
-        visible_animals = self._visible_animals_global()
-        visible_enemies = self._visible_enemies_global()
+        visible_mobs = self._visible_mobs_global()
         for session in self.players.values():
             if session.inventory_open:
                 session.update_frozen(dt)
@@ -1856,7 +1824,7 @@ class Explorator(NetworkSessionMixin):
                     session.update_frozen(dt)
                     continue
             self._apply_requested_actions(session)
-            self._simulate_movement(session, dt, visible_animals=visible_animals, visible_enemies=visible_enemies)
+            self._simulate_movement(session, dt, visible_mobs=visible_mobs)
 
         self._resolve_dungeon_transitions()
 
@@ -2055,9 +2023,7 @@ class Explorator(NetworkSessionMixin):
                 player_world_pos=center_world,
                 hide_object_types=hidden_object_types(),
                 skip_active_floor_foreground=True,
-                skip_active_floor_animals=True,
-                skip_active_floor_enemies=True,
-                skip_active_floor_npcs=True,
+                skip_active_floor_mobs=True,
                 show_grid=self.debug_mode,
             )
 
@@ -2073,16 +2039,12 @@ class Explorator(NetworkSessionMixin):
                 target, camera,
                 hide_object_types=hidden_object_types(),
                 skip_foreground_objects=True,
-                skip_animals=True,
-                skip_enemies=True,
-                skip_npcs=True,
+                skip_mobs=True,
                 show_grid=self.debug_mode,
             )
 
             entities = (
-                list(self.dungeon.animal_manager.animals)
-                + list(self.dungeon.enemy_manager.enemies)
-                + list(self.dungeon.npc_manager.npcs)
+                list(self.dungeon.mob_manager.mobs)
                 + [
                     other.player for other in self.players.values()
                     if other.player_id not in self.dungeon_entrance_ready
@@ -2115,9 +2077,9 @@ class Explorator(NetworkSessionMixin):
         branching -- one shared view when merged, one per local session's
         own viewport otherwise): every hitbox in red (plus its attack reach
         in orange while actually active) for every player on THAT view's
-        own floor, animals in yellow, enemies in purple (plus each
-        attacking enemy's own melee reach in magenta, same idea as a
-        player's orange one) -- all already in the exact world coordinates
+        own floor, a non-aggro_capable mob in yellow, an aggro_capable one
+        in purple (plus each attacking one's own melee reach in magenta,
+        same idea as a player's orange one) -- all already in the exact world coordinates
         _is_walkable/combat compare, so any gap between "what looks like
         it's touching" and "what's actually colliding" is directly visible
         instead of guessed. Also outlines every cell _is_void_at considers
@@ -2156,25 +2118,22 @@ class Explorator(NetworkSessionMixin):
 
         floors = {floor}
         for dungeon, offset_x, offset_y in self._rooms_with_offset(floors):
-            for animal in dungeon.animal_manager.animals:
-                animal_rect = animal.get_hitbox().move(offset_x, offset_y)
-                self._draw_debug_rect(target, camera, animal_rect, (255, 220, 60))
-            for enemy in dungeon.enemy_manager.enemies:
-                if not enemy.alive:
+            for mob in dungeon.mob_manager.mobs:
+                if not mob.alive:
                     continue
-                enemy_rect = enemy.get_hitbox().move(offset_x, offset_y)
-                self._draw_debug_rect(target, camera, enemy_rect, (200, 60, 255))
-                if enemy.state == "attack":
-                    # get_attack_hitbox() is local to the enemy's own
-                    # room's Dungeon (same convention as get_hitbox()) --
-                    # enemy_rect is that same body hitbox already
-                    # shifted to global/world coordinates, so re-using
-                    # the delta between the two gets the attack hitbox
-                    # into global coordinates too, without needing this
-                    # method to know the room's offset directly.
-                    local_hitbox = enemy.get_hitbox()
-                    offset = (enemy_rect.x - local_hitbox.x, enemy_rect.y - local_hitbox.y)
-                    self._draw_debug_rect(target, camera, enemy.get_attack_hitbox().move(offset), (255, 60, 220))
+                mob_rect = mob.get_hitbox().move(offset_x, offset_y)
+                self._draw_debug_rect(target, camera, mob_rect, (200, 60, 255) if mob.aggro_capable else (255, 220, 60))
+                if mob.aggro_capable and mob.state == "attack":
+                    # get_attack_hitbox() is local to the mob's own room's
+                    # Dungeon (same convention as get_hitbox()) -- mob_rect
+                    # is that same body hitbox already shifted to
+                    # global/world coordinates, so re-using the delta
+                    # between the two gets the attack hitbox into global
+                    # coordinates too, without needing this method to know
+                    # the room's offset directly.
+                    local_hitbox = mob.get_hitbox()
+                    offset = (mob_rect.x - local_hitbox.x, mob_rect.y - local_hitbox.y)
+                    self._draw_debug_rect(target, camera, mob.get_attack_hitbox().move(offset), (255, 60, 220))
 
     def _draw_debug_void_grid(self, target, camera, session):
         """Centered on `session`'s own player -- called once per local

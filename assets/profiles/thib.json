@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "thib",
-  "xp": 2550,
+  "xp": 2950,
   "generator_room_names": [
     "room_001",
     "room_002",
@@ -17,8 +17,8 @@
       "collapsed": true
     },
     "room": {
-      "x": 920,
-      "y": 254,
+      "x": 943,
+      "y": 249,
       "collapsed": true
     },
     "generator": {
@@ -31,15 +31,20 @@
       "y": 312,
       "collapsed": false
     },
+    "stash": {
+      "x": 1020,
+      "y": 219,
+      "collapsed": true
+    },
     "mechanics": {
-      "x": 286,
-      "y": -61,
-      "collapsed": false
+      "x": 820,
+      "y": 285,
+      "collapsed": true
     }
   },
   "card_collection": {
-    "tile_floor": 1000021,
-    "tile_wall": 1000013,
+    "tile_floor": 999999,
+    "tile_wall": 999999,
     "vase": 999999,
     "cave_entrance": 999999,
     "torch": 999999,
@@ -74,7 +79,7 @@
     "djepeto": 999999,
     "chicken": 999999,
     "cow": 999999,
-    "dynamite": 999999,
+    "dynamite": 1000001,
     "lilchest": 999999,
     "pig": 999999,
     "potion_soin": 999999,
@@ -88,11 +93,18 @@
     "skeleton1": 1000000,
     "skeleton2": 1000000,
     "spawn": 999999,
-    "stairs": 999999
+    "stairs": 999999,
+    "slime": 999999
   },
   "admingod": true,
   "home_player_position": {
-    "x": 647.8875129345031,
-    "y": 311.6524870654957
+    "x": 400.0,
+    "y": 352.0
+  },
+  "card_stash": {
+    "skeleton2": 3,
+    "skeleton1": 2,
+    "tile_wall": 11,
+    "tile_floor": 11
   }
 }

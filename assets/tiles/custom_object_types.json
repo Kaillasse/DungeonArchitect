@@ -609,12 +609,13 @@
     ],
     "frames": 1,
     "name": "Gepeto",
-    "npc": true,
     "entity_pack": "idlefl",
     "wander_actions": {
       "idle": "Assis",
       "move": "Assis"
-    }
+    },
+    "mob": true,
+    "interactable": true
   },
   "djepeto": {
     "asset": {
@@ -633,14 +634,14 @@
     ],
     "frames": 1,
     "name": "Djepeto",
-    "npc": true,
     "entity_pack": "gepeto",
     "wander_actions": {
       "idle": "marche",
       "move": "marche",
       "run": "course"
     },
-    "card_type": "pnj"
+    "mob": true,
+    "interactable": true
   },
   "skeleton2": {
     "stats": {
@@ -663,5 +664,30 @@
       "damaged": "skeldamaged.wav"
     },
     "__override_of_builtin__": true
+  },
+  "slime": {
+    "asset": {
+      "tileset": "characters/slime/Slime_Green.png",
+      "rect": [
+        0,
+        0,
+        64,
+        64
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 1,
+    "name": "Slime",
+    "entity_pack": "slime",
+    "wander_actions": {
+      "idle": "idle",
+      "move": "move"
+    },
+    "mob": true,
+    "interactable": true
   }
 }

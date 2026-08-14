@@ -74,7 +74,7 @@ import pygame
 from core.editor.ui.mixins import _ResizableCornerMixin
 from core.ui.widgets import BorderManager, Stepper
 from core.world.object_manager import (
-    OBJECT_TYPES, ITEM_DEFINITIONS, ARCHETYPES, CELL_MODES, ENEMY_ANIMATIONS, CURRENCY_FILES,
+    OBJECT_TYPES, ITEM_DEFINITIONS, ARCHETYPES, CELL_MODES, ENEMY_ANIMATIONS, CURRENCY_FILES, ENEMY_FOLDERS,
     NPC_DIRECTIONS, load_npc_frames, load_enemy_frames, load_animal_frames, load_object_frames,
     action_direction_coverage, effective_loot_cards,
     update_type_mechanics, update_item_overrides, update_item, is_builtin_item,
@@ -126,10 +126,10 @@ class MechanicsPanelUI(_ResizableCornerMixin):
     # Canonical role order for the PNJ preview's tabs -- only roles actually
     # present in a given PNJ's own wander_actions are shown (see
     # _pnj_available_roles), same "idle"/"move" mandatory + "sitting"/
-    # "laying"/"run" independently optional split as core.world.entities.Npc
-    # itself documents.
+    # "laying"/"run" independently optional split as core.world.entities.Mob
+    # itself documents (its entity-pack-backed rest/posture chain).
     PNJ_ROLES = ("idle", "move", "sitting", "laying", "run")
-    PREVIEW_ANIMATION_SPEED = 0.2  # matches core.world.entities.Npc.ANIMATION_SPEED
+    PREVIEW_ANIMATION_SPEED = 0.2  # matches core.world.entities.Mob's own entity-pack ANIMATION_SPEED
     PNJ_DRAG_STEP_PX = 24  # horizontal pixels dragged per direction step
 
     def __init__(self, x, y):
@@ -377,9 +377,22 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.name = config.get("name", card_id)
         self.icon = resolve_card_sprite(card_id)
 
-        is_mob = bool(config.get("animal") or config.get("enemy"))
+        # A single "mob" flag now covers what used to be split across
+        # "animal"/"enemy"/"npc" -- entity-pack-backed (is_pnj below) is
+        # checked first since it's mutually exclusive with the flat-frame
+        # kind here (see core.world.entities.Mob's own frame-source
+        # dispatch, the same rule this mirrors). mob_kind ("enemy" vs
+        # "animal") is derived from ENEMY_FOLDERS membership -- the frame-
+        # SOURCE that actually exists on disk, not from stats content (a
+        # mob given aggro_range/attack_range via the Forge without a
+        # matching ENEMY_FOLDERS entry would otherwise crash
+        # load_enemy_frames below; see Mob.__init__'s own identical
+        # reasoning) -- today this is exactly the old "enemy" flag's set
+        # (skeleton1/skeleton2), so existing content is unaffected.
+        is_pnj = bool(config.get("entity_pack"))
+        is_mob = bool(config.get("mob")) and not is_pnj
         if is_mob:
-            self.mob_kind = "enemy" if config.get("enemy") else "animal"
+            self.mob_kind = "enemy" if card_id in ENEMY_FOLDERS else "animal"
             # Fixed sets -- animal/enemy are always fully hand-authored
             # Python entries, never partially registered like a custom
             # PNJ, so there's no per-card variation to read here, unlike
@@ -403,7 +416,6 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self.mob_states = ()
             self.mob_stats = {}
 
-        is_pnj = bool(config.get("npc"))
         if is_pnj:
             self.pnj_entity_pack = config.get("entity_pack")
             self.pnj_wander_actions = dict(config.get("wander_actions", {}))
@@ -569,8 +581,8 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         which only ever changes on a real event -- animation playback is
         the one thing here that needs real time to pass. Pure looping
         preview (always plays the selected state/direction forever) -- no
-        state-machine transitions like the real core.world.entities.Npc/
-        Enemy/Animal, this is a viewer, not a simulation."""
+        state-machine transitions like the real core.world.entities.Mob,
+        this is a viewer, not a simulation."""
         frames = self._preview_current_frames()
         if len(frames) <= 1:
             return

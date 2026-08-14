@@ -390,7 +390,7 @@ class BitmapMixin:
         direction on save, see _npc_icon_rect) -- only name and wander
         actions are, since those are the only fields this screen exposes."""
         config = OBJECT_TYPES.get(type_id)
-        if config is None or not config.get("npc"):
+        if config is None or not config.get("entity_pack"):
             return
         self._npc_editing_type_id = type_id
         self.name_box.value = config.get("name", type_id)

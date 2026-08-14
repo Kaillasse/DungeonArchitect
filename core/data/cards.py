@@ -1,7 +1,8 @@
 """The Card system (Vision produit v0.05, see CLAUDE.md): every placeable
-tile/mob/item, and eventually every PNJ, is meant to become a Card -- a name,
-one or more images, a type, and a list of effects that the player collects
-and can use to populate/customize their dungeon.
+tile/mob/item -- PNJ included, now that the entity-unification pass folded
+it into "mob" (see CARD_TYPES' own comment) -- is meant to become a Card:
+a name, one or more images, a type, and a list of effects that the player
+collects and can use to populate/customize their dungeon.
 
 This module is the foundation slice only: the data model, its persistence,
 and an automatic bridge from today's existing registries (OBJECT_TYPES,
@@ -31,15 +32,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CARDS_DIRECTORY = PROJECT_ROOT / "assets" / "cards"
 CARDS_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
-# "pnj" is reserved -- zero cards of this type exist until the PNJ system
-# itself is built (a separate, later vision item). "room" is the newest.
-# "tile_decor"/"tile_special" split the old flat "tile" bucket used for
-# every OBJECT_TYPES-bridged non-mob/non-pnj card (torch/vase/pillar vs.
-# spawn/button/gate/wall/E-S/chest/...) -- "tile" itself now only names the
-# 2 BASE_TILE_CARDS placeholders (tile_floor/tile_wall), see
-# object_manager._derive_card_type for the rule that assigns the other two
-# to an OBJECT_TYPES entry that doesn't declare card_type explicitly.
-CARD_TYPES = ("tile", "tile_decor", "tile_special", "item", "mob", "room", "pnj")
+# "pnj" no longer exists as a card_type of its own (the entity-unification
+# pass) -- every wandering entity (former animal/enemy/npc) is a "mob",
+# full stop; whether one is dialogue/interaction-capable (what used to make
+# it specifically a "pnj") is the orthogonal "interactable" mechanics flag
+# instead (see object_manager.effective_loot_cards' sibling
+# _derive_card_type). "room" is the newest. "tile_decor"/"tile_special"
+# split the old flat "tile" bucket used for every OBJECT_TYPES-bridged
+# non-mob card (torch/vase/pillar vs. spawn/button/gate/wall/E-S/chest/...)
+# -- "tile" itself now only names the 2 BASE_TILE_CARDS placeholders
+# (tile_floor/tile_wall), see object_manager._derive_card_type for the rule
+# that assigns the other two to an OBJECT_TYPES entry that doesn't declare
+# card_type explicitly.
+CARD_TYPES = ("tile", "tile_decor", "tile_special", "item", "mob", "room")
 
 # Prefix namespacing a saved room (assets/rooms/<name>.json) as a Card id --
 # a double underscore rather than e.g. ":" since a room name is already
@@ -168,9 +173,9 @@ def default_card_for(card_id):
     config = OBJECT_TYPES.get(card_id)
     if config is not None:
         # card_type is now stored directly on every OBJECT_TYPES entry
-        # (built-in literals set it explicitly; custom/NPC entries get it
+        # (built-in literals set it explicitly; custom/mob entries get it
         # backfilled at write/load time, see object_manager._derive_card_type)
-        # rather than re-derived here from npc/animal/enemy flags each call.
+        # rather than re-derived here from the "mob" flag each call.
         images = [config["asset"]] + list(config.get("variants", {}).values())
         # A custom type registered via the sprite editor carries its own
         # chosen display name (see object_manager.register_custom_type) --
@@ -199,18 +204,21 @@ def default_card_for(card_id):
 
 def card_completeness(card):
     """(is_complete, missing_summary: list[str]) for `card` -- dispatches
-    by card_type. Only "pnj" has a real completeness notion today: a PNJ
-    can be registered from a single tagged tile (object_manager.
-    register_npc_type), so idle/move/sitting/laying/running direction
-    coverage is routinely still a work in progress right after
-    registration (see object_manager.npc_completeness). Every other
-    card_type is unconditionally complete -- none of them support
-    partial/staged content yet (register_custom_type always takes a
-    fully-formed rect in one call, a room either exists or doesn't). A
-    future card_type that gains its own staged-authoring flow should add
-    its own branch here rather than touching Card itself, which stays the
-    plain data holder it already is."""
-    if card.card_type != "pnj":
+    by card_type. Only an entity-pack-backed "mob" (former "pnj") has a
+    real completeness notion today: it can be registered from a single
+    tagged tile (object_manager.register_npc_type), so idle/move/sitting/
+    laying/running direction coverage is routinely still a work in
+    progress right after registration -- object_manager.npc_completeness
+    itself already returns "complete" unconditionally for a card_id that
+    isn't entity-pack-backed, so calling it here for any "mob" (not just
+    ones known to have a pack) is always safe. Every other card_type is
+    unconditionally complete -- none of them support partial/staged
+    content yet (register_custom_type always takes a fully-formed rect in
+    one call, a room either exists or doesn't). A future card_type that
+    gains its own staged-authoring flow should add its own branch here
+    rather than touching Card itself, which stays the plain data holder it
+    already is."""
+    if card.card_type != "mob":
         return True, []
     result = npc_completeness(card.card_id)
     missing = [

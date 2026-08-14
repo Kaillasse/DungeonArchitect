@@ -3,7 +3,7 @@
 import pygame
 
 from core.ui.widgets import BorderManager, RoomBrowser
-from core.world.object_manager import OBJECT_TYPES, ITEM_DEFINITIONS, ENEMY_ANIMATIONS
+from core.world.object_manager import OBJECT_TYPES, ITEM_DEFINITIONS, ENEMY_ANIMATIONS, ENEMY_FOLDERS
 from core.data.cards import CardManager, room_name_from_card_id
 from core.data.profile_manager import ADMINGOD_STOCK
 from core.editor.ui.mixins import _ResizableCornerMixin
@@ -331,20 +331,21 @@ class CardPanelUI(_ResizableCornerMixin):
                 if card.capabilities:
                     lines.append(f"Capacites : {', '.join(card.capabilities)}")
                 if card.card_type == "mob":
-                    # Purely informational -- animal/enemy have no
-                    # custom-registration path (no register_mob_type), so
-                    # every mob's animation set is a fixed constant, never
-                    # partial like a custom PNJ's (see the "pnj" branch
-                    # below) -- nothing to check for completeness here.
                     config = OBJECT_TYPES.get(card_id, {})
-                    if config.get("enemy"):
-                        states = ENEMY_ANIMATIONS
+                    if config.get("entity_pack"):
+                        # Entity-pack-backed (former "pnj") -- can be
+                        # registered from a single tagged tile, so
+                        # idle/move/sitting/laying/run direction coverage
+                        # is routinely still a work in progress, unlike a
+                        # flat-frame mob's fixed, always-complete set below.
+                        is_complete, missing = self._renderer.get_completeness(card)
+                        lines.append("Complet" if is_complete else "Manque : " + ", ".join(missing))
                     else:
-                        states = ("idle", "move")  # mirrors Animal.LOOPING_STATES
-                    lines.append(f"Etats : {', '.join(states)}")
-                if card.card_type == "pnj":
-                    is_complete, missing = self._renderer.get_completeness(card)
-                    lines.append("Complet" if is_complete else "Manque : " + ", ".join(missing))
+                        # Purely informational -- a flat-frame mob has no
+                        # custom-registration path, so its animation set is
+                        # a fixed constant, never partial.
+                        states = ENEMY_ANIMATIONS if card_id in ENEMY_FOLDERS else ("idle", "move")
+                        lines.append(f"Etats : {', '.join(states)}")
             for index, line in enumerate(lines):
                 surface = self.font.render(line, True, (220, 220, 220))
                 screen.blit(surface, (self.detail_rect.x + 8, self.detail_rect.y + 6 + index * 20))

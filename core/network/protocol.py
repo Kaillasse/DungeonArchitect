@@ -184,24 +184,16 @@ def build_snapshot(explorator, tick: int, terrain_versions: dict) -> dict:
             "room": session.current_placed_room.index if session.current_placed_room is not None else None,
         })
 
-    animals, enemies, pickups, objects, dynamites, explosions, terrain = [], [], [], [], [], [], []
+    mobs, pickups, objects, dynamites, explosions, terrain = [], [], [], [], [], []
 
     for room_ref, dungeon in _iter_dungeons(explorator):
-        for animal in dungeon.animal_manager.animals:
-            animals.append({
-                "id": id(animal), "room": room_ref, "animal_type": animal.animal_type,
-                "x": animal.position.x, "y": animal.position.y, "state": animal.state,
-                "dir_x": animal.direction.x, "dir_y": animal.direction.y,
-                "flip": animal.flip, "frame": animal.frame, "health": animal.health,
-            })
-
-        for enemy in dungeon.enemy_manager.enemies:
-            enemies.append({
-                "id": id(enemy), "room": room_ref, "enemy_type": enemy.enemy_type,
-                "x": enemy.position.x, "y": enemy.position.y, "state": enemy.state,
-                "dir_x": enemy.direction.x, "dir_y": enemy.direction.y,
-                "flip": enemy.flip, "frame": enemy.frame,
-                "health": enemy.health, "alive": enemy.alive,
+        for mob in dungeon.mob_manager.mobs:
+            mobs.append({
+                "id": id(mob), "room": room_ref, "mob_type": mob.mob_type,
+                "x": mob.position.x, "y": mob.position.y, "state": mob.state,
+                "dir_x": mob.direction.x, "dir_y": mob.direction.y,
+                "flip": mob.flip, "frame": mob.frame,
+                "health": mob.health, "alive": mob.alive,
             })
 
         for pickup in dungeon.pickup_manager.pickups:
@@ -265,7 +257,7 @@ def build_snapshot(explorator, tick: int, terrain_versions: dict) -> dict:
         # apply_network_snapshot) and load that exact same saved file
         # itself instead of staying stuck on whatever it had loaded before.
         "donjon_name": explorator.current_donjon_name,
-        "players": players, "animals": animals, "enemies": enemies,
+        "players": players, "mobs": mobs,
         "pickups": pickups, "objects": objects,
         "dynamites": dynamites, "explosions": explosions,
         "terrain": terrain,

@@ -97,8 +97,16 @@ _BUILTIN_OBJECT_TYPES = {
         "size": (1, 1),
         "frames": 2,
         "frame_size": 32,
-        "animal": True,
+        "mob": True,
         "card_type": "mob",
+        # Migrated from Animal's old hardcoded HEALTH=2 class constant (the
+        # entity-unification pass, see core/world/entities.py's Mob) -- no
+        # aggro/attack_range, so it never fights back, but it's still
+        # damageable/killable exactly like before, now via data instead of
+        # a class default. No explicit "loot_cards" needed: the implicit
+        # "1 copy of its own card" default (object_manager.effective_loot_cards)
+        # already reproduces its old behavior.
+        "stats": {"health": 2},
     },
     "cow": {
         "asset": "characters/Animals/Cow.png",
@@ -106,8 +114,16 @@ _BUILTIN_OBJECT_TYPES = {
         "size": (1, 1),
         "frames": 2,
         "frame_size": 32,
-        "animal": True,
+        "mob": True,
         "card_type": "mob",
+        # Migrated from Animal's old hardcoded HEALTH=2 class constant (the
+        # entity-unification pass, see core/world/entities.py's Mob) -- no
+        # aggro/attack_range, so it never fights back, but it's still
+        # damageable/killable exactly like before, now via data instead of
+        # a class default. No explicit "loot_cards" needed: the implicit
+        # "1 copy of its own card" default (object_manager.effective_loot_cards)
+        # already reproduces its old behavior.
+        "stats": {"health": 2},
     },
     "pig": {
         "asset": "characters/Animals/Pig.png",
@@ -115,8 +131,16 @@ _BUILTIN_OBJECT_TYPES = {
         "size": (1, 1),
         "frames": 2,
         "frame_size": 32,
-        "animal": True,
+        "mob": True,
         "card_type": "mob",
+        # Migrated from Animal's old hardcoded HEALTH=2 class constant (the
+        # entity-unification pass, see core/world/entities.py's Mob) -- no
+        # aggro/attack_range, so it never fights back, but it's still
+        # damageable/killable exactly like before, now via data instead of
+        # a class default. No explicit "loot_cards" needed: the implicit
+        # "1 copy of its own card" default (object_manager.effective_loot_cards)
+        # already reproduces its old behavior.
+        "stats": {"health": 2},
     },
     "sheep": {
         "asset": "characters/Animals/Sheep.png",
@@ -124,8 +148,16 @@ _BUILTIN_OBJECT_TYPES = {
         "size": (1, 1),
         "frames": 2,
         "frame_size": 32,
-        "animal": True,
+        "mob": True,
         "card_type": "mob",
+        # Migrated from Animal's old hardcoded HEALTH=2 class constant (the
+        # entity-unification pass, see core/world/entities.py's Mob) -- no
+        # aggro/attack_range, so it never fights back, but it's still
+        # damageable/killable exactly like before, now via data instead of
+        # a class default. No explicit "loot_cards" needed: the implicit
+        # "1 copy of its own card" default (object_manager.effective_loot_cards)
+        # already reproduces its old behavior.
+        "stats": {"health": 2},
     },
     "skeleton1": {
         # "asset" here is just skeleton1's idle sheet -- the static editor
@@ -138,7 +170,7 @@ _BUILTIN_OBJECT_TYPES = {
         "size": (1, 1),
         "frames": 6,
         "frame_size": 32,
-        "enemy": True,
+        "mob": True,
         "card_type": "mob",
         # Merged in from the old standalone ENEMY_STATS dict -- health/
         # move_speed/aggro_range/attack_range are tuning defaults, not values
@@ -184,7 +216,7 @@ _BUILTIN_OBJECT_TYPES = {
         "size": (1, 1),
         "frames": 6,
         "frame_size": 32,
-        "enemy": True,
+        "mob": True,
         "card_type": "mob",
         # skeleton2 has a different attack frame count (15) with no given
         # mapping, so its window is derived from skeleton1's *relative*
@@ -346,6 +378,40 @@ def _load_custom_object_types():
 
 _custom_types = _load_custom_object_types()
 
+
+def _migrate_legacy_npc_flag(custom):
+    """One-time migration (entity-unification pass): a custom PNJ type
+    registered before this pass persisted "npc": True on disk -- the new
+    unified registry only ever checks "mob" (see mob_types() below), so an
+    un-migrated entry would silently stop spawning as a live entity at all.
+    Also clears a stale stored "card_type": "pnj" (some entries had this
+    explicitly persisted, e.g. by an in-progress sprite-editor session
+    predating this pass) -- _merged_object_types' own card_type backfill
+    only ever fills in a MISSING key (setdefault), so an already-stored
+    "pnj" would otherwise never re-derive to "mob" on its own. Mutates
+    `custom` in place and returns whether anything changed. Runs directly
+    against the raw JSON dict (not through _persist_custom_object_types/
+    _write_custom_type, both defined further down this file, to avoid a
+    forward-reference at the module-load call site below) -- idempotent, a
+    no-op on every later import once every entry has been rewritten once."""
+    changed = False
+    for entry in custom.values():
+        if entry.get("npc") and not entry.get("mob"):
+            entry["mob"] = True
+            entry.setdefault("interactable", True)
+            entry.pop("npc", None)
+            changed = True
+        if entry.get("card_type") == "pnj":
+            entry.pop("card_type", None)
+            changed = True
+    return changed
+
+
+if _migrate_legacy_npc_flag(_custom_types):
+    CUSTOM_OBJECT_TYPES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CUSTOM_OBJECT_TYPES_PATH.open("w", encoding="utf-8") as _handle:
+        json.dump(_custom_types, _handle, indent=2, ensure_ascii=False)
+
 # Object-type mechanics keys (opt-in gameplay behavior) vs identity/visual
 # keys (asset/placement/size/frames/name + whatever the archetype preset
 # always implies, e.g. "porte"'s walkable/is_es) -- see update_type_visual/
@@ -364,10 +430,14 @@ def _derive_card_type(config):
     """Best-effort card_type for a custom_object_types.json entry saved
     before this field existed -- same rule core.data.cards.default_card_for
     used to apply ad hoc per-Card, now the single place that does it, once,
-    for the registry entry itself."""
-    if config.get("npc"):
-        return "pnj"
-    if config.get("animal") or config.get("enemy"):
+    for the registry entry itself.
+
+    "pnj" is no longer a card_type of its own -- every wandering entity
+    (former animal/enemy/npc) is a "mob", full stop; whether one is
+    dialogue/interaction-capable (what used to make it specifically a
+    "pnj") is the orthogonal "interactable" flag instead, not a different
+    card_type."""
+    if config.get("mob"):
         return "mob"
     if config.get("is_es") or config.get("chest"):
         return "tile_special"
@@ -812,29 +882,23 @@ def custom_types_for_tileset(tileset):
     ]
 
 
-# Object types backed by a live, wandering entity (core.world.entities.Animal)
+# Object types backed by a live, wandering entity (core.world.entities.Mob)
 # during exploration rather than just a static placed sprite -- see
-# entities.AnimalManager. Derived from the "animal" flag above instead of a
+# entities.MobManager. Derived from the "mob" flag above instead of a
 # separately-maintained list, so OBJECT_TYPES stays the single registry.
-ANIMAL_TYPES = tuple(name for name, config in OBJECT_TYPES.items() if config.get("animal"))
-
-# Same idea as ANIMAL_TYPES, for core.world.entities.Enemy/EnemyManager.
-ENEMY_TYPES = tuple(name for name, config in OBJECT_TYPES.items() if config.get("enemy"))
-
-# Same idea again, for core.world.entities.Npc/NpcManager (PNJ -- see
-# register_npc_type/load_npc_frames below) -- EXCEPT, unlike ANIMAL_TYPES/
-# ENEMY_TYPES above, this is a FUNCTION, not a tuple frozen at import
-# time. Animal/enemy types are all hand-authored in this file (never
-# created at runtime), so freezing them once at import has never actually
-# mattered; an NPC type is created entirely in-session via the sprite
-# editor's register_npc_type, so a frozen tuple would silently never see
-# a type registered after this module was first imported -- the exact
+#
+# A FUNCTION, not a tuple frozen at import time -- unlike the old, now-
+# retired ANIMAL_TYPES/ENEMY_TYPES (hand-authored in this file, never
+# created at runtime, so freezing once at import never actually mattered),
+# a mob type registered via register_npc_type is created entirely
+# in-session via the sprite editor -- a frozen tuple would silently never
+# see one registered after this module was first imported, the exact
 # "custom type registered mid-session" gap ObjectManager.is_es_type was
-# already fixed to avoid (it reads config.get("is_es") dynamically
-# instead of a frozen ES_TYPES-style tuple). Call npc_types() fresh at
-# each use instead of caching its result across a session.
-def npc_types():
-    return tuple(name for name, config in OBJECT_TYPES.items() if config.get("npc"))
+# already fixed to avoid (it reads config.get("is_es") dynamically instead
+# of a frozen ES_TYPES-style tuple). Call mob_types() fresh at each use
+# instead of caching its result across a session.
+def mob_types():
+    return tuple(name for name, config in OBJECT_TYPES.items() if config.get("mob"))
 
 # The 8 compass directions an entity pack's regions get tagged with (see
 # SpriteEditorPanelUI's entity-pack bitmap-tagging mode) -- deliberately
@@ -1458,15 +1522,19 @@ def action_direction_coverage(entity_pack, action_name):
 
 def npc_completeness(type_id):
     """{"complete": bool, "missing": {role: [direction,...], ...}} for an
-    ALREADY-REGISTERED PNJ type -- only checks roles actually present in
-    its own wander_actions (an optional role like "sitting"/"laying"/"run"
-    left unset is a deliberate choice, not a gap -- see core.world.
-    entities.Npc's own class docstring on why each is independently
-    optional). {"complete": True, "missing": {}} for anything that isn't a
-    registered PNJ type at all, so a caller can call this unconditionally
-    without checking config.get("npc") first."""
+    ALREADY-REGISTERED entity-pack-backed mob type -- only checks roles
+    actually present in its own wander_actions (an optional role like
+    "sitting"/"laying"/"run" left unset is a deliberate choice, not a gap
+    -- see core.world.entities.Mob's own class docstring on why each is
+    independently optional). {"complete": True, "missing": {}} for
+    anything that isn't entity-pack-backed at all (a hand-authored
+    animal/enemy-style mob, or a plain object/item), so a caller can call
+    this unconditionally without checking config.get("entity_pack") first
+    -- gated on entity_pack presence, not "is this a PNJ": completeness is
+    about which frame-authoring path a mob uses, orthogonal to whether
+    it's also interactable."""
     config = OBJECT_TYPES.get(type_id)
-    if config is None or not config.get("npc"):
+    if config is None or not config.get("entity_pack"):
         return {"complete": True, "missing": {}}
 
     entity_pack = config["entity_pack"]
@@ -1488,15 +1556,15 @@ def _build_npc_type_entry(name, entity_pack, tileset, icon_rect, size, wander_ac
     load_object_frames -- chemin totalement inchange, la forme
     {"tileset","rect"} est deja ce que ce loader attend). `wander_actions`
     ({"idle": ..., "move": ...}) nomme lesquelles des actions du pack
-    jouer pendant chacun des deux etats de vagabondage de NpcManager (voir
-    core.world.entities.Npc)."""
+    jouer pendant chacun des deux etats de vagabondage de MobManager (voir
+    core.world.entities.Mob)."""
     return {
         "asset": {"tileset": tileset, "rect": list(icon_rect)},
         "placement": "floor",
         "size": list(size),
         "frames": 1,
         "name": name,
-        "npc": True,
+        "mob": True,
         "entity_pack": entity_pack,
         "wander_actions": dict(wander_actions),
     }
@@ -1505,12 +1573,22 @@ def _build_npc_type_entry(name, entity_pack, tileset, icon_rect, size, wander_ac
 def register_npc_type(type_id, name, entity_pack, tileset, icon_rect, size, wander_actions):
     """Valide et persiste une NOUVELLE entree OBJECT_TYPES de PNJ -- le
     pendant de register_custom_type pour ce cas (voir update_npc_type pour
-    l'edition). Meme garde-fou d'id que register_custom_type."""
+    l'edition). Meme garde-fou d'id que register_custom_type.
+
+    `entry["interactable"] = True` est ajoute ICI (pas dans
+    _build_npc_type_entry, reutilise par update_npc_type/
+    rename_entity_pack_references, qui NE DOIVENT PAS ecraser un
+    interactable desactive depuis via la Forge -- seule la creation initiale
+    doit fixer ce defaut) : un type enregistre via cet ecran a ete cree
+    specifiquement pour etre un PNJ dialogable, donc part interactable par
+    defaut -- reste editable/desactivable ensuite comme n'importe quel
+    autre flag MECHANICS_KEYS, via update_type_mechanics."""
     if not type_id or not all(c.isalnum() or c == "_" for c in type_id):
         raise ValueError("Identifiant invalide (lettres/chiffres/_ uniquement)")
     if type_id in OBJECT_TYPES:
         raise ValueError(f"'{type_id}' existe deja")
     entry = _build_npc_type_entry(name, entity_pack, tileset, icon_rect, size, wander_actions)
+    entry["interactable"] = True
     _write_custom_type(type_id, entry)
     return entry
 
@@ -1535,7 +1613,7 @@ def npc_types_for_pack(entity_pack):
     "PNJ existants" de SpriteEditorPanelUI en mode pack d'entite."""
     return [
         (candidate_id, config) for candidate_id, config in OBJECT_TYPES.items()
-        if config.get("npc") and config.get("entity_pack") == entity_pack
+        if config.get("entity_pack") == entity_pack
     ]
 
 
