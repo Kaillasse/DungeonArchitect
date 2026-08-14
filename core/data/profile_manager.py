@@ -37,7 +37,8 @@ def _sanitize_name(name) -> str:
 
 class Profile:
     def __init__(self, name: str, xp: int = 0, generator_room_names=None, generator_room_count: int = 3,
-                 panel_layout=None, card_collection=None, admingod: bool = False, home_player_position=None):
+                 panel_layout=None, card_collection=None, admingod: bool = False, home_player_position=None,
+                 card_stash=None):
         self.name = name
         self.xp = xp
         # Set only via `python main.py --admingod` (see main.py) -- never
@@ -81,6 +82,14 @@ class Profile:
         # matches what Creator actually needs (the position at the moment
         # editing started), same lazy-persistence spirit as panel_layout.
         self.home_player_position = dict(home_player_position) if home_player_position else None
+        # {card_id -> count} -- cards physically picked up during a run
+        # (see core.world.entities.CardPickup/PickupManager) and banked at
+        # victory (Explorator._trigger_victory), but not yet manually
+        # dragged into card_collection from core.editor.ui.stash_panel.
+        # StashPanelUI in the Home/Creator. Additive, same convention as
+        # card_collection -- distinct bucket, never merged automatically:
+        # a card sits here until the player deliberately deposits it.
+        self.card_stash = dict(card_stash) if card_stash else {}
 
     @property
     def level(self) -> int:
@@ -132,6 +141,7 @@ class ProfileManager:
             card_collection=payload.get("card_collection"),
             admingod=payload.get("admingod", False),
             home_player_position=payload.get("home_player_position"),
+            card_stash=payload.get("card_stash"),
         )
 
     def save(self, profile: Profile) -> Path:
@@ -149,6 +159,7 @@ class ProfileManager:
                     "card_collection": profile.card_collection,
                     "admingod": profile.admingod,
                     "home_player_position": profile.home_player_position,
+                    "card_stash": profile.card_stash,
                 },
                 handle, indent=2, ensure_ascii=False,
             )

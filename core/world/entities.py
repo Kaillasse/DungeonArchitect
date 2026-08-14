@@ -12,6 +12,7 @@ from core.world.object_manager import (
     ANIMAL_TYPES, load_animal_frames, ENEMY_TYPES, load_enemy_frames, load_currency_frames,
     load_dynamite_frames, load_explosion_frames, load_star_frames,
     OBJECT_TYPES, load_npc_frames, npc_types, NPC_DIRECTIONS, effective_loot_cards,
+    ITEM_DEFINITIONS, make_item,
 )
 
 def _draw_cached_sprite(screen, camera, cache, key_prefix, sprite, position, frame_w, frame_h, flip=False, anchor_feet=False):
@@ -941,19 +942,20 @@ class AnimalManager(_EntityManager):
 
     def _spawn_death_reward(self, animal, player_refs, room_offset):
         """See EnemyManager._spawn_death_reward -- same magnetic-star
-        reward, crediting animal.animal_type's own loot table (see
-        object_manager.effective_loot_cards) once it arrives. No-op if the
-        room has no players in it right now."""
+        reward, spawning animal.animal_type's own loot table (see
+        object_manager.effective_loot_cards/_spawn_loot_pickups) as ground
+        pickups once the star arrives. No-op if the room has no players in
+        it right now."""
         if not player_refs:
             return
         nearest = min(
             player_refs, key=lambda ref: pygame.Vector2(ref.hitbox.center).distance_squared_to(animal.position),
         )
-        target_player, target_session = nearest.player, nearest.session
+        target_player = nearest.player
         card_id = animal.animal_type
 
-        def _on_arrival(session=target_session, card_id=card_id):
-            _credit_loot(session, card_id)
+        def _on_arrival(position):
+            _spawn_loot_pickups(self.dungeon, position, card_id)
 
         self.dungeon.effect_manager.spawn_destruction_spark(
             animal.position.x, animal.position.y, lambda: target_player.position,
@@ -1212,11 +1214,12 @@ class EnemyManager(_EntityManager):
     health right away -- it plays out its death animation and holds on the
     last frame for Enemy.DEATH_DESPAWN_DELAY seconds (see Enemy.update),
     THEN gets removed here (see update()) the same way a destroyed tile
-    disappears: a magnetic star to the nearest player, crediting the
-    enemy's own card on arrival (see _spawn_death_reward/
-    credit_pending_card). One standing over void is still removed outright
-    with no reward at all, though -- there's no sensible corpse (or spark
-    destination) for something that fell through the floor."""
+    disappears: a magnetic star to the nearest player, that then becomes a
+    ground pickup of the enemy's own card once it lands (see
+    _spawn_death_reward/_spawn_loot_pickups). One standing over void is
+    still removed outright with no reward at all, though -- there's no
+    sensible corpse (or spark destination) for something that fell through
+    the floor."""
 
     ENTITY_CLASS = Enemy
     ENTITY_TYPES = ENEMY_TYPES
@@ -1257,20 +1260,21 @@ class EnemyManager(_EntityManager):
     def _spawn_death_reward(self, enemy, player_refs, room_offset):
         """Same "disappear like a destroyed tile" treatment
         ProjectileManager._spawn_destruction_sparks already gives terrain --
-        a magnetic star to whichever player is nearest, crediting the
-        enemy's own card (enemy.enemy_type) once it arrives (see
-        credit_pending_card). No-op (corpse just vanishes, no reward) if the
-        room has no players in it right now."""
+        a magnetic star to whichever player is nearest, spawning the
+        enemy's own loot table (enemy.enemy_type, see
+        object_manager.effective_loot_cards) as ground pickups once it
+        arrives (see _spawn_loot_pickups). No-op (corpse just vanishes, no
+        reward) if the room has no players in it right now."""
         if not player_refs:
             return
         nearest = min(
             player_refs, key=lambda ref: pygame.Vector2(ref.hitbox.center).distance_squared_to(enemy.position),
         )
-        target_player, target_session = nearest.player, nearest.session
+        target_player = nearest.player
         card_id = enemy.enemy_type
 
-        def _on_arrival(session=target_session, card_id=card_id):
-            _credit_loot(session, card_id)
+        def _on_arrival(position):
+            _spawn_loot_pickups(self.dungeon, position, card_id)
 
         self.dungeon.effect_manager.spawn_destruction_spark(
             enemy.position.x, enemy.position.y, lambda: target_player.position,
@@ -1405,11 +1409,51 @@ class ItemPickup:
         )
 
 
+class CardPickup:
+    """A card waiting on the ground -- what a DestructionSpark becomes the
+    instant it reaches its target (see EffectManager.spawn_destruction_spark/
+    _spawn_loot_pickups), rather than crediting anything invisibly. Same
+    static-single-frame shape as ItemPickup, but there's no inventory SLOT
+    to fill -- collecting one calls Inventory.add_card(card_id) instead
+    (see PickupManager.collect), which stacks onto grid_slots rather than
+    main_slots. Icon resolved once at construction via
+    core.data.cards.resolve_card_sprite (deferred import -- same cycle
+    concern as core.world.inventory.CardStub)."""
+
+    HITBOX_SIZE = 16
+
+    def __init__(self, card_id, world_x, world_y):
+        from core.data.cards import resolve_card_sprite
+        self.card_id = card_id
+        self.position = pygame.Vector2(world_x, world_y)
+        self.collected = False
+        self._icon = resolve_card_sprite(card_id) or pygame.Surface((16, 16), pygame.SRCALPHA)
+        self._render_cache = {}
+
+    def get_hitbox(self):
+        return pygame.Rect(
+            int(self.position.x - self.HITBOX_SIZE / 2),
+            int(self.position.y - self.HITBOX_SIZE / 2),
+            self.HITBOX_SIZE,
+            self.HITBOX_SIZE,
+        )
+
+    def draw(self, screen, camera):
+        _draw_cached_sprite(
+            screen, camera, self._render_cache,
+            (),
+            self._icon, self.position, self._icon.get_width(), self._icon.get_height(),
+        )
+
+
 class PickupManager:
-    """Owns the live Pickup/ItemPickup entities dropped in a room. Unlike
-    Animal/EnemyManager there's no spawn() from placed objects -- pickups
-    only ever come from Explorator._spawn_loot calling spawn()/spawn_item()
-    directly at an enemy's death position, and are never persisted."""
+    """Owns the live Pickup/ItemPickup/CardPickup entities dropped in a
+    room. Unlike Animal/EnemyManager there's no spawn() from placed
+    objects -- pickups only ever come from Explorator._spawn_loot calling
+    spawn()/spawn_item() directly at an enemy's death position, or from
+    _spawn_loot_pickups (a DestructionSpark's on_arrival hook -- enemy/
+    animal death, terrain destruction) calling spawn()/spawn_item()/
+    spawn_card(), and are never persisted."""
 
     # Slower than DestructionSpark.HOMING_SPEED -- a gentle "pull toward the
     # player" once in range, not a projectile snapping onto them instantly.
@@ -1419,12 +1463,16 @@ class PickupManager:
         self.dungeon = dungeon
         self.pickups = []
         self.item_pickups = []
+        self.card_pickups = []
 
     def spawn(self, currency_type, world_x, world_y):
         self.pickups.append(Pickup(currency_type, world_x, world_y))
 
     def spawn_item(self, item, slot, world_x, world_y):
         self.item_pickups.append(ItemPickup(item, slot, world_x, world_y))
+
+    def spawn_card(self, card_id, world_x, world_y):
+        self.card_pickups.append(CardPickup(card_id, world_x, world_y))
 
     def _nearest_target_within(self, pickup, player_refs, magnet_radius):
         """The closest player_refs position within magnet_radius of `pickup`,
@@ -1471,6 +1519,11 @@ class PickupManager:
                 target = self._nearest_target_within(item_pickup, player_refs, magnet_radius)
                 if target is not None:
                     item_pickup.position = _move_toward(item_pickup.position, target, self.MAGNET_SPEED, dt)
+        for card_pickup in self.card_pickups:
+            if not card_pickup.collected:
+                target = self._nearest_target_within(card_pickup, player_refs, magnet_radius)
+                if target is not None:
+                    card_pickup.position = _move_toward(card_pickup.position, target, self.MAGNET_SPEED, dt)
         # A pickup sitting where the terrain got destroyed out from under it
         # (see Dungeon.destroy_area) falls through and is lost, same as
         # every other live entity's void-culling (AnimalManager/
@@ -1483,6 +1536,10 @@ class PickupManager:
             pickup for pickup in self.item_pickups
             if not pickup.collected and not _is_over_void(self.dungeon, pickup)
         ]
+        self.card_pickups = [
+            pickup for pickup in self.card_pickups
+            if not pickup.collected and not _is_over_void(self.dungeon, pickup)
+        ]
 
     def collect(self, player_hitbox, inventory):
         """Credits inventory.currency[pickup.currency_type] += 1 the instant
@@ -1492,7 +1549,16 @@ class PickupManager:
         vanishing. Already-collecting pickups are left alone (no double
         credit if the player's hitbox keeps overlapping it). ItemPickups
         have no such animation -- see ItemPickup's own docstring for why a
-        full inventory slot leaves one on the ground untouched instead."""
+        full inventory slot leaves one on the ground untouched instead.
+
+        Returns the list of card_id collected THIS call (possibly empty) --
+        unlike currency/items, a card can't just be credited into
+        `inventory` here: it needs to reach Profile.card_stash eventually
+        (see Explorator._resolve_pickups/_trigger_victory), which this
+        method has no access to. inventory.add_card still handles the
+        immediate, visible part (stacking into grid_slots, see
+        core.world.inventory.Inventory.add_card) -- a full grid leaves the
+        pickup on the ground untouched, same spirit as a full main_slot."""
         for pickup in self.pickups:
             if pickup.state == "spin" and player_hitbox.colliderect(pickup.get_hitbox()):
                 inventory.currency[pickup.currency_type] += 1
@@ -1508,11 +1574,24 @@ class PickupManager:
                 inventory.main_slots[item_pickup.slot] = item_pickup.item
                 item_pickup.collected = True
 
+        collected_card_ids = []
+        for card_pickup in self.card_pickups:
+            if (
+                not card_pickup.collected
+                and player_hitbox.colliderect(card_pickup.get_hitbox())
+                and inventory.add_card(card_pickup.card_id)
+            ):
+                card_pickup.collected = True
+                collected_card_ids.append(card_pickup.card_id)
+        return collected_card_ids
+
     def draw(self, screen, camera):
         for pickup in self.pickups:
             pickup.draw(screen, camera)
         for item_pickup in self.item_pickups:
             item_pickup.draw(screen, camera)
+        for card_pickup in self.card_pickups:
+            card_pickup.draw(screen, camera)
 
 
 class ThrownDynamite:
@@ -1704,21 +1783,20 @@ class ProjectileManager:
         frame) -- room_offset is what lets DestructionSpark convert that
         global position back to this room's local space each frame it
         homes (see its own update()). Each cell's own card_ids_by_cell
-        entry (see Dungeon.destroy_area) is credited to the SAME nearest
-        session once ITS OWN spark arrives (see credit_pending_card) --
+        entry (see Dungeon.destroy_area) spawns pickups of its own loot
+        table once ITS OWN spark arrives (see _spawn_loot_pickups) --
         every cell's spark shares one target player, but each still carries
         its own card(s)."""
         if not destroyed_cells or not player_refs:
             return
         nearest = min(player_refs, key=lambda ref: pygame.Vector2(ref.hitbox.center).distance_squared_to(blast_position))
         target_player = nearest.player
-        target_session = nearest.session
         for grid_x, grid_y in destroyed_cells:
             local_x, local_y = self.dungeon.grid_to_world(grid_x, grid_y)
             card_ids = card_ids_by_cell.get((grid_x, grid_y), [])
 
-            def _on_arrival(session=target_session, card_ids=card_ids):
-                _credit_loot(session, card_ids)
+            def _on_arrival(position, card_ids=card_ids):
+                _spawn_loot_pickups(self.dungeon, position, card_ids)
 
             self.dungeon.effect_manager.spawn_destruction_spark(
                 local_x, local_y, lambda: target_player.position, room_offset=room_offset,
@@ -1732,34 +1810,32 @@ class ProjectileManager:
             explosion.draw(screen, camera)
 
 
-def credit_pending_card(session, card_id, count=1):
-    """Increments session.pending_cards[card_id] by `count` -- session is
-    duck-typed here (a core.exploration.player_session.PlayerSession in
-    practice, but this module never imports that class, only mutates the
-    plain dict attribute it's already handed via PlayerRef.session/a
-    caller's own closure) since a destroyed tile/object or a dead
-    enemy/animal's reward needs the same "credit a live SESSION, not just
-    its Player" hook PlayerRef.hitbox/.player alone can't give (see
-    DestructionSpark's own on_arrival). Only ever committed to the
-    persisted Profile.card_collection later, on a victorious run (see
-    Explorator._commit_pending_cards) -- never here."""
-    session.pending_cards[card_id] = session.pending_cards.get(card_id, 0) + count
-
-
-def _credit_loot(session, card_ids):
-    """Credits `session` with the full, combined loot table (see
+def _spawn_loot_pickups(dungeon, position, card_ids):
+    """Spawns ground pickups for the full, combined loot table (see
     object_manager.effective_loot_cards) of every id in `card_ids` -- a
     single card id (a dead enemy/animal's own type) or an iterable of them
     (every card a destroyed cell is worth: tile plus whatever object sat on
-    it). The shared crediting step behind every reward's on_arrival hook
-    below, so a card's own "drop N of card X" table is honored uniformly
-    regardless of what killed/destroyed it (melee, dynamite, or a future
-    third way)."""
+    it). The shared "what happens once a reward's DestructionSpark lands"
+    step (see EnemyManager/AnimalManager._spawn_death_reward,
+    ProjectileManager._spawn_destruction_sparks, and Explorator._resolve_
+    player_attacks' melee wall-break) -- a card is only ever earned by
+    physically collecting a CardPickup (see core.world.inventory.Inventory.
+    add_card / Explorator._resolve_pickups), never credited invisibly.
+    An entry that ALSO names a real inventory item (loot_id in
+    ITEM_DEFINITIONS) additionally spawns a physical ItemPickup (usable
+    THIS run, same as the old item_loot mechanic it replaces) -- both
+    happen together for an item, confirmed with the user."""
     if isinstance(card_ids, str):
         card_ids = [card_ids]
     for card_id in card_ids:
         for loot_id, loot_count in effective_loot_cards(card_id).items():
-            credit_pending_card(session, loot_id, loot_count)
+            for _ in range(loot_count):
+                dungeon.pickup_manager.spawn_card(loot_id, position.x, position.y)
+                item_def = ITEM_DEFINITIONS.get(loot_id)
+                if item_def is not None:
+                    dungeon.pickup_manager.spawn_item(
+                        make_item(loot_id), item_def["slot"], position.x, position.y,
+                    )
 
 
 class DestructionSpark:
@@ -1772,10 +1848,12 @@ class DestructionSpark:
     EnemyManager's own despawn handling, never by the destruction/death
     logic itself (Dungeon/Enemy have no notion of "which player is nearby"
     -- that's the caller's job, see EffectManager.spawn_destruction_spark).
-    `on_arrival`, if given, fires exactly once, the frame this actually
-    finishes (see update()) -- the caller's own hook for crediting a card
-    (see credit_pending_card) the instant the star visually reaches the
-    player, not at the moment of destruction/death itself."""
+    `on_arrival(position)`, if given, fires exactly once, the frame this
+    actually finishes (see update()), passed this spark's own final
+    room-local position -- the caller's own hook to spawn loot pickups
+    (see _spawn_loot_pickups) exactly where the star lands, the instant it
+    visually reaches the player, not at the moment of destruction/death
+    itself. The star effectively BECOMES the pickup at that point."""
 
     FRAME_SIZE = 32
     ANIMATION_SPEED = 0.08
@@ -1810,7 +1888,7 @@ class DestructionSpark:
         if _advance_frame_once(self, dt, self.ANIMATION_SPEED, len(self.frames)):
             self.finished = True
             if self.on_arrival is not None:
-                self.on_arrival()
+                self.on_arrival(self.position)
 
     def draw(self, screen, camera):
         sprite = self.frames[self.frame]

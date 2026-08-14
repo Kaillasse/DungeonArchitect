@@ -146,9 +146,10 @@ _BUILTIN_OBJECT_TYPES = {
         # window during which a swing actually deals damage: frames 7-8 of 9
         # (1-based), as specified. "loot" (currency type -> count) is read
         # once, on death, by Explorator._spawn_loot -- an enemy with no
-        # "loot" key (or an empty one) simply drops nothing. "item_loot"
-        # (item id -> count, see ITEM_DEFINITIONS) is the same idea for real
-        # inventory items rather than currency.
+        # "loot" key (or an empty one) simply drops nothing. Real-item drops
+        # used to be a sibling "item_loot" key here -- retired in favor of
+        # "loot_cards" below (an item entry there spawns both a card pickup
+        # AND a physical ItemPickup, see _spawn_loot_pickups).
         "stats": {
             "health": 3, "move_speed": 45, "aggro_range": 6.0, "attack_range": 1.2,
             # A list, not a tuple -- MechanicsPanelUI's stats editing
@@ -160,8 +161,12 @@ _BUILTIN_OBJECT_TYPES = {
             # instead of permanently miscomparing tuple != list.
             "active_attack_frames": [6, 7],
             "loot": {"gold": 2, "blue": 1},
-            "item_loot": {"dynamite": 1},
         },
+        # Explicit rather than left to effective_loot_cards' own implicit
+        # "1 copy of its own card" default, to preserve skeleton1's old
+        # dynamite drop (previously stats["item_loot"], see above) under
+        # the new unified mechanism.
+        "loot_cards": {"skeleton1": 1, "dynamite": 1},
         # Per-state sounds (see ENEMY_ANIMATIONS -- idle/movement/attack/
         # damaged/death) -- attack/damaged were already wired via SOUND_FILES
         # before the card sound system (see entities.py's Enemy.attack/
@@ -535,9 +540,10 @@ def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
     multiplicateur aleatoire dans cette plage a CHAQUE lecture -- jamais
     calcule/fige une seule fois ici).
 
-    `loot_cards` ({card_id: count}) est la table de butin-en-cartes creditee
-    (voir core.world.entities.credit_pending_card) quand cette carte meurt/
-    est detruite -- SANS cette cle du tout, effective_loot_cards ci-dessous
+    `loot_cards` ({card_id: count}) est la table de butin-en-cartes dont
+    des CardPickup sont fait tomber au sol (voir core.world.entities.
+    _spawn_loot_pickups) quand cette carte meurt/est detruite -- SANS
+    cette cle du tout, effective_loot_cards ci-dessous
     retombe sur le defaut implicite "1 exemplaire de sa propre carte", donc
     None ici veut dire "ne pas toucher a l'existant", jamais "table vide" :
     contrairement a capabilities/effects/sounds (verifies par vacuite, un
@@ -1031,10 +1037,11 @@ ITEM_DEFINITIONS = _merged_item_definitions()
 
 
 def effective_loot_cards(card_id):
-    """The loot table actually credited (see core.world.entities.
-    credit_pending_card) when `card_id` dies (a mob) or is destroyed (a
-    tile_decor/tile_special object, or -- if the vocabulary is ever wired
-    up for one -- an item): its own "loot_cards" override if one was ever
+    """The loot table actually spawned as ground pickups (see
+    core.world.entities._spawn_loot_pickups) when `card_id` dies (a mob) or
+    is destroyed (a tile_decor/tile_special object, or an item -- an item
+    entry ALSO spawns a physical ItemPickup on top of the CardPickup, see
+    _spawn_loot_pickups): its own "loot_cards" override if one was ever
     saved for it (even an explicitly emptied {}, meaning "drops nothing at
     all" -- see _build_mechanics_fields/_build_item_entry's own docstrings
     on why presence, not truthiness, is what's checked at save time), else

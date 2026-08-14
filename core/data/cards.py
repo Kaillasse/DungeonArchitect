@@ -132,9 +132,10 @@ class Card:
         self.sound_pitch = (
             {key: list(value) for key, value in sound_pitch.items()} if sound_pitch else {}
         )
-        # {card_id: count} -- what this card drops (as OTHER cards) when it
-        # dies/is destroyed, see object_manager.effective_loot_cards/
-        # core.world.entities.credit_pending_card. Unlike sounds/
+        # {card_id: count} -- what this card drops (as OTHER cards, as
+        # ground pickups) when it dies/is destroyed, see object_manager.
+        # effective_loot_cards/core.world.entities._spawn_loot_pickups.
+        # Unlike sounds/
         # capabilities/effects above, None here is NOT the same as {}: None
         # means "this card never had loot_cards explicitly saved, so the
         # implicit default (one copy of its own card) applies" -- resolved

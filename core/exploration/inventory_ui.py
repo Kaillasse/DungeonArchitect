@@ -77,6 +77,13 @@ class InventoryPanel:
         if item is not None:
             icon = pygame.transform.scale(item.get_icon(), (rect.width - 12, rect.height - 12))
             screen.blit(icon, (rect.centerx - icon.get_width() / 2, rect.centery - icon.get_height() / 2))
+            # A stacked grid_slots entry (see core.world.inventory.CardStub)
+            # carries a count > 1 -- a plain main_slots Item never does
+            # (getattr default covers it), so this is silently a no-op there.
+            count = getattr(item, "count", 1)
+            if count > 1:
+                count_text = self.label_font.render(str(count), True, (255, 255, 255))
+                screen.blit(count_text, (rect.right - count_text.get_width() - 4, rect.bottom - count_text.get_height() - 2))
 
     def render(self, screen, player, region=None):
         overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)

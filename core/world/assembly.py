@@ -369,9 +369,9 @@ class DungeonAssembly:
         same as is_global_cell_walkable converting before delegating to a
         room's ObjectManager -- so it's shifted back by that room's offset
         here before being handed down. Each ref's `player`/`session` (the
-        actual objects, for take_damage / credit_pending_card
-        respectively) are forwarded as-is -- no coordinate transform needed
-        since only their identity matters here, never .position (see
+        actual objects, for take_damage / whichever session a future
+        combat-adjacent feature needs) are forwarded as-is -- no coordinate
+        transform needed since only their identity matters here, never .position (see
         EnemyManager/Enemy, which only ever read distances
         from the already-shifted hitbox).
 

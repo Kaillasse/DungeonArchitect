@@ -239,9 +239,9 @@ class Dungeon:
         together by the same explosion/melee swing, so both are worth a
         card. Must run BEFORE the cell is actually cleared (same ordering
         _play_destroy_sound_at already requires, see both callers below).
-        Used to credit the player a card once the corresponding
+        Used to spawn the player a card pickup once the corresponding
         DestructionSpark finishes (see Explorator/ProjectileManager +
-        core.world.entities.credit_pending_card), not at destruction time
+        core.world.entities._spawn_loot_pickups), not at destruction time
         itself."""
         card_ids = []
         cell = self.logical_grid[y][x]

@@ -201,20 +201,26 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self._mob_aggro_range_raw = 1
         self.mob_attack_range = 1
         self._mob_attack_range_raw = 1
+        # Currency only now -- real-item drops used to be a second,
+        # separately-enumerated "Objet (...)" stepper list here
+        # (mob_item_loot/stats["item_loot"]), retired in favor of the
+        # Cartes table below: an item entry there spawns BOTH a card
+        # pickup and a physical ItemPickup (see core.world.entities.
+        # _spawn_loot_pickups), so there's no longer a separate item
+        # bucket to edit.
         self.mob_loot = {}
-        self.mob_item_loot = {}
 
-        # Cartes -- {card_id: count}, what the current card drops (as OTHER
-        # cards) when it dies/is destroyed (see object_manager.
-        # effective_loot_cards/core.world.entities.credit_pending_card).
+        # Cartes -- {card_id: count}, what the current card drops (as
+        # ground pickups, OTHER cards or -- for an item id -- also a real
+        # inventory item) when it dies/is destroyed (see object_manager.
+        # effective_loot_cards/core.world.entities._spawn_loot_pickups).
         # Shown for mob/object/item (see _shows_loot_cards) -- distinct
-        # section from mob_loot/mob_item_loot above (currency/real items),
-        # additive alongside it rather than replacing it. Populated by
-        # open() from effective_loot_cards (so a never-customized card
-        # starts the editor already showing its implicit default, one copy
-        # of itself), added to via drag-and-drop from CardPanelUI (see
-        # try_add_loot_card/Creator._resolve_dragged_card), removed by
-        # stepping a row's count down to 0.
+        # section from mob_loot above (currency), additive alongside it.
+        # Populated by open() from effective_loot_cards (so a
+        # never-customized card starts the editor already showing its
+        # implicit default, one copy of itself), added to via drag-and-drop
+        # from CardPanelUI (see try_add_loot_card/Creator._resolve_dragged_
+        # card), removed by stepping a row's count down to 0.
         self.loot_cards = {}
 
         # PNJ cards get their own info branch (is_pnj/open/_render_pnj_info)
@@ -388,7 +394,6 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                 self._mob_attack_range_raw = self.mob_stats.get("attack_range", 1)
                 self.mob_attack_range = round(self._mob_attack_range_raw)
                 self.mob_loot = dict(self.mob_stats.get("loot", {}))
-                self.mob_item_loot = dict(self.mob_stats.get("item_loot", {}))
                 self._preview_frames = load_enemy_frames(card_id)
             else:
                 self._preview_frames = load_animal_frames(card_id)
@@ -807,17 +812,13 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         }
 
     def _mob_loot_rows(self):
-        """(label, loot_dict, key) for every loot row -- mirrors
-        core.editor.ui.chest_panel.ChestPanelUI._rows() exactly (one row
-        per currency in CURRENCY_FILES, one per item in ITEM_DEFINITIONS),
-        reused here so a mob's death-drop loot table is edited the same
-        way a chest's is."""
-        rows = [(f"Pieces ({currency})", self.mob_loot, currency) for currency in CURRENCY_FILES]
-        rows += [
-            (f"Objet ({definition['name']})", self.mob_item_loot, item_id)
-            for item_id, definition in ITEM_DEFINITIONS.items()
-        ]
-        return rows
+        """(label, loot_dict, key) for every currency loot row -- one per
+        currency in CURRENCY_FILES, same idiom core.editor.ui.chest_panel.
+        ChestPanelUI._rows() uses. Real-item drops used to be a second half
+        of this list (one row per ITEM_DEFINITIONS entry) -- retired, see
+        this panel's own __init__ comment on self.mob_loot -- an item's
+        drop is edited via the Cartes table (_loot_card_rows) instead."""
+        return [(f"Pieces ({currency})", self.mob_loot, currency) for currency in CURRENCY_FILES]
 
     def _mob_loot_row_stepper(self, index):
         return Stepper(self.x + 40, self._cy(688 + index * 32), self.STEP_BUTTON_SIZE, self.COUNT_DISPLAY_WIDTH, 0, 99)

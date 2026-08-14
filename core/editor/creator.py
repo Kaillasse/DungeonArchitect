@@ -19,7 +19,7 @@ from core.data.sound_manager import play_card_sound
 from core.world.home import home_room_name, wants_exploration
 from core.editor.ui import (
     GeneratorPanelUI, RoomPanelUI, ChestPanelUI, RolePanelUI, CardPanelUI, CardRenderer,
-    SpriteEditorPanelUI, AutotileThemePanelUI, MechanicsPanelUI,
+    SpriteEditorPanelUI, AutotileThemePanelUI, MechanicsPanelUI, StashPanelUI,
 )
 from core.editor.tools import ObjectTool
 
@@ -88,6 +88,12 @@ class Creator:
             y=180,
         )
         self.card_panel = CardPanelUI(x=460, y=340, renderer=self.card_renderer)
+        # Cards found during a run (Profile.card_stash) but not yet
+        # deposited into card_collection -- see StashPanelUI's own module
+        # docstring and _resolve_dragged_card's "stash" drag_source branch
+        # below. Docked next to card_panel since depositing means dragging
+        # straight from one onto the other.
+        self.stash_panel = StashPanelUI(x=750, y=340, renderer=self.card_renderer)
         # Fondation "carte"/sprite editor -- panneau modal centre (comme
         # chest_panel/role_panel), pas un panneau docke/draggable (pas
         # besoin de PanelFrame ici). Bouton d'ouverture toujours visible,
@@ -131,6 +137,7 @@ class Creator:
         self.room_frame = PanelFrame(self.room_panel, "Sauvegarder / Charger", on_change=self._on_panel_frame_change)
         self.generator_frame = PanelFrame(self.generator_panel, "Generation procedurale", on_change=self._on_panel_frame_change)
         self.card_frame = PanelFrame(self.card_panel, "Cartes", on_change=self._on_panel_frame_change)
+        self.stash_frame = PanelFrame(self.stash_panel, "Cartes trouvees", on_change=self._on_panel_frame_change)
         # Mechanical counterpart to sprite_editor_panel (visual/identity vs.
         # gameplay flags -- see MechanicsPanelUI's own module docstring) --
         # docked/draggable/resizable like every other panel here, not
@@ -140,7 +147,8 @@ class Creator:
         self.mechanics_panel = MechanicsPanelUI(x=460, y=460)
         self.mechanics_frame = PanelFrame(self.mechanics_panel, "Forge", on_change=self._on_panel_frame_change)
         self.panel_frames = [
-            self.tools_frame, self.room_frame, self.generator_frame, self.card_frame, self.mechanics_frame,
+            self.tools_frame, self.room_frame, self.generator_frame, self.card_frame, self.stash_frame,
+            self.mechanics_frame,
         ]
         # name -> frame, purely for _refresh_panel_layout/_on_panel_frame_change's
         # own round-trip through Profile.panel_layout (see those methods).
@@ -149,6 +157,7 @@ class Creator:
             "room": self.room_frame,
             "generator": self.generator_frame,
             "card": self.card_frame,
+            "stash": self.stash_frame,
             "mechanics": self.mechanics_frame,
         }
 
@@ -427,6 +436,19 @@ class Creator:
         card-panel-originated drag)."""
         card_id = self.object_tool.object_type
 
+        if self.object_tool.drag_source == "stash":
+            # A stash-sourced card isn't owned yet -- the only meaningful
+            # drop target is the collection panel itself, to deposit it
+            # (see _deposit_stash_card). Never placeable in the world,
+            # never opens the Forge, regardless of card_id/card_type --
+            # checked first, before every other branch below, so a stash
+            # drag can never be misrouted into one of those.
+            if self.card_frame.contains(event.pos):
+                self._deposit_stash_card(card_id)
+            self.object_tool.dragging = False
+            self.object_tool.drag_source = "collection"
+            return
+
         room_name = room_name_from_card_id(card_id)
         if room_name is not None:
             # A room-card is never placeable in the world grid
@@ -469,6 +491,7 @@ class Creator:
         # placed/consumed, same as any other drag that misses its target.
 
         self.object_tool.dragging = False
+        self.object_tool.drag_source = "collection"
 
     def _apply_generation(self, request):
         room_names, room_count = request
@@ -557,6 +580,25 @@ class Creator:
             return
         self._active_profile.card_collection[card_id] = self._active_profile.card_collection.get(card_id, 0) + 1
         self._card_stock_dirty = True
+
+    def _deposit_stash_card(self, card_id):
+        """Moves one copy of `card_id` from the cached profile's card_stash
+        into card_collection -- the only thing a "stash" drag_source drag
+        can ever do (see _resolve_dragged_card), dropped onto card_frame.
+        No-op if there's no active profile or this card isn't actually in
+        the stash (stale drag, e.g. StashPanelUI wasn't refreshed after
+        some other change emptied it first)."""
+        if self._active_profile is None:
+            return
+        stash = self._active_profile.card_stash
+        if stash.get(card_id, 0) <= 0:
+            return
+        stash[card_id] -= 1
+        if stash[card_id] <= 0:
+            del stash[card_id]
+        self._active_profile.card_collection[card_id] = self._active_profile.card_collection.get(card_id, 0) + 1
+        self._flush_active_profile()
+        self._refresh_card_panel()
 
     def _flush_active_profile(self):
         """Persists the cached profile's card_collection to disk -- called
@@ -801,16 +843,18 @@ class Creator:
         self._generator_panel_seeded = True
 
     def _refresh_card_panel(self):
-        """Reloads the Card panel's list/owned-counts from the cached
-        local profile (self._active_profile, see _refresh_active_profile)
-        -- called once per entry into Creator, and again after any card-
-        consuming action (_try_place_object) so the panel's counts stay
+        """Reloads the Card panel's list/owned-counts, and the found-cards
+        Stash panel's own list, from the cached local profile
+        (self._active_profile, see _refresh_active_profile) -- called once
+        per entry into Creator, and again after any card-consuming action
+        (_try_place_object, a stash deposit) so both panels' counts stay
         live instead of waiting for the next entry. A no-op with no local
         identity yet (headless smoke test, or the very first frame before
-        Menu's name-entry has run) -- the panel just stays on whatever it
-        last showed, empty at the very start."""
+        Menu's name-entry has run) -- both panels just stay on whatever
+        they last showed, empty at the very start."""
         if self._active_profile is not None:
             self.card_panel.refresh(self._active_profile)
+            self.stash_panel.refresh(self._active_profile)
 
     def _refresh_panel_layout(self):
         """Restores each PanelFrame's saved position/collapsed state from
@@ -1069,6 +1113,7 @@ class Creator:
                             self.room_frame.contains(event.pos)
                             or self.generator_frame.contains(event.pos)
                             or self.card_frame.contains(event.pos)
+                            or self.stash_frame.contains(event.pos)
                             or self.mechanics_frame.contains(event.pos)
                         )
                     panel_click = self._panel_owns_drag
@@ -1101,6 +1146,17 @@ class Creator:
                         drag_card_id = self.card_panel.handle_event(event)
                         if drag_card_id is not None:
                             self.object_tool.start_drag(drag_card_id, event.pos)
+
+                    if not self.stash_frame.collapsed:
+                        # A found-but-undeposited card, dragged from here,
+                        # is never placeable/openable -- see
+                        # StashPanelUI.handle_event and
+                        # _resolve_dragged_card's "stash" drag_source
+                        # branch, which is the only thing that treats this
+                        # drag differently from a normal collection one.
+                        drag_stash_card_id = self.stash_panel.handle_event(event)
+                        if drag_stash_card_id is not None:
+                            self.object_tool.start_drag(drag_stash_card_id, event.pos, source="stash")
 
                     if not self.mechanics_frame.collapsed and self._forge_unlocked():
                         saved_type_id = self.mechanics_panel.handle_event(event)
@@ -1331,6 +1387,8 @@ class Creator:
                     # want wheel-scroll to work anywhere over the panel, not
                     # just by precisely grabbing the thin slider thumb.
                     if not self.card_frame.collapsed and self.card_panel.handle_wheel(mouse_pos, event.y):
+                        continue
+                    if not self.stash_frame.collapsed and self.stash_panel.handle_wheel(mouse_pos, event.y):
                         continue
                     if not self.mechanics_frame.collapsed and self.mechanics_panel.handle_wheel(mouse_pos, event.y):
                         continue

@@ -10,7 +10,7 @@ from core.world.dungeon import Dungeon, corner_cells
 from core.editor.autotile import FLOOR
 from core.world.assembly import load_assembly, save_assembly, generate_assembly
 from core.data.ressources import ROOMS_DIRECTORY, next_new_donjon_name
-from core.world.entities import Player, PlayerRef, _bucket_direction, _credit_loot
+from core.world.entities import Player, PlayerRef, _bucket_direction, _spawn_loot_pickups
 from core.world.object_manager import (
     ANIMAL_TYPES, ENEMY_TYPES, npc_types, ITEM_DEFINITIONS, make_item, OBJECT_TYPES,
 )
@@ -320,11 +320,11 @@ class Explorator(NetworkSessionMixin):
             # re-placing position at the spawn point above.
             session.player.health = session.player.MAX_HEALTH
             # A fresh run (whether this is a genuine new attempt or just
-            # returning to home after one ended) starts with nothing
-            # pending -- see PlayerSession.pending_cards/_trigger_victory
-            # for why anything still here at this point was never
-            # committed (a defeat, or simply never having won yet).
-            session.pending_cards = {}
+            # returning to home after one ended) starts with an empty card
+            # stash -- see Inventory.clear_cards/_trigger_victory for why
+            # anything still in grid_slots at this point was never banked
+            # (a defeat, or simply never having won yet).
+            session.inventory.clear_cards()
         # Same reasoning for victory (see _interact_with_chest) -- otherwise
         # re-entering exploration would start right back on the frozen
         # victory screen from last time.
@@ -389,8 +389,8 @@ class Explorator(NetworkSessionMixin):
             session.last_dungeon_entrance_pos = None
             session.last_dungeon_exit_pos = None
             # Entering a dungeon is where a real "run" actually starts --
-            # see PlayerSession.pending_cards/_trigger_victory.
-            session.pending_cards = {}
+            # see Inventory.clear_cards/_trigger_victory.
+            session.inventory.clear_cards()
 
     @staticmethod
     def _spawn_offset_x(session, tile_size):
@@ -734,15 +734,20 @@ class Explorator(NetworkSessionMixin):
 
     @staticmethod
     def _spawn_loot(enemy, enemy_dungeon):
-        """Drops OBJECT_TYPES[enemy.enemy_type]["stats"]'s loot/item_loot
-        around the death spot via _scatter_loot. enemy.position is already
-        local to enemy_dungeon (never offset-translated -- see Animal/
-        Enemy's own coordinate convention), so no conversion is needed
-        before handing it to that same dungeon's PickupManager."""
+        """Drops OBJECT_TYPES[enemy.enemy_type]["stats"]'s currency loot
+        around the death spot via _scatter_loot -- item drops are no longer
+        part of this (see mechanics_panel.py's own comment on retiring
+        mob_item_loot): an enemy's card-based reward, including any real
+        item it's configured to also drop, is handled separately by
+        EnemyManager._spawn_death_reward/_spawn_loot_pickups once its
+        despawn spark lands, not here. enemy.position is already local to
+        enemy_dungeon (never offset-translated -- see Animal/Enemy's own
+        coordinate convention), so no conversion is needed before handing
+        it to that same dungeon's PickupManager."""
         stats = OBJECT_TYPES[enemy.enemy_type]["stats"]
         Explorator._scatter_loot(
             enemy_dungeon, enemy.position.x, enemy.position.y,
-            stats.get("loot", {}), stats.get("item_loot", {}), spread=10,
+            stats.get("loot", {}), {}, spread=10,
         )
 
     def _collect_pickups(self, player_hitbox, inventory):
@@ -1423,42 +1428,47 @@ class Explorator(NetworkSessionMixin):
         file always up to date."""
         apply_to_fresh_profile(session, lambda profile: profile.add_xp(amount))
 
-    def _commit_pending_cards(self, session):
-        """Merges session.pending_cards (see PlayerSession's own docstring/
-        credit_pending_card) into the persisted Profile.card_collection and
-        clears it -- called only from _trigger_victory, once per session,
-        the moment ANY session reaches the dungeon_exit (co-op is a shared
-        win). Same apply_to_fresh_profile pattern as _grant_xp, for the
-        exact same reason: a fresh reload before mutating avoids clobbering
-        a card_collection change Creator made mid-run. A no-op if nothing
-        was earned (empty dict) or this session has no profile at all."""
-        if not session.pending_cards:
+    def _bank_found_cards(self, session):
+        """Moves every card sitting in session.inventory.grid_slots (see
+        core.world.inventory.Inventory.add_card/CardStub -- cards physically
+        picked up this run) into the persisted Profile.card_stash, then
+        empties grid_slots -- called only from _trigger_victory, once per
+        session, the moment ANY session reaches the dungeon_exit (co-op is
+        a shared win). Same apply_to_fresh_profile pattern as _grant_xp,
+        for the exact same reason: a fresh reload before mutating avoids
+        clobbering a card_stash/card_collection change Creator made
+        mid-run. A no-op if grid_slots is empty or this session has no
+        profile at all. Banking into card_stash, NOT card_collection --
+        the player still has to manually drag each one into their
+        permanent collection later, from core.editor.ui.stash_panel.
+        StashPanelUI in the Home/Creator (see that panel's own docstring)."""
+        gained = {stub.card_id: stub.count for stub in session.inventory.grid_slots if stub is not None}
+        if not gained:
             return
-        gained = session.pending_cards
-        session.pending_cards = {}
+        session.inventory.clear_cards()
 
         def _mutate(profile):
             for card_id, count in gained.items():
-                profile.card_collection[card_id] = profile.card_collection.get(card_id, 0) + count
+                profile.card_stash[card_id] = profile.card_stash.get(card_id, 0) + count
 
         apply_to_fresh_profile(session, _mutate)
 
     def _trigger_victory(self, session):
         """Sets self.victory (whole-session -- see its own field comment,
         co-op shares one win) and grants the triggering session's own
-        XP_DUNGEON_CLEAR, same as before this existed -- plus commits EVERY
-        connected session's own pending_cards (see _commit_pending_cards),
-        not just the triggering one's, since co-op is a shared win. A
-        defeat (_game_over) never calls this, so cards earned that run are
-        simply never committed -- they vanish along with the rest of
-        pending_cards on the next open_room/_enter_assembly reset, matching
-        "garde l'inventaire en cas de victoire, le perd en cas de defaite."
+        XP_DUNGEON_CLEAR, same as before this existed -- plus banks EVERY
+        connected session's own found cards (see _bank_found_cards), not
+        just the triggering one's, since co-op is a shared win. A defeat
+        (_game_over) never calls this, so cards found that run are simply
+        never banked -- they vanish along with the rest of grid_slots on
+        the next open_room/_enter_assembly reset, matching "garde
+        l'inventaire en cas de victoire, le perd en cas de defaite."
         Shared by both dungeon_exit triggers (_check_dungeon_exit and
         _interact_with_chest's own chest branch)."""
         self.victory = True
         self._grant_xp(session, XP_DUNGEON_CLEAR)
         for other_session in self.players.values():
-            self._commit_pending_cards(other_session)
+            self._bank_found_cards(other_session)
 
     def _resolve_player_attacks(self):
         """Every session's attack, checked against the same one
@@ -1499,15 +1509,15 @@ class Explorator(NetworkSessionMixin):
                 # player.position (always GLOBAL) each frame it homes, see
                 # DestructionSpark's own docstring.
                 local_wall_x, local_wall_y = dungeon.grid_to_world(grid_x, grid_y)
-                # player=player/session=session/card_ids=card_ids default
+                # player=player/dungeon=dungeon/card_ids=card_ids default
                 # the closures' arguments at definition time -- without it,
                 # every spark spawned across different iterations of this
                 # loop would share the same late-bound values, ending up
                 # all reading whichever session happened to be last once
                 # this whole loop finishes (the classic Python
                 # closure-in-a-loop pitfall).
-                def _on_arrival(session=session, card_ids=card_ids):
-                    _credit_loot(session, card_ids)
+                def _on_arrival(position, dungeon=dungeon, card_ids=card_ids):
+                    _spawn_loot_pickups(dungeon, position, card_ids)
 
                 dungeon.effect_manager.spawn_destruction_spark(
                     local_wall_x, local_wall_y,
