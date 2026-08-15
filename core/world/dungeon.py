@@ -17,13 +17,12 @@ __all__ = ["DEFAULT_GRID_SAVE_PATH", "Dungeon", "corner_cells"]
 
 def corner_cells(rect, tile_size):
     """The 4 grid cells covering `rect`'s corners -- rect.right - 1/
-    rect.bottom - 1 rather than the raw edges, so a rect exactly aligned to
-    a tile boundary doesn't spill into the neighboring cell. Shared by every
+    rect.bottom - 1 rather than the raw edges, so a rect exactly aligned to a
+    tile boundary doesn't spill into the neighboring cell. Shared by every
     "is this whole rect walkable" check (Dungeon.is_rect_walkable,
-    DungeonAssembly.is_rect_walkable, Explorator._is_walkable) so there's
-    only one place to get the corner math right -- this exact geometry has
-    already needed two rounds of bugfixing this session (a void/wall corner
-    mismatch that could deadlock movement right at a room boundary)."""
+    DungeonAssembly.is_rect_walkable, Explorator._is_walkable) -- this exact
+    geometry has already needed bugfixing once (a void/wall corner mismatch
+    that could deadlock movement right at a room boundary)."""
     for x, y in (
         (rect.left, rect.top),
         (rect.right - 1, rect.top),
@@ -40,8 +39,7 @@ class Dungeon:
 
     # Safety cap for grow() -- 100x the default 20x20 room's area, generous
     # for a room/home that grows over a long time, but bounded against a
-    # runaway allocation from a single stray out-of-bounds paint (a camera
-    # bug, or a click far off-screen while zoomed way out).
+    # runaway allocation from a single stray out-of-bounds paint.
     MAX_ROOM_DIMENSION = 200
 
     def __init__(self, width: int = 20, height: int = 20) -> None:
@@ -54,38 +52,28 @@ class Dungeon:
 
         # Per-cell autotile pack name (or None -- the built-in interior
         # tileset), same shape as logical_grid. Unlike floor_theme/wall_theme
-        # below (which are only ever the CURRENT brush from here on), this is
-        # what actually gets read at render/resolve time -- see paint_cell's
-        # own stamping and core.editor.autotile._resolve_cell_sprite. Lets
-        # two cells of the same room paint with two different tilesets,
-        # which a single room-wide floor_theme/wall_theme could never do.
+        # below (only ever the CURRENT brush from here on), this is what's
+        # actually read at render/resolve time -- see paint_cell's stamping
+        # and autotile._resolve_cell_sprite. Lets two cells of the same room
+        # paint with two different tilesets, which a room-wide theme couldn't.
         self.theme_grid = [[None for _ in range(width)] for _ in range(height)]
 
-        # Bumped by anything that mutates logical_grid's actual cell values
-        # -- paint_cell (Creator painting/erasing) and destroy_area
-        # (exploration-time destruction) -- lets a cache keyed on it (see
-        # DungeonAssembly._border_cells_by_room, WorldRenderer's own ledge
-        # cache) know when previously-computed terrain-derived data has gone
-        # stale, without needing to be told explicitly by every caller.
+        # Bumped by anything that mutates logical_grid's cell values --
+        # paint_cell and destroy_area -- lets a cache keyed on it
+        # (DungeonAssembly._border_cells_by_room, WorldRenderer's ledge
+        # cache) know when terrain-derived data has gone stale.
         self.terrain_version = 0
 
-        # Only ever toggled in Creator (see core.editor.ui.ToolPaletteUI --
-        # derived there as floor_tool_active and wall_tool_active, True only
-        # when both the Sol and Mur buttons are active) -- Explorator never
-        # paints, so this is moot on its own dungeons. When False, painting/
-        # erasing touch only the clicked cell, no automatic wall halo -- a
-        # prerequisite for a destructible world, where a wall broken at
-        # runtime must never get "healed" by a later rebuild.
+        # Only ever toggled in Creator (ToolPaletteUI -- True only when both
+        # Sol and Mur are active). When False, painting/erasing touch only
+        # the clicked cell, no automatic wall halo -- a prerequisite for a
+        # destructible world, where a wall broken at runtime must never get "healed" by a rebuild.
         self.autotile_enabled = True
 
-        # Autotile pack names (core.data.ressources.save_autotile_pack) this
-        # room paints FLOOR/WALL cells with instead of the built-in interior
-        # tileset -- None (the default for every room, forever, unless
-        # explicitly set by Creator's right-click theme picker, see
-        # core.editor.ui.AutotileThemePanelUI) means exactly today's
-        # behavior. Plain attributes, not constructor params -- assigned
-        # after the fact the same way autotile_enabled itself is toggled,
-        # not baked into __init__'s signature.
+        # Autotile pack names this room paints FLOOR/WALL cells with instead
+        # of the built-in interior tileset -- None (default) means today's
+        # behavior. Plain attributes, assigned after the fact (Creator's
+        # right-click theme picker), not constructor params.
         self.floor_theme = None
         self.wall_theme = None
 
@@ -102,35 +90,29 @@ class Dungeon:
     # ------------------------------------------------------------------
 
     def resync_sprite_grid(self) -> None:
-        """Recomputes sprite_grid from the current logical_grid without ever
-        touching it (no wall regeneration) -- used after loading, so a save's
-        already-correct `cells` (walls included) is trusted as-is instead of
-        being re-derived from its floor cells every time a room opens.
-        Reads self.theme_grid, the per-cell pack each cell was actually
-        painted with -- see paint_cell's own stamping below. floor_theme/
-        wall_theme are only ever the CURRENT brush from here on, never
-        re-applied to already-painted cells by this method."""
+        """Recomputes sprite_grid from the current logical_grid without
+        touching it (no wall regeneration) -- used after loading, so a
+        save's already-correct `cells` is trusted as-is instead of being
+        re-derived every time a room opens. Reads self.theme_grid, the
+        per-cell pack each cell was actually painted with -- floor_theme/
+        wall_theme are only ever the CURRENT brush, never re-applied to already-painted cells here."""
         self.sprite_grid = resolve_sprite_grid(self.logical_grid, self.theme_grid)
 
     def paint_cell(self, grid_x: int, grid_y: int, erase: bool = False, cell_type: int = FLOOR, wall_gate=None) -> None:
         """Autotile (when enabled) is purely incremental -- only the clicked
-        cell's own immediate neighborhood is ever touched (build_walls_around/
-        unbuild_walls_around), never a full-grid rescan. That full rescan
-        (the old build_walls()) is exactly what made re-enabling autotile
-        after painting a lot of floor with it off wall everything at once on
-        the very next click, instead of just that one cell.
+        cell's own neighborhood is touched (build_walls_around/
+        unbuild_walls_around), never a full-grid rescan. A full rescan is
+        exactly what made re-enabling autotile after painting a lot of floor
+        with it off wall everything at once on the next click.
 
-        cell_type only ever matters in the non-autotile paint branch --
-        autotile ON always paints FLOOR (a WALL only ever appears there as
-        build_walls_around's own side effect). It's what lets Creator's
-        Sol/Mur tools (core.editor.ui.ToolPaletteUI) paint a raw WALL cell
-        directly when only "Mur" is active, something no caller could do
-        before this parameter existed.
+        cell_type only matters in the non-autotile branch -- autotile ON
+        always paints FLOOR (WALL only appears there as build_walls_around's
+        side effect). It's what lets ToolPaletteUI paint a raw WALL cell
+        directly when only "Mur" is active.
 
         wall_gate is forwarded as-is to build_walls_around's own `gate`
-        (autotile ON only) -- lets a caller meter/limit each individual
-        halo cell (e.g. Creator gating on card stock for a partial fill)
-        without this method or build_walls_around needing to know why."""
+        (autotile ON only) -- lets a caller meter/limit each halo cell
+        (e.g. Creator gating on card stock) without this method knowing why."""
         if not (0 <= grid_x < self.width and 0 <= grid_y < self.height):
             return
 
@@ -153,22 +135,17 @@ class Dungeon:
             else:
                 self.logical_grid[grid_y][grid_x] = cell_type
 
-        # Stamps the CURRENT brush (self.floor_theme/wall_theme) onto every
-        # cell that actually changed logical type in this call -- the
-        # clicked cell itself, plus any halo cell build_walls_around/
-        # unbuild_walls_around walled or unwalled as a side effect. A
-        # neighbor that was already FLOOR/WALL before this click and stays
-        # that way is untouched, which is the whole point: repainting one
-        # spot with a different brush never retouches cells painted earlier
-        # with another one. See _snapshot_local/_stamp_theme_changes.
+        # Stamps the CURRENT brush onto every cell that actually changed
+        # logical type in this call -- the clicked cell plus any halo cell
+        # walled/unwalled as a side effect. A neighbor already FLOOR/WALL
+        # before this click is untouched -- repainting one spot with a
+        # different brush never retouches cells painted earlier with another one.
         self._stamp_theme_changes(before, grid_x, grid_y, LOCAL_EDIT_SPRITE_RADIUS)
 
-        # Bounded to the clicked cell's own neighborhood (see
-        # resolve_sprite_grid_region/LOCAL_EDIT_SPRITE_RADIUS) instead of a
-        # full-grid rescan -- this runs on every cell of a click-drag paint
+        # Bounded to the clicked cell's own neighborhood instead of a
+        # full-grid rescan -- runs on every cell of a click-drag paint
         # stroke, potentially dozens of times a second, while a sprite only
-        # ever depends on its own 4 cardinal neighbors regardless of how big
-        # the room is.
+        # ever depends on its own 4 cardinal neighbors.
         resolve_sprite_grid_region(
             self.logical_grid, self.sprite_grid, grid_x, grid_y,
             theme_grid=self.theme_grid,
@@ -179,20 +156,17 @@ class Dungeon:
     def _snapshot_local(self, center_x: int, center_y: int, radius: int):
         """Copy of logical_grid's values in the (clamped) Chebyshev-`radius`
         box around (center_x, center_y), taken right before a terrain edit --
-        paired with _stamp_theme_changes below to know exactly which cells a
-        paint/erase call actually changed, without paint_cell/build_walls_
-        around/unbuild_walls_around needing to report that themselves."""
+        paired with _stamp_theme_changes to know exactly which cells a
+        paint/erase call actually changed."""
         y0, y1 = max(0, center_y - radius), min(self.height, center_y + radius + 1)
         x0, x1 = max(0, center_x - radius), min(self.width, center_x + radius + 1)
         return (y0, x0, [row[x0:x1] for row in self.logical_grid[y0:y1]])
 
     def _stamp_theme_changes(self, before, center_x: int, center_y: int, radius: int) -> None:
-        """Sets theme_grid[y][x] to the current brush (floor_theme/
-        wall_theme) for every cell in `before`'s box whose logical value
-        changed to FLOOR/WALL since the snapshot -- a cell that changed to
-        EMPTY (erased) is left as-is (orphaned, never read while EMPTY, see
-        Dungeon.theme_grid's own docstring); a cell that didn't change at
-        all keeps whatever pack it was already painted with."""
+        """Sets theme_grid[y][x] to the current brush for every cell in
+        `before`'s box whose logical value changed to FLOOR/WALL since the
+        snapshot -- a cell that changed to EMPTY (erased) is left as-is
+        (orphaned, never read while EMPTY); a cell that didn't change keeps whatever pack it was already painted with."""
         y0, x0, before_rows = before
         for row_offset, y in enumerate(range(y0, y0 + len(before_rows))):
             before_row = before_rows[row_offset]
@@ -214,13 +188,11 @@ class Dungeon:
         self.effect_manager.update(dt)
 
     def _play_destroy_sound_at(self, x: int, y: int) -> None:
-        """Plays whichever OBJECT_TYPES card sits at (x, y)'s own "sounds.
-        destroy" (see MechanicsPanelUI's "Son : Casse" row), if any -- must
-        run BEFORE the cell is cleared/prune_invalid drops the object (see
-        both callers below), since get_object_at can't find it afterward.
-        A silent no-op for a bare terrain cell (tile_floor/tile_wall carry
-        no card sound yet, see CLAUDE.md's Card system scope) or an object
-        that never had one assigned."""
+        """Plays whichever OBJECT_TYPES card sits at (x, y)'s own
+        "sounds.destroy" (MechanicsPanelUI's "Son : Casse" row), if any --
+        must run BEFORE the cell is cleared/prune_invalid drops the object
+        (get_object_at can't find it afterward). A silent no-op for a bare
+        terrain cell (no card sound yet) or an object with none assigned."""
         obj = self.object_manager.get_object_at(x, y)
         if obj is None:
             return
@@ -229,16 +201,13 @@ class Dungeon:
 
     def _cell_card_ids(self, x: int, y: int) -> list:
         """Card id(s) destroyed at (x, y) if cleared right now -- the
-        terrain's own tile_floor/tile_wall card (see core.data.cards.
-        BASE_TILE_CARDS), plus whatever OBJECT_TYPES card (if any) sits on
-        that cell too (see ObjectManager.get_object_at) -- both destroyed
-        together by the same explosion/melee swing, so both are worth a
-        card. Must run BEFORE the cell is actually cleared (same ordering
-        _play_destroy_sound_at already requires, see both callers below).
-        Used to spawn the player a card pickup once the corresponding
-        DestructionSpark finishes (see Explorator/ProjectileManager +
-        core.world.entities._spawn_loot_pickups), not at destruction time
-        itself."""
+        terrain's own tile_floor/tile_wall card (core.data.cards.BASE_TILE_CARDS),
+        plus whatever OBJECT_TYPES card (if any) sits on that cell too --
+        both destroyed together by the same explosion/melee swing, so both
+        are worth a card. Must run BEFORE the cell is actually cleared (same
+        ordering _play_destroy_sound_at requires). Used to spawn a card
+        pickup once the corresponding DestructionSpark finishes
+        (_spawn_loot_pickups), not at destruction time itself."""
         card_ids = []
         cell = self.logical_grid[y][x]
         if cell == FLOOR:
@@ -253,18 +222,15 @@ class Dungeon:
     def destroy_area(self, center_x: int, center_y: int, radius_tiles: int):
         """Carves a circular hole into the terrain -- both FLOOR and WALL
         cells within `radius_tiles` of (center_x, center_y) become EMPTY.
-        Unlike paint_cell, this never re-walls the boundary afterwards
+        Unlike paint_cell, never re-walls the boundary afterwards
         (build_walls_around would instantly "heal" the hole shut) -- an
-        explosion (see ProjectileManager) is meant to leave a permanent gap,
-        not perform an edit. prune_invalid() then drops any object (a vase,
-        a torch, a gate...) that no longer sits on a cell its placement rule
-        allows, same as any other terrain edit. Returns (destroyed,
-        card_ids_by_cell): the (x, y) grid cells actually cleared
-        (already-EMPTY cells in the circle are skipped, not double-counted)
-        -- ProjectileManager uses this to spawn one destruction VFX per real
-        cell, not per cell of the theoretical radius -- and {(x, y):
-        [card_id, ...]} for exactly those same cells (see _cell_card_ids),
-        used to credit a card once each cell's own spark arrives."""
+        explosion is meant to leave a permanent gap. prune_invalid() then
+        drops any object that no longer sits on a cell its placement rule
+        allows. Returns (destroyed, card_ids_by_cell): the (x, y) grid cells
+        actually cleared (already-EMPTY cells skipped, not double-counted)
+        -- ProjectileManager uses this to spawn one VFX per real cell -- and
+        {(x, y): [card_id, ...]} for exactly those same cells, used to
+        credit a card once each cell's own spark arrives."""
         destroyed = []
         card_ids_by_cell = {}
         for dy in range(-radius_tiles, radius_tiles + 1):
@@ -290,14 +256,13 @@ class Dungeon:
         return destroyed, card_ids_by_cell
 
     def destroy_wall_cell(self, x: int, y: int):
-        """Single-cell destruction for the player's own melee attack (see
-        Explorator._resolve_player_attacks) -- unlike destroy_area, only
-        ever clears a WALL cell, never FLOOR: a punch shouldn't carve a pit
-        into open ground, only break down an actual wall in front of the
-        player. Returns (success, card_ids) -- whether a wall was actually
-        there to break, and (see _cell_card_ids) whichever card(s) that
-        break is worth, for the caller to credit once its own spark
-        arrives; card_ids is always [] when success is False."""
+        """Single-cell destruction for the player's melee attack -- unlike
+        destroy_area, only ever clears a WALL cell, never FLOOR: a punch
+        shouldn't carve a pit into open ground, only break an actual wall in
+        front of the player. Returns (success, card_ids) -- whether a wall
+        was actually there to break, and whichever card(s) that break is
+        worth, for the caller to credit once its own spark arrives;
+        card_ids is always [] when success is False."""
         if not (0 <= x < self.width and 0 <= y < self.height) or self.logical_grid[y][x] != WALL:
             return False, []
         card_ids = self._cell_card_ids(x, y)
@@ -313,26 +278,22 @@ class Dungeon:
 
     def grow(self, left: int = 0, right: int = 0, top: int = 0, bottom: int = 0) -> bool:
         """Extends the grid in any combination of the 4 directions --
-        `right`/`bottom` just append new EMPTY/-1/None columns/rows (no
-        existing coordinate changes meaning), but `left`/`top` INSERT new
-        ones at the start, which shifts every cell that already existed to
-        a higher index -- so every absolute coordinate stored elsewhere
-        (every placed object's own "x"/"y", and every link's {"x","y"}
-        pointing at the OTHER object -- confirmed by reading ObjectManager.
-        link, not assumed) must shift by the same (left, top) to keep
-        pointing at the same physical cell. object_manager's own
-        _cell_index ({(x,y): obj}) is rebuilt once afterward rather than
-        incrementally, since every key changed at once.
+        `right`/`bottom` just append new EMPTY/-1/None columns/rows, but
+        `left`/`top` INSERT new ones at the start, shifting every existing
+        cell to a higher index -- so every absolute coordinate stored
+        elsewhere (every placed object's own "x"/"y", and every link's
+        {"x","y"} pointing at the OTHER object) must shift by the same
+        (left, top) to keep pointing at the same physical cell.
+        object_manager's own _cell_index is rebuilt once afterward rather
+        than incrementally, since every key changed at once.
 
-        Deliberately does NOT re-run resolve_sprite_grid/build_walls_
-        around for the new area -- the caller (Creator, painting the cell
-        that triggered this) already does that for the cell it's about to
-        paint, right after this returns.
+        Deliberately does NOT re-run resolve_sprite_grid/build_walls_around
+        for the new area -- the caller (Creator, painting the cell that
+        triggered this) already does that right after this returns.
 
-        Returns False (no-op, nothing changed) if the resulting size would
-        exceed MAX_ROOM_DIMENSION in either dimension -- same silent-reject
-        spirit every other out-of-bounds guard in this class already uses,
-        rather than raising."""
+        Returns False (no-op) if the resulting size would exceed
+        MAX_ROOM_DIMENSION in either dimension -- same silent-reject spirit
+        every other out-of-bounds guard in this class uses, rather than raising."""
         if not (left or right or top or bottom):
             return True
         new_width = self.width + left + right
@@ -371,9 +332,7 @@ class Dungeon:
         """(Re)build the live wandering Mob entities for this room's placed
         mob objects -- call once after loading, not on every edit. See
         MobManager.spawn(); Creator never calls this, so its static preview
-        only ever shows a placed mob's frame-0 icon, not a live one.
-        Replaces the old spawn_animals/spawn_enemies/spawn_npcs trio now
-        that a single MobManager covers what all three used to."""
+        only shows a placed mob's frame-0 icon, not a live one."""
         self.mob_manager.spawn()
 
     # ------------------------------------------------------------------
@@ -427,12 +386,11 @@ class Dungeon:
         return True
 
     def is_void_at(self, grid_x, grid_y) -> bool:
-        """True if (grid_x, grid_y) is out of this dungeon's own bounds or an
-        EMPTY logical cell -- e.g. a hole carved by destroy_area, or simply
-        past the room's edge. Shared by every live entity manager's own
-        void-culling (MobManager/PickupManager.update) and by Explorator.
-        _is_void_at's single-room branch, which used to duplicate this
-        exact check locally."""
+        """True if (grid_x, grid_y) is out of this dungeon's bounds or an
+        EMPTY logical cell -- e.g. a destroy_area hole, or past the room's
+        edge. Shared by every live entity manager's own void-culling
+        (MobManager/PickupManager.update) and Explorator._is_void_at's
+        single-room branch, which used to duplicate this exact check."""
         if not (0 <= grid_x < self.width and 0 <= grid_y < self.height):
             return True
         return self.logical_grid[grid_y][grid_x] == EMPTY

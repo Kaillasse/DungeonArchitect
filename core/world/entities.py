@@ -17,12 +17,9 @@ from core.world.object_manager import (
 
 def _draw_cached_sprite(screen, camera, cache, key_prefix, sprite, position, frame_w, frame_h, flip=False, anchor_feet=False):
     """Scale+cache `sprite` at the camera's current zoom and blit it in world
-    space. `key_prefix` plus a zoom bucket forms the cache key -- shared by
-    every live entity/VFX's draw() (Player, Mob, Pickup/ItemPickup,
-    ThrownDynamite, Explosion), which otherwise each re-derive this
-    identically. `anchor_feet=True` anchors at (bottom-center) == position,
-    matching a live entity's feet; the default (center) matches ground
-    VFX/pickups."""
+    space. `key_prefix` + a zoom bucket forms the cache key -- shared by every
+    live entity/VFX's draw(). `anchor_feet=True` anchors at (bottom-center) ==
+    position, matching a live entity's feet; default (center) matches ground VFX/pickups."""
     render_scale = camera.zoom * WORLD_SCALE
     zoom_key = max(1, int(round(render_scale * 100)))
     cache_key = key_prefix + (zoom_key,)
@@ -71,15 +68,13 @@ class Player:
 
     MAX_HEALTH = 2
 
-    # 0-based frames (3, 4, 5) == the to-do's 1-based "frames 4, 5, 6" of the
-    # 6-frame attack.png -- the window during which a swing actually deals
-    # damage (see is_attack_active/_hit_delivered_this_swing).
+    # 0-based frames (3, 4, 5) == the 6-frame attack.png's frames 4-6 -- the
+    # window during which a swing actually deals damage.
     ACTIVE_ATTACK_FRAMES = (3, 4, 5)
 
-    # Facing vector per Player.direction (8 values Explorator can set,
-    # not just the 5 sprite rows DIRECTIONS covers -- get_sprite_direction
-    # mirrors left/right for rendering, but the attack hitbox needs the real
-    # facing, not the mirrored sprite row).
+    # Facing vector per Player.direction (8 values Explorator can set, not
+    # just the 5 sprite rows DIRECTIONS covers -- get_sprite_direction mirrors
+    # left/right for rendering, but the attack hitbox needs real facing).
     DIRECTION_VECTORS = {
         "front": (0, 1),
         "front_right": (0.7071, 0.7071),
@@ -119,7 +114,7 @@ class Player:
                 continue
             sheet = pygame.image.load(path).convert_alpha()
             self.sprites[animation] = self.cut_sheet(sheet)
-            
+
 
 
     def cut_sheet(self, sheet):
@@ -152,7 +147,7 @@ class Player:
                 )
 
         return frames
-    
+
     def get_sprite_direction(self):
 
         flip = False
@@ -183,8 +178,8 @@ class Player:
 
     def get_attack_hitbox(self):
         """The melee reach checked against enemies while is_attack_active():
-        the player's own hitbox shifted one tile in the direction they're
-        facing -- a simple reach zone, not a directional arc."""
+        the player's own hitbox shifted one tile toward their facing -- a
+        simple reach zone, not a directional arc."""
         dx, dy = self.DIRECTION_VECTORS.get(self.direction, (0, 1))
         reach = TILE_SIZE * WORLD_SCALE
         hitbox = self.get_hitbox()
@@ -193,10 +188,9 @@ class Player:
         return hitbox
 
     def is_attack_active(self):
-        """True on the frames of the current attack swing that actually deal
-        damage (see ACTIVE_ATTACK_FRAMES), and only once per swing --
-        _hit_delivered_this_swing (reset in play_action) stops a multi-frame
-        active window from registering more than one hit."""
+        """True on the frames of the current swing that deal damage
+        (ACTIVE_ATTACK_FRAMES), once per swing -- _hit_delivered_this_swing
+        (reset in play_action) stops a multi-frame window from double-hitting."""
         return (
             self.action == "attack"
             and self.frame in self.ACTIVE_ATTACK_FRAMES
@@ -208,17 +202,14 @@ class Player:
         print(f"[combat] Player took {amount} damage (health: {self.health}/{self.MAX_HEALTH})")
 
     def heal(self, amount):
-        """Applies a "heal" card effect (see ITEM_DEFINITIONS' "effects" list
-        / Explorator._use_interact_item) -- clamped at MAX_HEALTH, same
-        clamp direction as take_damage's own floor at 0."""
+        """Applies a "heal" card effect (ITEM_DEFINITIONS' "effects" list /
+        Explorator._use_interact_item) -- clamped at MAX_HEALTH."""
         self.health = min(self.MAX_HEALTH, self.health + amount)
 
     def play_action(self, name):
         """Trigger a one-shot action animation (attack/interact/jump) --
-        ignored while another action is already mid-playback, and while a
-        sheet exists for every direction on idle/walk/run, jump.png only
-        has 4 of the 5 DIRECTIONS rows (see _frames_for's fallback), which
-        this doesn't need to know about."""
+        ignored while another action is already playing. jump.png only has 4
+        of the 5 DIRECTIONS rows (see _frames_for's fallback)."""
         if self.action is not None or name not in self.sprites:
             return
         self.action = name
@@ -229,11 +220,9 @@ class Player:
         self._attack_sound_played = False
 
     def play_fall(self):
-        """One-shot fall animation played on a successful landing after
-        dropping through void (see Explorator._attempt_fall) -- reuses
-        jump.png (the last 3 frames read as a distinct "falling" pose) and
-        the same ONE_SHOT_ANIMATIONS machinery as play_action, just starting
-        partway through the sheet instead of at frame 0."""
+        """One-shot fall animation on a successful landing after dropping
+        through void (Explorator._attempt_fall) -- reuses jump.png's last 3
+        frames as a "falling" pose, starting partway through instead of frame 0."""
         if "jump" not in self.sprites:
             return
         self.action = "jump"
@@ -246,16 +235,10 @@ class Player:
 
     def _frames_for(self, animation, direction):
         """Frame list for (animation, direction), falling back to the
-        sheet's LAST row when that exact direction isn't there -- not every
-        animation sheet has a row for all 5 DIRECTIONS (jump.png is missing
-        "back", cut_sheet only populates up through "back_right"). Falling
-        back to "front" used to make jumping while facing "back" (moving
-        y-negative) render identically to jumping while facing "front"
-        (moving y-positive) -- the same silent-substitution bug would hit
-        any other missing-row animation, not just jump. jump.png is
-        currently the only sheet short a row, and only ever misses "back"
-        (the last of the 5 DIRECTIONS), so falling back to the last row
-        that IS there is the correct fix rather than a coincidence."""
+        sheet's LAST row when that direction isn't there -- not every sheet
+        has all 5 DIRECTIONS rows (jump.png is missing "back"). Falling back
+        to the last row rather than "front" avoids a silent facing-swap bug;
+        jump.png is currently the only sheet short a row, always "back"."""
         directions = self.sprites[animation]
         if direction in directions:
             return directions[direction]
@@ -285,9 +268,7 @@ class Player:
                 and self.frame in self.ACTIVE_ATTACK_FRAMES
                 and not self._attack_sound_played
             ):
-                # Right as the swing's actual hit-frame window begins, not
-                # at the start of the animation -- matches when
-                # is_attack_active()/the real hitbox actually becomes live.
+                # Right as the swing's hit-frame window begins, matching is_attack_active().
                 SoundManager().play("player_attack")
                 self._attack_sound_played = True
 
@@ -304,25 +285,21 @@ class Player:
 
 
 class _WanderingEntity:
-    """Shared plumbing for Mob (see below): a live entity that wanders a room
-    on a random idle/move timer with per-axis collision-tested movement, and
-    draws a cached, zoom-scaled sprite anchored to its feet position. Mob
-    owns its own state machine (which of the optional combat/aggro/rest-chain
-    capabilities are active depends entirely on its OBJECT_TYPES data, see
-    Mob's own docstring) and sets, per-instance rather than as class
-    constants (since the same class now covers what used to be three with
-    different values each): HITBOX_WIDTH/HEIGHT, FRAME_SIZE, IDLE_DURATION/
-    MOVE_DURATION, ANIMATION_SPEED, LOOPING_STATES, MOVE_STATE_NAME (the
-    wandering "moving" state's key into self.frames -- "move" for an
-    animal-style/entity-pack mob, "movement" for an enemy-style one), and
-    FACES_RIGHT_BY_DEFAULT (whether the sprite sheet's unflipped pose already
-    faces right -- flips the sign of the direction.x check below)."""
+    """Shared plumbing for Mob (below): a live entity that wanders a room on
+    a random idle/move timer with per-axis collision-tested movement, and
+    draws a cached zoom-scaled sprite anchored to its feet. Mob owns its own
+    state machine (which optional combat/aggro/rest capabilities are active
+    depends entirely on its OBJECT_TYPES data) and sets per-instance (not
+    class constants, since one class now covers what used to be three):
+    HITBOX_WIDTH/HEIGHT, FRAME_SIZE, IDLE_DURATION/MOVE_DURATION,
+    ANIMATION_SPEED, LOOPING_STATES, MOVE_STATE_NAME ("move" for
+    animal/entity-pack, "movement" for enemy-style), and
+    FACES_RIGHT_BY_DEFAULT (whether the unflipped sheet already faces right)."""
 
     def _hitbox_at(self, x, y):
         """Hitbox for a given (feet-anchored) position, using the exact same
-        rounding get_hitbox() will later re-derive from self.position once
-        that candidate is accepted -- see _move_toward's comment for why
-        this single shared formula matters."""
+        rounding get_hitbox() re-derives once a candidate is accepted -- see
+        _move_toward for why sharing this one formula matters."""
         return pygame.Rect(
             int(round(x - self.HITBOX_WIDTH / 2)),
             int(round(y - self.HITBOX_HEIGHT)),
@@ -350,10 +327,7 @@ class _WanderingEntity:
     def _wander_tick(self, dt, is_walkable, speed):
         """Ambient idle/move(ment) alternation on a random timer: shared by
         Mob.update's plain-wander path and Mob._update_wander (aggro_capable).
-        Doesn't call _advance_animation -- callers do that themselves, since
-        an aggro_capable mob needs to regardless of which state (wander/
-        chase/attack) it lands in this
-        frame."""
+        Doesn't call _advance_animation -- callers do that themselves."""
         self.state_timer -= dt
         if self.state_timer <= 0:
             self._enter_wander_state(self.MOVE_STATE_NAME if self.state == "idle" else "idle")
@@ -362,15 +336,13 @@ class _WanderingEntity:
             self._move_toward(dt, is_walkable, self.direction, speed)
 
     def _move_toward(self, dt, is_walkable, direction, speed):
-        """Per-axis collision-tested movement toward `direction` (any
-        length) at `speed` px/s. Candidate positions are built straight from
-        the prospective float position via _hitbox_at, rather than mutating
-        a live pygame.Rect in place (hitbox.x += movement.x): Rect coerces a
-        float assignment by rounding, while get_hitbox() truncates from the
-        live float position -- two different roundings of the same quantity
-        could disagree by a pixel, letting a validated move settle into a
-        position whose *actual* hitbox pokes into a wall. Testing the very
-        same formula we'll settle on eliminates that."""
+        """Per-axis collision-tested movement toward `direction` (any length)
+        at `speed` px/s. Candidate positions are built from the prospective
+        float position via _hitbox_at rather than mutating a live Rect in
+        place: Rect rounds a float assignment while get_hitbox() truncates
+        from the live float -- disagreeing roundings could let a validated
+        move settle where its *actual* hitbox pokes into a wall. Using the
+        same formula for both eliminates that."""
         if direction.length_squared() == 0:
             return
         direction = direction.normalize()
@@ -386,26 +358,19 @@ class _WanderingEntity:
             self.position.y = candidate_y
 
     def _current_frames(self):
-        """Hook: the current animation's frame list. Default is exactly
-        `self.frames[self.state]` -- a flat-frame mob (animal/enemy-style)
-        never overrides this. Mob overrides it for an entity-pack-backed
-        mob instead, since those frames are nested by (action, direction)
-        rather than a flat state key -- see Mob._current_frames."""
+        """Hook: current animation's frame list. Default is `self.frames[self.state]`
+        -- Mob overrides for an entity-pack mob, whose frames are nested by (action, direction)."""
         return self.frames[self.state]
 
     def _advance_animation(self, dt):
         """Looping states wrap forever; a non-looping state advances toward
-        its last frame and then calls a hook once it gets there instead of
-        wrapping -- a wander-only mob has no non-looping states so these
-        hooks are never reached for it, a combat-capable one overrides them
-        for its attack/damaged/death states (see Mob)."""
+        its last frame then calls a hook instead of wrapping -- a
+        wander-only mob never reaches these hooks, a combat-capable one
+        overrides them for attack/damaged/death (see Mob)."""
         frames = self._current_frames()
         if not frames:
-            # Only reachable for an entity-pack-backed mob whose pack has
-            # nothing tagged at all for the current (action, direction) or
-            # any fallback (see Mob._current_frames) -- a flat-frame mob's
-            # frame dict is always fully populated at import time and never
-            # hits this. Nothing to animate yet, not a crash.
+            # Only reachable for an entity-pack mob with nothing tagged for
+            # the current (action, direction) or any fallback. Nothing to animate yet.
             return
         self.animation_timer += dt
         if self.animation_timer < self.ANIMATION_SPEED:
@@ -421,16 +386,12 @@ class _WanderingEntity:
             self._on_final_frame_reached()
 
     def _on_loop_frame_advanced(self):
-        """Hook: called after a LOOPING_STATES frame wraps forward. No-op by
-        default (a wander-only mob doesn't need it); a combat-capable Mob
-        overrides it to re-arm its attack window at the start of each
-        swing."""
+        """Hook: after a LOOPING_STATES frame wraps forward. No-op by
+        default; a combat-capable Mob overrides it to re-arm its attack window."""
 
     def _on_final_frame_reached(self):
-        """Hook: called once a non-looping animation has reached its last
-        frame instead of advancing further. No-op by default (holds on the
-        last frame forever); a combat-capable Mob overrides it for
-        "damaged" -> "idle"."""
+        """Hook: once a non-looping animation reaches its last frame. No-op
+        by default (holds forever); Mob overrides it for damaged -> idle."""
 
     def draw(self, screen, camera):
         frames = self._current_frames()
@@ -447,12 +408,9 @@ class _WanderingEntity:
 
 def _bucket_direction(vector):
     """The nearest of Player.DIRECTION_VECTORS' 8 unit vectors to `vector`
-    (already a unit vector itself -- see _WanderingEntity._enter_wander_state),
-    by dot product -- the entity-pack equivalent of Player.get_sprite_
-    direction, but for a real (non-mirrored) 8-way lookup: an entity pack's
-    regions already have all 8 real directions hand-drawn and tagged (see
-    object_manager.NPC_DIRECTIONS/build_entity_pack_lookup), so there's no
-    need for Player's own 5-row-plus-horizontal-flip storage trick here."""
+    (already unit-length), by dot product -- the entity-pack equivalent of
+    Player.get_sprite_direction, but a real (non-mirrored) 8-way lookup since
+    an entity pack has all 8 directions hand-drawn and tagged."""
     best_direction = None
     best_dot = -2.0  # lower than any possible dot product of two unit vectors
     for direction, (dx, dy) in Player.DIRECTION_VECTORS.items():
@@ -467,14 +425,10 @@ PlayerRef = namedtuple("PlayerRef", ("player", "hitbox", "session"))
 
 
 def _entity_rect_is_free(dungeon, rect, entities, moving_entity, player_refs):
-    """Shared by MobManager._is_free: walls/closed gates first (cheapest,
-    most likely to reject), then every other live Mob in `entities` (a dead
-    one, `other.alive is False`, doesn't block -- every Mob always carries
-    `alive`, so this reads it directly rather than the getattr-with-default
-    the old Animal/Enemy/Npc split needed, back when Npc had no such
-    attribute at all), then every player actually standing on this room's
-    floor right now (`player_refs` is empty otherwise -- see
-    Dungeon.update)."""
+    """Shared by MobManager._is_free: walls/closed gates first (cheapest),
+    then every other live Mob in `entities` (dead ones don't block -- every
+    Mob always carries `alive`), then every player standing on this room's
+    floor right now (`player_refs` empty otherwise, see Dungeon.update)."""
     if not dungeon.is_rect_walkable(rect):
         return False
 
@@ -490,25 +444,17 @@ def _entity_rect_is_free(dungeon, rect, entities, moving_entity, player_refs):
 
 
 def _is_over_void(dungeon, entity):
-    """True if `entity`'s feet position now sits over an EMPTY cell in
-    `dungeon` -- destroyed terrain (see Dungeon.destroy_area) or simply
-    having wandered off the room's edge. Shared by MobManager/
-    PickupManager's own per-frame void-culling (see each's update())."""
+    """True if `entity`'s feet now sit over an EMPTY cell (destroyed terrain
+    or wandered off the room's edge). Shared by MobManager/PickupManager's own void-culling."""
     return dungeon.is_void_at(*dungeon.world_to_grid(entity.position.x, entity.position.y))
 
 
 class _EntityManager:
-    """Shared shape for MobManager (and, historically, NpcManager before it
-    -- kept generic rather than folded directly into MobManager in case a
-    second live-entity kind is ever added again): owns a list of live,
-    per-frame entities spawned from a dungeon's currently-placed objects of
-    ENTITY_TYPES, testing free space and drawing identically. Only update()
-    -- each entity's own per-frame behavior signature -- differs, so that's
-    all subclasses define. Each subclass declares its own list as a plain,
-    statically-visible attribute (self.mobs -- callers across
-    explorator.py/assembly.py read it directly) and exposes it to the base
-    class through the `_entities` property, rather than this base class
-    assembling the attribute itself via getattr/setattr on a name string."""
+    """Shared shape for MobManager: owns a list of live, per-frame entities
+    spawned from a dungeon's placed objects of ENTITY_TYPES, testing free
+    space and drawing identically. Only update() differs, so that's all
+    subclasses define. Each subclass exposes its own list (e.g. self.mobs,
+    read directly by explorator.py/assembly.py) through the `_entities` property."""
 
     ENTITY_CLASS = None
     ENTITY_TYPES = ()
@@ -526,21 +472,14 @@ class _EntityManager:
 
     def _entity_types(self):
         """Hook: which OBJECT_TYPES ids this manager spawns. Default is
-        exactly ENTITY_TYPES -- overridden by MobManager to call
-        object_manager.mob_types() fresh instead, since a mob type is
-        created entirely in-session via the sprite editor's PNJ-style
-        registration -- a frozen tuple would never see one registered
-        after this module's own import time (see mob_types' own docstring
-        for why it's a function and not a tuple, for exactly this
-        reason)."""
+        ENTITY_TYPES -- MobManager overrides to call mob_types() fresh each
+        time instead, since a mob type can be registered mid-session via the sprite editor."""
         return self.ENTITY_TYPES
 
     def spawn(self):
         """(Re)build the live entity list from the dungeon's currently-placed
-        objects of ENTITY_TYPES. Only called by Explorator when it loads a
-        room -- never during editing, which would reset wandering/chase state
-        on every paint stroke, and never by Creator, whose static preview
-        only ever shows placed objects' frame-0 icon."""
+        objects of ENTITY_TYPES. Only called by Explorator on room load --
+        never during editing (would reset wander/chase state every paint stroke)."""
         entity_types = self._entity_types()
         self._entities = [
             self.ENTITY_CLASS(obj["type"], obj["x"], obj["y"], self.dungeon)
@@ -558,74 +497,52 @@ class _EntityManager:
 
 class Mob(_WanderingEntity):
     """The single live-entity class for every wandering, placeable creature
-    -- replaces the old Animal/Enemy/Npc split. Which capabilities a given
-    Mob actually has is driven entirely by its OBJECT_TYPES data, not by a
-    Python subclass (confirmed with the user -- "toutes les entites ont
-    les memes proprietes, elles ne sont differenciees que par leur
-    complexite"):
+    -- replaces the old Animal/Enemy/Npc split. Which capabilities a Mob has
+    is driven entirely by its OBJECT_TYPES data, not a Python subclass:
 
     - Wander (idle/move alternation): always present, via _WanderingEntity.
     - Combat (health/alive/take_damage/damaged+death states/despawn-hold):
       present iff "health" in stats (self.combat_capable). Absent -> alive
-      stays True forever, take_damage is a no-op -- exactly today's PNJ
-      behavior (solid, unkillable), now reached by DATA absence rather than
-      Npc simply having no such attribute at all.
+      stays True forever, take_damage no-ops (today's unkillable-PNJ behavior,
+      now via data absence).
     - Aggro/chase/attack: present iff "aggro_range" AND "attack_range" are
-      both in stats (self.aggro_capable) -- only meaningful alongside
-      combat, though nothing enforces that pairing. A combat-capable mob
-      with no aggro/attack stats can be killed but never fights back
-      (today's animal profile, generalized -- see chicken/cow/pig/sheep's
-      own "stats": {"health": 2} in object_manager.py).
-    - Rest/posture chain (sit/lie): present iff wander_actions has a
-      "sitting" role actually tagged in the entity pack (see _has_action)
-      -- only reachable for an entity-pack-backed mob (self._entity_pack
-      is not None); the flat-frame aggro/attack path never interleaves
-      with this (a known, disclosed scope limit -- see class docstring's
-      own note below on why the two paths stay separate this pass).
-    - Interaction/dialogue ("is this a PNJ"): self.interactable, read once
-      from OBJECT_TYPES[type_id].get("interactable") -- purely
-      informational here (a future dialogue system is what would branch on
-      it), matches the card's own Forge-edited flag exactly.
-    - Loot at death: object_manager.effective_loot_cards/
-      _spawn_loot_pickups, already fully data-driven from a prior pass --
-      unaffected by this one beyond now firing for ANY combat-capable mob
-      that dies, not just a former "enemy"/"animal".
+      both in stats (self.aggro_capable). A combat-capable mob with neither
+      can be killed but never fights back (chicken/cow/pig/sheep's profile, generalized).
+    - Rest/posture chain (sit/lie): present iff wander_actions has a "sitting"
+      role actually tagged in the entity pack (_has_action) -- only reachable
+      for an entity-pack mob; never interleaves with the aggro/attack path (see below).
+    - Interaction/dialogue: self.interactable, from OBJECT_TYPES[type_id]["interactable"]
+      -- purely informational here.
+    - Loot at death: object_manager.effective_loot_cards/_spawn_loot_pickups,
+      now firing for ANY combat-capable mob that dies.
 
-    Frame source (decided once, at construction, from data shape -- see
-    __init__): "entity_pack" present -> action x direction lookup
-    (load_npc_frames, formerly Npc-only); else mob_type in ENEMY_FOLDERS ->
-    5-state sheet (load_enemy_frames, formerly Enemy-only); else -> flat
-    2-state idle/move sheet (load_animal_frames, formerly Animal-only).
-    self._current_frames() falls back to "idle" whenever the logical state
-    (e.g. "attack"/"damaged"/"death") has no frames of its own in a
-    flat-frame mob's dict -- a mob given combat stats without a matching
-    ENEMY_FOLDERS entry (e.g. a chicken made damageable/aggressive purely
-    via the Forge) still fights/dies mechanically correctly, it just
-    visually keeps playing idle/move throughout until real art exists for
-    it.
+    Frame source (decided once at construction from data shape): "entity_pack"
+    present -> action x direction lookup (load_npc_frames); else mob_type in
+    ENEMY_FOLDERS -> 5-state sheet (load_enemy_frames); else -> flat 2-state
+    idle/move sheet (load_animal_frames). _current_frames() falls back to
+    "idle" whenever the logical state (attack/damaged/death) has no frames of
+    its own in a flat-frame mob's dict -- a mob given combat stats without a
+    matching ENEMY_FOLDERS entry still fights/dies mechanically correctly,
+    just visually stays on idle/move until real art exists.
 
-    Known scope limit: an entity-pack-backed mob (interactable PNJ-style)
-    never enters the aggro/attack/rest-of-combat machinery even if given
-    combat stats -- its wander/rest chain takes full priority, matching
-    old Npc's total lack of combat exactly. Making a dialogue-capable mob
-    ALSO fight would need the combat state machine itself to read frames
-    through _action_frames_for instead of a flat self.frames[state] lookup
-    -- a deeper unification left for a future pass, not attempted here."""
+    Known scope limit: an entity-pack mob never enters the aggro/attack
+    machinery even with combat stats -- wander/rest takes full priority.
+    Unifying the two would need the combat state machine to read frames
+    through _action_frames_for instead of a flat self.frames[state] lookup --
+    left for a future pass."""
 
     FRAME_SIZE = 32
     REST_DURATION = (2.0, 4.5)  # how long "sit"/"lie" hold before the next decision (entity-pack mobs only)
     LIE_CHANCE = 0.35  # probability "sit" deepens into "lie" rather than heading back to "move"
     RUN_CHANCE = 0.4  # probability "move" picks "run" over "move" when both are tagged (entity-pack mobs only)
     RUN_SPEED = 55  # only used if "run" is tagged (see _enter_move)
-    # Single-pass states, advanced by _advance_transition (never by the
-    # state_timer -- see update()): "to_sit"/"to_move" play the "sitting"
-    # action (forward / reversed), "to_lie"/"to_sit_from_lie" play "laying".
+    # Single-pass states, advanced by _advance_transition (never by
+    # state_timer): "to_sit"/"to_move" play "sitting" (forward/reversed),
+    # "to_lie"/"to_sit_from_lie" play "laying".
     _TRANSITION_STATES = ("to_sit", "to_lie", "to_sit_from_lie", "to_move")
 
-    # Seconds to hold on the death animation's own last frame (see
-    # _on_final_frame_reached/update()) before the corpse is worth
-    # despawning -- see MobManager.update, which is what actually removes
-    # it and spawns the reward spark once despawn_ready flips True.
+    # Seconds to hold the death animation's last frame before the corpse is
+    # despawn-worthy -- MobManager.update removes it and spawns the reward spark.
     DEATH_DESPAWN_DELAY = 3.0
 
     def __init__(self, mob_type, grid_x, grid_y, dungeon):
@@ -646,9 +563,8 @@ class Mob(_WanderingEntity):
             self._entity_pack = entity_pack
             self.frames = load_npc_frames(entity_pack)
             self.wander_actions = config.get("wander_actions", {})
-            # Direction shown until the first move -- arbitrary but stable
-            # (only _enter_move recomputes it -- a mob keeps facing its
-            # last movement direction through however deep a rest goes).
+            # Direction shown until the first move -- a mob keeps facing its
+            # last movement direction through however deep a rest goes.
             self.current_direction = NPC_DIRECTIONS[0]
             self._move_action = "move"  # "move" or "run", chosen fresh each _enter_move
             self._transition_role = None  # "sitting" or "laying" during a _TRANSITION_STATES state
@@ -662,11 +578,8 @@ class Mob(_WanderingEntity):
             self.MOVE_STATE_NAME = "move"
         else:
             # Flat-frame path (formerly Animal/Enemy) -- state names must
-            # match whichever loader's own frame-dict keys, so they're
-            # picked per-source rather than one shared naming scheme (a
-            # plain animal's frames dict only ever has "idle"/"move" keys,
-            # never "movement" -- using the wrong name here would silently
-            # never play its move animation at all).
+            # match whichever loader's own frame-dict keys (a plain animal's
+            # frames only ever has "idle"/"move", never "movement").
             self._entity_pack = None
             self.wander_actions = {}
             uses_enemy_states = mob_type in ENEMY_FOLDERS
@@ -686,9 +599,8 @@ class Mob(_WanderingEntity):
             self._move_speed = self.stats.get("move_speed", 40)
 
         # A combat-capable mob gets the old Enemy hitbox (its attack-reach
-        # math, get_attack_hitbox, was tuned against these dimensions);
-        # everything else keeps the old Animal/Npc hitbox (they happened
-        # to already agree on 14x8).
+        # math is tuned against these dimensions); everything else keeps the
+        # old Animal/Npc hitbox (both already agreed on 14x8).
         self.HITBOX_WIDTH, self.HITBOX_HEIGHT = (16, 10) if self.combat_capable else (14, 8)
 
         self.state = "idle"
@@ -702,15 +614,12 @@ class Mob(_WanderingEntity):
         self.alive = True  # every Mob always carries this -- see _entity_rect_is_free's own comment
         self._hit_delivered_this_swing = False
         self._attack_sound_played = False
-        # Death-despawn bookkeeping -- see DEATH_DESPAWN_DELAY/update()/
-        # MobManager.update. _death_animation_done flips True the moment
-        # the death animation's own last frame is FIRST reached (not every
-        # frame it holds there after, see _on_final_frame_reached); only
-        # then does death_hold_timer start counting toward despawn_ready.
-        # reward_spawned guards MobManager against spawning the reward
-        # spark more than once for the same corpse. Both stay permanently
-        # unused/False for a non-combat-capable mob, same effect as old
-        # Npc never having them at all.
+        # Death-despawn bookkeeping (see DEATH_DESPAWN_DELAY/update()/
+        # MobManager.update). _death_animation_done flips True the moment the
+        # death anim's last frame is FIRST reached; only then does
+        # death_hold_timer start counting toward despawn_ready.
+        # reward_spawned guards against spawning the reward spark twice.
+        # Both stay permanently unused/False for a non-combat-capable mob.
         self._death_animation_done = False
         self.death_hold_timer = 0.0
         self.despawn_ready = False
@@ -722,21 +631,17 @@ class Mob(_WanderingEntity):
 
     def _has_action(self, role):
         """True if wander_actions[role] points at an action ACTUALLY tagged
-        in this pack -- a wander_actions entry can name an action never
-        actually tagged (mob registered, then pack edited since), so this
-        isn't just `role in wander_actions`. Entity-pack mobs only."""
+        in this pack (a role can name an action never tagged, e.g. mob
+        registered then pack edited since). Entity-pack mobs only."""
         action = self.wander_actions.get(role)
         return bool(action) and action in self.frames
 
     def _action_frames_for(self, action_name):
-        """Frames for `action_name` (a raw action name, not a role) at
-        self.current_direction, with a cascading fallback instead of
-        crashing if the exact direction isn't tagged yet -- a mob only
-        needs ONE tile tagged to register; filling all 8 directions of
-        every action is routinely still in progress. Tries: the exact
-        direction; any other direction of the SAME action; a direction of
-        ANY action in the pack. Returns [] only if nothing at all is
-        tagged (see the empty-list guards in update()/draw())."""
+        """Frames for `action_name` at self.current_direction, cascading
+        instead of crashing if the exact direction isn't tagged yet (a mob
+        only needs ONE tile tagged to register). Tries: exact direction; any
+        other direction of the same action; a direction of ANY action in the
+        pack. [] only if nothing at all is tagged."""
         action_frames = self.frames.get(action_name, {}) if action_name else {}
         if self.current_direction in action_frames:
             return action_frames[self.current_direction]
@@ -764,11 +669,9 @@ class Mob(_WanderingEntity):
         return self.wander_actions.get("idle")
 
     def _current_frames(self):
-        """Overrides _WanderingEntity's default flat `self.frames[state]`
-        lookup for an entity-pack mob (nested by action x direction
-        instead); for a flat-frame mob, falls back to "idle" whenever the
-        current state has no frames of its own (see class docstring on
-        combat states with no dedicated art)."""
+        """Overrides _WanderingEntity's flat lookup for an entity-pack mob
+        (nested by action x direction); for a flat-frame mob, falls back to
+        "idle" whenever the current state has no frames of its own."""
         if self._entity_pack is not None:
             return self._action_frames_for(self._current_action_name())
         frames = self.frames.get(self.state)
@@ -808,9 +711,7 @@ class Mob(_WanderingEntity):
         self.state_timer = random.uniform(*self.MOVE_DURATION)
 
     def _enter_idle(self):
-        """Fallback simple rest -- used while "sitting" isn't tagged at all
-        for this mob, so a minimal one (just move + idle, as before this
-        feature existed) keeps behaving exactly as before."""
+        """Fallback simple rest -- used while "sitting" isn't tagged at all, matching pre-rest-chain behavior."""
         self.direction = pygame.Vector2()
         self.state = "idle"
         self.frame = 0
@@ -834,10 +735,9 @@ class Mob(_WanderingEntity):
         self.state_timer = random.uniform(*self.REST_DURATION)
 
     def _enter_transition(self, state, role, reverse):
-        """A single-pass, reversible state: forward, starts at frame 0 and
-        advances to the last; reversed, starts at the last frame and counts
-        down to 0. `role` names which wander_actions entry ("sitting" or
-        "laying") supplies the frames."""
+        """A single-pass, reversible state: forward starts at frame 0 and
+        advances to the last; reversed starts at the last and counts down.
+        `role` names which wander_actions entry supplies the frames."""
         self.direction = pygame.Vector2()
         self.state = state
         self._transition_role = role
@@ -848,11 +748,9 @@ class Mob(_WanderingEntity):
 
     def _advance_state(self):
         """Called when state_timer hits 0 -- picks the next link in
-        move <-> [sitting] <-> sit <-> [laying] <-> lie. If "sitting" isn't
-        tagged at all, falls back to the original simple idle <-> move
-        alternation. Never called during a _TRANSITION_STATES state --
-        those end via _advance_transition reaching their last frame
-        instead, not this timer (see update())."""
+        move <-> [sitting] <-> sit <-> [laying] <-> lie, or falls back to
+        simple idle <-> move if "sitting" isn't tagged. Never called during a
+        _TRANSITION_STATES state (those end via _advance_transition instead)."""
         if self.state == "move":
             if self._has_action("sitting"):
                 self._enter_transition("to_sit", "sitting", reverse=False)
@@ -869,9 +767,8 @@ class Mob(_WanderingEntity):
             self._enter_transition("to_sit_from_lie", "laying", reverse=True)
 
     def _advance_transition(self, dt):
-        """Advances the active _TRANSITION_STATES state frame by frame, in
-        the right direction, and hands off to the real next state once it
-        reaches the end."""
+        """Advances the active _TRANSITION_STATES state frame by frame in the
+        right direction, handing off to the real next state once it reaches the end."""
         frames = self._action_frames(self._transition_role)
         self.animation_timer += dt
         if self.animation_timer < self.ANIMATION_SPEED or not frames:
@@ -896,9 +793,7 @@ class Mob(_WanderingEntity):
             self._enter_move()
 
     def _advance_loop_animation(self, dt):
-        """Loops the animation for "idle"/"move" (the only two states that
-        truly loop) -- "sit"/"lie" stay frozen on whatever frame their
-        entry transition left them at, no loop of their own."""
+        """Loops "idle"/"move" (the only two truly-looping states) -- "sit"/"lie" stay frozen where their entry transition left them."""
         if self.state not in ("idle", "move"):
             return
         frames = self._current_frames()
@@ -914,22 +809,17 @@ class Mob(_WanderingEntity):
 
     def get_attack_hitbox(self):
         """Melee reach checked against the player during the active-frame
-        window (see update()) -- this mob's own hitbox inflated by one
-        tile in every direction, rather than translated toward the player
-        like Player.get_attack_hitbox (a fixed reach-ahead swing, which
-        fits a sprite with a discrete 8-way facing). A combat mob only
-        ever flips left/right, with no such discrete facing to translate
-        along, and a translated box would overshoot past an already-
-        adjacent player entirely -- inflating in place instead always
-        covers the player whether they're standing right against the mob
-        or up to a tile away."""
+        window -- this mob's own hitbox inflated by one tile in every
+        direction, rather than translated toward the player like
+        Player.get_attack_hitbox: a combat mob only flips left/right with no
+        discrete facing to translate along, and a translated box would
+        overshoot an already-adjacent player."""
         reach = self.tile_size
         return self.get_hitbox().inflate(reach * 2, reach * 2)
 
     def take_damage(self, amount):
         """A no-op for a non-combat-capable mob (no "health" in stats) --
-        exactly how a PNJ/plain decorative mob stays unkillable, now via
-        data instead of Npc simply lacking this method at all."""
+        how a PNJ/decorative mob stays unkillable, now via data."""
         if not self.combat_capable or not self.alive:
             return
         self.health -= amount
@@ -956,9 +846,8 @@ class Mob(_WanderingEntity):
             self._attack_sound_played = False
 
     def _update_wander(self, dt, is_walkable):
-        """Ambient background behavior for an aggro_capable mob out of
-        range -- alternates idle/movement on a random timer, random
-        direction each time movement starts."""
+        """Ambient background behavior for an aggro_capable mob out of range
+        -- alternates idle/movement on a random timer, random direction each time."""
         if self.state not in ("idle", self.MOVE_STATE_NAME):
             self._enter_wander_state("idle")
         self._wander_tick(dt, is_walkable, self._move_speed)
@@ -970,9 +859,7 @@ class Mob(_WanderingEntity):
 
     def _nearest_player_ref(self, player_refs):
         """(ref, distance_px) for whichever player in `player_refs` is
-        closest to this mob right now, or (None, None) if there are none
-        -- aggro/attack-range/chase all target whichever player is
-        nearest."""
+        closest to this mob right now, or (None, None)."""
         nearest = None
         nearest_distance = None
         for ref in player_refs:
@@ -990,10 +877,7 @@ class Mob(_WanderingEntity):
         if self.frame == 0:
             self._hit_delivered_this_swing = False
             self._attack_sound_played = False
-        # Right as the swing's actual hit-frame window begins, not at the
-        # start of the animation -- matches when the real hitbox
-        # (active_attack_frames, checked in update() below) actually
-        # becomes live.
+        # Right as the swing's hit-frame window begins (matches active_attack_frames in update()).
         if self.frame in self.stats.get("active_attack_frames", ()) and not self._attack_sound_played:
             config = OBJECT_TYPES.get(self.mob_type, {})
             play_card_sound(
@@ -1004,14 +888,12 @@ class Mob(_WanderingEntity):
 
     def _on_final_frame_reached(self):
         if self.state == "damaged":
-            # Played once; return to a neutral state and let the next
-            # update() re-evaluate distance to pick idle/movement/attack.
+            # Played once; return to neutral and let the next update() re-evaluate distance.
             self.state = "idle"
             self.frame = 0
         elif self.state == "death":
-            # Holds on the last frame (this fires again every
-            # ANIMATION_SPEED tick after, not just once -- _death_animation_done
-            # itself only needs to flip True the first time, see update()).
+            # Holds on the last frame (this fires again every tick after --
+            # _death_animation_done only needs to flip True the first time).
             self._death_animation_done = True
 
     # -- top-level update -------------------------------------------------
@@ -1061,8 +943,7 @@ class Mob(_WanderingEntity):
             and self.frame in self.stats["active_attack_frames"]
             and not self._hit_delivered_this_swing
         ):
-            # Mirrors the player's own attack, which already hits every
-            # overlapping mob in one swing rather than just the nearest.
+            # Mirrors the player's own attack: hits every overlapping mob, not just the nearest.
             attack_hitbox = self.get_attack_hitbox()
             hit_landed = False
             for ref in player_refs:
@@ -1076,16 +957,10 @@ class Mob(_WanderingEntity):
 class MobManager(_EntityManager):
     """Owns every live Mob wandering a room, spawned from its placed mob
     objects (mob_types()) -- replaces the old AnimalManager/EnemyManager/
-    NpcManager trio now that a single Mob class covers what all three used
-    to (see Mob's own docstring). A non-combat-capable mob is never
-    filtered out for "having died" (it never can -- take_damage no-ops for
-    it); a combat-capable one plays out its death animation and holds on
-    the last frame for Mob.DEATH_DESPAWN_DELAY seconds before removal,
-    exactly like the old EnemyManager did -- unified here since
-    AnimalManager/EnemyManager used to duplicate this reward-spawning logic
-    almost verbatim. One standing over void is still removed outright with
-    no reward at all -- no sensible corpse (or spark destination) for
-    something that fell through the floor."""
+    NpcManager trio. A non-combat-capable mob never "dies" (take_damage
+    no-ops); a combat-capable one plays its death animation and holds the
+    last frame for Mob.DEATH_DESPAWN_DELAY before removal. One standing over
+    void is removed outright with no reward -- no sensible corpse for something that fell through the floor."""
 
     ENTITY_CLASS = Mob
 
@@ -1112,12 +987,8 @@ class MobManager(_EntityManager):
                 player_refs,
             )
             if mob.despawn_ready and not mob.reward_spawned:
-                # Guarded by reward_spawned, not just removing the mob
-                # immediately here, since despawn_ready can stay True for
-                # more than one frame before the list comprehension below
-                # actually drops it (were update() ever called twice before
-                # that happened) -- the spark must only ever spawn once per
-                # corpse.
+                # Guarded by reward_spawned since despawn_ready can stay True
+                # for more than one frame before the comprehension below drops it.
                 mob.reward_spawned = True
                 self._spawn_death_reward(mob, player_refs, room_offset)
         self.mobs = [
@@ -1126,11 +997,9 @@ class MobManager(_EntityManager):
         ]
 
     def _spawn_death_reward(self, mob, player_refs, room_offset):
-        """Magnetic star toward whichever player is nearest, spawning the
-        mob's own loot table (mob.mob_type, see object_manager.
-        effective_loot_cards) as ground pickups once it arrives (see
-        _spawn_loot_pickups). No-op (corpse just vanishes, no reward) if
-        the room has no players in it right now."""
+        """Magnetic star toward the nearest player, spawning the mob's own
+        loot table (effective_loot_cards) as ground pickups on arrival.
+        No-op if the room has no players in it right now."""
         if not player_refs:
             return
         nearest = min(
@@ -1150,10 +1019,8 @@ class MobManager(_EntityManager):
 
 def _advance_frame_once(entity, dt, duration, frame_count):
     """Ticks entity.animation_timer/frame toward frame_count-1 and holds
-    there once reached, returning True the frame it arrives -- the caller
-    sets its own "finished"/"exploded" flag then. Shared "play once" timer
-    tail for Pickup's "collect" state, ThrownDynamite, and Explosion (each
-    otherwise re-derives this identically)."""
+    there once reached, returning True the frame it arrives -- shared "play
+    once" timer tail for Pickup's "collect" state, ThrownDynamite, and Explosion."""
     entity.animation_timer += dt
     if entity.animation_timer < duration:
         return False
@@ -1166,11 +1033,7 @@ def _advance_frame_once(entity, dt, duration, frame_count):
 
 def _move_toward(position, target, speed, dt):
     """Moves `position` at most `speed*dt` toward `target`, without
-    overshooting -- the one magnetism calculation shared by
-    DestructionSpark (destroyed-tile VFX homing to whoever caused it) and
-    PickupManager's own currency/item homing (see its update()), so both
-    "pull toward the player" behaviors move identically instead of each
-    hand-rolling their own easing."""
+    overshooting -- shared by DestructionSpark and PickupManager's own homing, so both move identically."""
     delta = target - position
     distance = delta.length()
     if distance <= speed * dt or distance == 0:
@@ -1179,12 +1042,10 @@ def _move_toward(position, target, speed, dt):
 
 
 class Pickup:
-    """A currency pickup dropped by a dead enemy (see Explorator._spawn_loot)
-    -- never saved to room.json (created at runtime, not authored), never
-    blocks movement (not consulted by is_rect_walkable/_is_free). Two states:
-    "spin" loops forever until the player's hitbox touches it
-    (PickupManager.collect calls begin_collect()), then "collect" plays once
-    -- the sprite's own row 1 -- before PickupManager removes it (self.finished)."""
+    """A currency pickup dropped by a dead enemy (Explorator._spawn_loot) --
+    never saved to room.json, never blocks movement. Two states: "spin" loops
+    until the player's hitbox touches it (PickupManager.collect calls
+    begin_collect()), then "collect" plays once (row 1) before PickupManager removes it (self.finished)."""
 
     FRAME_SIZE = 16
     HITBOX_SIZE = 16
@@ -1239,15 +1100,12 @@ class Pickup:
 
 class ItemPickup:
     """A dropped real inventory Item waiting on the ground (e.g. dynamite
-    dropped by a dead mob, see object_manager.effective_loot_cards/
-    _spawn_loot_pickups) -- unlike Pickup
-    (currency), there's no spin/collect animation, just a single static
-    frame (Item.get_icon(), already cropped to frame 0 via its icon_rect --
-    "avant pickup" per spec). Removes itself and drops `item` into
-    inventory.main_slots[slot] the instant the player's hitbox touches it,
-    but only if that slot is actually empty -- an already-equipped slot
-    leaves the pickup exactly where it is, untouched, for the player to
-    come back to once the slot frees up."""
+    from a dead mob, see object_manager.effective_loot_cards/
+    _spawn_loot_pickups) -- unlike Pickup, no spin/collect animation, just a
+    single static frame (Item.get_icon(), frame 0 via icon_rect). Removes
+    itself and drops `item` into inventory.main_slots[slot] the instant the
+    player's hitbox touches it, but only if that slot is empty -- an
+    already-equipped slot leaves the pickup untouched."""
 
     HITBOX_SIZE = 16
 
@@ -1277,14 +1135,12 @@ class ItemPickup:
 
 class CardPickup:
     """A card waiting on the ground -- what a DestructionSpark becomes the
-    instant it reaches its target (see EffectManager.spawn_destruction_spark/
+    instant it reaches its target (EffectManager.spawn_destruction_spark/
     _spawn_loot_pickups), rather than crediting anything invisibly. Same
-    static-single-frame shape as ItemPickup, but there's no inventory SLOT
-    to fill -- collecting one calls Inventory.add_card(card_id) instead
-    (see PickupManager.collect), which stacks onto grid_slots rather than
-    main_slots. Icon resolved once at construction via
-    core.data.cards.resolve_card_sprite (deferred import -- same cycle
-    concern as core.world.inventory.CardStub)."""
+    static-single-frame shape as ItemPickup, but there's no inventory slot to
+    fill -- collecting calls Inventory.add_card(card_id) instead (stacks
+    onto grid_slots, not main_slots). Icon resolved once at construction via
+    core.data.cards.resolve_card_sprite (deferred import, same cycle concern as CardStub)."""
 
     HITBOX_SIZE = 16
 
@@ -1314,15 +1170,12 @@ class CardPickup:
 
 class PickupManager:
     """Owns the live Pickup/ItemPickup/CardPickup entities dropped in a
-    room. Unlike MobManager there's no spawn() from placed
-    objects -- pickups only ever come from Explorator._spawn_loot calling
-    spawn()/spawn_item() directly at an enemy's death position, or from
-    _spawn_loot_pickups (a DestructionSpark's on_arrival hook -- enemy/
-    animal death, terrain destruction) calling spawn()/spawn_item()/
-    spawn_card(), and are never persisted."""
+    room. Unlike MobManager there's no spawn() from placed objects --
+    pickups only come from Explorator._spawn_loot (enemy death) or
+    _spawn_loot_pickups (a DestructionSpark's on_arrival hook), never persisted."""
 
-    # Slower than DestructionSpark.HOMING_SPEED -- a gentle "pull toward the
-    # player" once in range, not a projectile snapping onto them instantly.
+    # Slower than DestructionSpark.HOMING_SPEED -- a gentle pull once in
+    # range, not a projectile snapping onto the player instantly.
     MAGNET_SPEED = 140
 
     def __init__(self, dungeon):
@@ -1342,22 +1195,14 @@ class PickupManager:
 
     def _nearest_target_within(self, pickup, player_refs, magnet_radius):
         """The closest player_refs position within magnet_radius of `pickup`,
-        or None -- magnet_radius <= 0 (no players in the room, or the caller
-        didn't pass one, see Dungeon.update's own default) always returns
-        None, same as "no magnetism" outright rather than a radius of zero
-        somehow still matching a player standing exactly on top of it.
+        or None (magnet_radius <= 0 always returns None).
 
-        Uses ref.hitbox.center, NOT ref.player.position -- pickup.position
-        lives in room-LOCAL coordinates (see PickupManager.spawn's callers,
-        always local_x/local_y), but Player.position is always GLOBAL (see
-        Explorator._use_interact_item's own local_x/y conversion). ref.hitbox
-        is already shifted to this room's local space by whoever built
-        player_refs (Assembly.update for a multi-room dungeon, or the
-        single-Dungeon case where local==global since there's no offset) --
-        comparing it directly to pickup.position is correct in both cases
-        with no extra conversion needed, unlike DestructionSpark's
-        target_getter (which must track a live Player across future frames,
-        not just this one, so it can't reuse this same shortcut)."""
+        Uses ref.hitbox.center, NOT ref.player.position: pickup.position is
+        room-LOCAL, but Player.position is always GLOBAL. ref.hitbox is
+        already shifted to this room's local space by whoever built
+        player_refs, so comparing it directly is correct with no conversion
+        -- unlike DestructionSpark's target_getter, which must track a live
+        Player across future frames and can't reuse this shortcut."""
         if magnet_radius <= 0:
             return None
         best = None
@@ -1372,9 +1217,7 @@ class PickupManager:
 
     def update(self, dt, player_refs=(), magnet_radius=0):
         for pickup in self.pickups:
-            # Only a still-"spin" coin gets pulled -- one already playing
-            # its one-shot "collect" animation (see Pickup.begin_collect)
-            # is about to be removed below regardless of where it sits.
+            # Only a still-"spin" coin gets pulled -- one already collecting is about to be removed regardless.
             if pickup.state == "spin":
                 target = self._nearest_target_within(pickup, player_refs, magnet_radius)
                 if target is not None:
@@ -1390,10 +1233,8 @@ class PickupManager:
                 target = self._nearest_target_within(card_pickup, player_refs, magnet_radius)
                 if target is not None:
                     card_pickup.position = _move_toward(card_pickup.position, target, self.MAGNET_SPEED, dt)
-        # A pickup sitting where the terrain got destroyed out from under it
-        # (see Dungeon.destroy_area) falls through and is lost, same as
-        # every other live entity's void-culling (AnimalManager/
-        # EnemyManager) -- ground loot has no "recover it" mechanic.
+        # A pickup where the terrain got destroyed out from under it falls
+        # through and is lost, same as every other entity's void-culling.
         self.pickups = [
             pickup for pickup in self.pickups
             if not pickup.finished and not _is_over_void(self.dungeon, pickup)
@@ -1410,21 +1251,15 @@ class PickupManager:
     def collect(self, player_hitbox, inventory):
         """Credits inventory.currency[pickup.currency_type] += 1 the instant
         the player touches a still-"spin" Pickup, then starts its "collect"
-        animation -- removal itself happens in update() once that finishes,
-        so the coin visually plays its pickup animation instead of just
-        vanishing. Already-collecting pickups are left alone (no double
-        credit if the player's hitbox keeps overlapping it). ItemPickups
-        have no such animation -- see ItemPickup's own docstring for why a
-        full inventory slot leaves one on the ground untouched instead.
+        animation -- removal happens in update() once that finishes.
+        Already-collecting pickups are left alone. ItemPickups have no such
+        animation (see ItemPickup's own docstring).
 
         Returns the list of card_id collected THIS call (possibly empty) --
-        unlike currency/items, a card can't just be credited into
-        `inventory` here: it needs to reach Profile.card_stash eventually
-        (see Explorator._resolve_pickups/_trigger_victory), which this
-        method has no access to. inventory.add_card still handles the
-        immediate, visible part (stacking into grid_slots, see
-        core.world.inventory.Inventory.add_card) -- a full grid leaves the
-        pickup on the ground untouched, same spirit as a full main_slot."""
+        unlike currency/items, a card can't be credited here: it needs to
+        reach Profile.card_stash eventually (Explorator._resolve_pickups/
+        _trigger_victory), which this method can't access. inventory.add_card
+        handles the immediate visible part (stacking grid_slots) -- a full grid leaves the pickup untouched."""
         for pickup in self.pickups:
             if pickup.state == "spin" and player_hitbox.colliderect(pickup.get_hitbox()):
                 inventory.currency[pickup.currency_type] += 1
@@ -1461,23 +1296,18 @@ class PickupManager:
 
 
 class ThrownDynamite:
-    """A player-thrown dynamite stick (see Explorator._use_interact_item):
-    flies in a straight line at `speed` in the direction the player was
-    facing at throw time, playing through its 4 frames once -- reaching the
-    last frame is literally what triggers detonation (see `exploded`,
-    checked by ProjectileManager.update), rather than a separate timer, so
-    the explosion always lines up with "the end of the animation" exactly as
-    specified. No mid-flight collision with walls/entities -- it's a lobbed
-    throw arcing over obstacles to wherever the animation runs out, not a
-    line-of-sight projectile.
+    """A player-thrown dynamite stick (Explorator._use_interact_item): flies
+    straight at `speed` in the direction the player faced at throw time,
+    playing its 4 frames once -- reaching the last frame IS the detonation
+    trigger (`exploded`, checked by ProjectileManager.update), not a separate
+    timer, so the explosion lines up with the animation's end exactly. No
+    mid-flight collision -- a lobbed throw, not a line-of-sight projectile.
 
     `speed`/`blast_radius_tiles`/`blast_damage` come from whichever card's
-    "throwable"/"explosive" capabilities triggered this throw (see
-    ProjectileManager.throw_dynamite/ITEM_DEFINITIONS["dynamite"]) rather
-    than being fixed to dynamite specifically -- the DEFAULT_* class
-    constants are just today's dynamite values, kept as fallbacks so a
-    direct ThrownDynamite(...) construction without capability params still
-    behaves exactly as before."""
+    "throwable"/"explosive" capabilities triggered this throw
+    (ProjectileManager.throw_dynamite/ITEM_DEFINITIONS["dynamite"]) rather
+    than being fixed to dynamite -- DEFAULT_* are just today's dynamite
+    values, kept as fallbacks for a direct construction without capability params."""
 
     FRAME_SIZE = 16
     FRAME_DURATION = 0.15  # seconds per frame -- 4 frames = 0.6s flight
@@ -1521,9 +1351,8 @@ class ThrownDynamite:
 class Explosion:
     """Purely visual VFX: plays assets/effect/smallexplosion's 9 frames once
     at a fixed world position, then self.finished -- no hitbox, no gameplay
-    effect of its own (the actual terrain destruction is
-    Dungeon.destroy_area, triggered directly by ProjectileManager alongside
-    spawning one of these, not by the animation itself)."""
+    effect (terrain destruction is Dungeon.destroy_area, triggered directly
+    by ProjectileManager alongside spawning one of these, not by the animation)."""
 
     FRAME_SIZE = 48
     ANIMATION_SPEED = 0.05
@@ -1554,12 +1383,10 @@ class Explosion:
 class ProjectileManager:
     """Owns live thrown-item projectiles and their resulting VFX for a room
     (currently just thrown dynamite/its explosion) -- mirrors PickupManager's
-    shape: nothing is ever placed via the editor or persisted, entries only
-    ever come from Explorator spawning one directly when the player throws
-    an equipped item. Detonating a ThrownDynamite (see its own docstring for
-    exactly when that happens) is handled right here in update() --
-    self.dungeon is already the right Dungeon to carve a hole into, no need
-    to bounce this back up to Explorator."""
+    shape: nothing is placed via the editor or persisted, entries only come
+    from Explorator spawning one when the player throws an equipped item.
+    Detonating a ThrownDynamite is handled right here in update() --
+    self.dungeon is already the right Dungeon to carve a hole into."""
 
     def __init__(self, dungeon):
         self.dungeon = dungeon
@@ -1567,12 +1394,11 @@ class ProjectileManager:
         self.explosions = []
 
     def throw_dynamite(self, world_x, world_y, direction, capabilities=None):
-        """`capabilities` is the throwing card's own capabilities dict (see
-        ITEM_DEFINITIONS["dynamite"]/Explorator._use_interact_item) --
-        this manager stays free of any object_manager/ITEM_DEFINITIONS
-        dependency, it just reads whichever "throwable"/"explosive" params
-        the caller resolved. Missing/empty falls back to ThrownDynamite's
-        own DEFAULT_* constants (today's dynamite values)."""
+        """`capabilities` is the throwing card's own capabilities dict
+        (ITEM_DEFINITIONS["dynamite"]/Explorator._use_interact_item) -- this
+        manager stays free of any object_manager/ITEM_DEFINITIONS dependency,
+        it just reads whichever "throwable"/"explosive" params the caller
+        resolved. Missing/empty falls back to ThrownDynamite's own DEFAULT_* constants."""
         capabilities = capabilities or {}
         throwable = capabilities.get("throwable") or {}
         explosive = capabilities.get("explosive") or {}
@@ -1603,15 +1429,11 @@ class ProjectileManager:
         self.explosions = [explosion for explosion in self.explosions if not explosion.finished]
 
     def _apply_blast_damage(self, dynamite, player_refs):
-        """Deals dynamite.blast_damage to every player in this room right now
-        (`player_refs` is empty otherwise, see Dungeon.update) and every live
-        Mob in this room, whenever their hitbox center falls within the same
-        circular radius destroy_area just carved into the terrain. No
-        immunity for whoever threw it -- standing too close to your own
-        blast hurts just the same. A single loop over every mob rather than
-        two separate animal/enemy ones now (Mob.take_damage already no-ops
-        for a non-combat-capable one, e.g. an interactable PNJ standing too
-        close -- no separate branch needed to exclude it)."""
+        """Deals dynamite.blast_damage to every player in this room and every
+        live Mob whose hitbox center falls within the same circular radius
+        destroy_area just carved. No immunity for whoever threw it. One loop
+        over every mob (Mob.take_damage already no-ops for a
+        non-combat-capable one, e.g. a PNJ standing too close)."""
         radius_px = dynamite.blast_radius_tiles * self.dungeon.tile_size
 
         def _in_blast(hitbox):
@@ -1628,30 +1450,20 @@ class ProjectileManager:
                 mob.take_damage(dynamite.blast_damage)
 
     def _spawn_destruction_sparks(self, destroyed_cells, card_ids_by_cell, blast_position, player_refs, room_offset):
-        """One DestructionSpark per grid cell destroy_area actually
-        cleared, all homing toward whichever player in this room is
-        closest to the blast right now -- an explosion doesn't "change
-        target" mid-flight (see EffectManager.spawn_destruction_spark's
-        own docstring for why target_getter is a closure, not a live
-        search, once captured here). No-op if the room is empty of
-        players (shouldn't happen -- a thrown dynamite implies someone's
-        here to have thrown it -- but destroy_area's return is still
-        honored either way).
+        """One DestructionSpark per grid cell destroy_area cleared, all
+        homing toward whichever player is nearest right now -- an explosion
+        doesn't retarget mid-flight (target_getter is a closure captured
+        once here, not a live search). No-op if the room has no players.
 
-        Nearest-player selection compares ref.hitbox (already room-local,
-        see PickupManager._nearest_target_within's own docstring for the
-        same local-vs-global distinction) against blast_position (also
-        local, dynamite.position always is) -- correct with no conversion.
-        The closure itself reads ref.player.position instead (the actual
-        persistent Player, needed since it must stay live across many
-        FUTURE frames, unlike the ref wrapper which is rebuilt fresh every
-        frame) -- room_offset is what lets DestructionSpark convert that
-        global position back to this room's local space each frame it
-        homes (see its own update()). Each cell's own card_ids_by_cell
-        entry (see Dungeon.destroy_area) spawns pickups of its own loot
-        table once ITS OWN spark arrives (see _spawn_loot_pickups) --
-        every cell's spark shares one target player, but each still carries
-        its own card(s)."""
+        Nearest-player selection compares ref.hitbox (room-local, see
+        PickupManager._nearest_target_within) against blast_position (also
+        local) -- correct with no conversion. The closure itself reads
+        ref.player.position (the persistent, GLOBAL Player, since it must
+        stay live across future frames) -- room_offset is what lets
+        DestructionSpark convert that back to this room's local space each
+        frame it homes. Each cell's own card_ids_by_cell entry spawns
+        pickups of its own loot table once ITS OWN spark arrives -- every
+        cell's spark shares one target player, but each still carries its own card(s)."""
         if not destroyed_cells or not player_refs:
             return
         nearest = min(player_refs, key=lambda ref: pygame.Vector2(ref.hitbox.center).distance_squared_to(blast_position))
@@ -1676,20 +1488,15 @@ class ProjectileManager:
 
 
 def _spawn_loot_pickups(dungeon, position, card_ids):
-    """Spawns ground pickups for the full, combined loot table (see
-    object_manager.effective_loot_cards) of every id in `card_ids` -- a
-    single card id (a dead mob's own type) or an iterable of them
-    (every card a destroyed cell is worth: tile plus whatever object sat on
-    it). The shared "what happens once a reward's DestructionSpark lands"
-    step (see MobManager._spawn_death_reward,
-    ProjectileManager._spawn_destruction_sparks, and Explorator._resolve_
-    player_attacks' melee wall-break) -- a card is only ever earned by
-    physically collecting a CardPickup (see core.world.inventory.Inventory.
-    add_card / Explorator._resolve_pickups), never credited invisibly.
-    An entry that ALSO names a real inventory item (loot_id in
-    ITEM_DEFINITIONS) additionally spawns a physical ItemPickup (usable
-    THIS run, same as the old item_loot mechanic it replaces) -- both
-    happen together for an item, confirmed with the user."""
+    """Spawns ground pickups for the full combined loot table
+    (effective_loot_cards) of every id in `card_ids` -- a single card id or
+    an iterable (a destroyed cell's tile plus whatever object sat on it).
+    The shared "what happens once a reward's DestructionSpark lands" step
+    (MobManager._spawn_death_reward, ProjectileManager._spawn_destruction_sparks,
+    Explorator._resolve_player_attacks' melee wall-break) -- a card is only
+    earned by physically collecting a CardPickup, never credited invisibly.
+    An entry that ALSO names a real inventory item additionally spawns a
+    physical ItemPickup (usable this run, replacing the old item_loot mechanic)."""
     if isinstance(card_ids, str):
         card_ids = [card_ids]
     for card_id in card_ids:
@@ -1704,35 +1511,28 @@ def _spawn_loot_pickups(dungeon, position, card_ids):
 
 
 class DestructionSpark:
-    """assets/effect/star's 4 frames play once (same "play once" shape as
-    Explosion) while homing toward a live target -- the feedback for a tile
-    actually being destroyed (a broken wall from the player's own melee, or
-    one cell of an explosion's blast) or a mob corpse despawning, spawned
-    by Dungeon.destroy_wall_cell's/destroy_area's callers (Explorator._
-    resolve_player_attacks, ProjectileManager._spawn_destruction_sparks) or
-    MobManager's own despawn handling, never by the destruction/death
-    logic itself (Dungeon/Mob have no notion of "which player is nearby"
-    -- that's the caller's job, see EffectManager.spawn_destruction_spark).
+    """assets/effect/star's 4 frames play once (like Explosion) while homing
+    toward a live target -- feedback for a tile actually destroyed (melee
+    wall-break or one blast cell) or a mob corpse despawning, spawned by the
+    caller (Explorator, ProjectileManager, MobManager), never by
+    Dungeon/Mob's own destruction/death logic (they have no notion of "which
+    player is nearby" -- see EffectManager.spawn_destruction_spark).
     `on_arrival(position)`, if given, fires exactly once, the frame this
-    actually finishes (see update()), passed this spark's own final
-    room-local position -- the caller's own hook to spawn loot pickups
-    (see _spawn_loot_pickups) exactly where the star lands, the instant it
-    visually reaches the player, not at the moment of destruction/death
-    itself. The star effectively BECOMES the pickup at that point."""
+    finishes, with this spark's final room-local position -- the caller's
+    hook to spawn loot pickups exactly where the star lands. The star
+    effectively BECOMES the pickup at that point."""
 
     FRAME_SIZE = 32
     ANIMATION_SPEED = 0.08
     HOMING_SPEED = 260  # world px/sec -- fast enough to usually reach the player within the 4-frame animation
 
     def __init__(self, world_x, world_y, target_getter, room_offset=(0, 0), on_arrival=None):
-        # self.position lives in the SAME room-local space as world_x/
-        # world_y always already are (see grid_to_world's own callers --
-        # never true global coordinates once inside a multi-room assembly).
-        # target_getter, however, always returns a live Player.position,
-        # which is ALWAYS global -- room_offset (this room's fixed
-        # (offset_x, offset_y) * tile_size within the assembly, 0 outside
-        # one) is what update() subtracts to convert that global reading
-        # back into this room's local space every frame it homes.
+        # self.position is room-LOCAL (same space as world_x/world_y, never
+        # true global once inside a multi-room assembly). target_getter
+        # always returns a live Player.position, which is ALWAYS GLOBAL --
+        # room_offset (this room's (offset_x, offset_y) * tile_size within
+        # the assembly, 0 outside one) is what update() subtracts to convert
+        # that back into local space every frame it homes.
         self.position = pygame.Vector2(world_x, world_y)
         self.target_getter = target_getter
         self.room_offset = pygame.Vector2(room_offset)
@@ -1766,10 +1566,8 @@ class DestructionSpark:
 
 class EffectManager:
     """Owns live one-shot VFX-with-motion for a room -- today just
-    DestructionSpark, but a deliberately generic name/shape (mirrors
-    PickupManager/ProjectileManager) rather than "SparkManager", in case a
-    future one-shot homing effect wants the same home instead of yet
-    another near-identical manager."""
+    DestructionSpark, kept as a deliberately generic name/shape in case a
+    future one-shot homing effect wants the same home."""
 
     def __init__(self, dungeon):
         self.dungeon = dungeon
@@ -1777,18 +1575,12 @@ class EffectManager:
 
     def spawn_destruction_spark(self, world_x, world_y, target_getter, room_offset=(0, 0), on_arrival=None):
         """`target_getter` is a callable () -> Vector2-like | None, read
-        EVERY frame (see DestructionSpark.update) -- true magnetism toward
-        the target's CURRENT position, not a trajectory computed once at
-        spawn time. Callers capture whichever player they've already
-        picked (nearest to a blast, or whoever swung the melee hit) in a
-        closure rather than passing a live reference this manager would
-        have to track itself. `room_offset` is this room's own (offset_x,
-        offset_y) * tile_size within a multi-room assembly (0 outside one)
-        -- see DestructionSpark's own docstring for why it's needed at all
-        (world_x/world_y here are room-local, but target_getter always
-        reads a Player's global position). `on_arrival`, see
-        DestructionSpark's own docstring, is this manager's own passthrough
-        for the reward hook -- EffectManager itself never inspects it."""
+        EVERY frame -- true magnetism toward the target's CURRENT position,
+        not a trajectory computed once at spawn. Callers capture whichever
+        player they've picked in a closure. `room_offset` is this room's own
+        (offset_x, offset_y) * tile_size within a multi-room assembly (0
+        outside one) -- see DestructionSpark's docstring. `on_arrival` is
+        this manager's passthrough for the reward hook -- never inspected here."""
         self.sparks.append(
             DestructionSpark(world_x, world_y, target_getter, room_offset=room_offset, on_arrival=on_arrival)
         )

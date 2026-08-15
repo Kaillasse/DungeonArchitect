@@ -1,9 +1,7 @@
 """Minimal inventory data model: just the structure InventoryPanel reads to
 draw itself, plus main_slots/currency/grid_slots, which PickupManager.collect
 mutates directly (via Inventory.add_card for grid_slots -- see CardStub).
-grid_slots holds cards found this run (see core.world.entities.CardPickup):
-its previous docstring here said it had "no producer yet" -- CardPickup
-collection is that producer now."""
+grid_slots holds cards found this run (core.world.entities.CardPickup)."""
 
 from __future__ import annotations
 
@@ -31,13 +29,12 @@ class Item:
 
 class CardStub:
     """A lightweight, get_icon()-only stand-in for Item -- what Inventory.
-    grid_slots holds for a card found this run (see core.world.entities.
-    CardPickup/PickupManager.collect). Deliberately not a real Item: a
-    card's sprite source varies by card_type (OBJECT_TYPES/ITEM_DEFINITIONS/
-    a base tile/a room thumbnail), resolved via core.data.cards.
-    resolve_card_sprite rather than a fixed icon_path/icon_rect crop.
-    `count` (>=1) lets repeat pickups of the same card_id stack onto one
-    slot instead of consuming a second one -- see Inventory.add_card."""
+    grid_slots holds for a card found this run. Deliberately not a real
+    Item: a card's sprite source varies by card_type (OBJECT_TYPES/
+    ITEM_DEFINITIONS/a base tile/a room thumbnail), resolved via
+    core.data.cards.resolve_card_sprite rather than a fixed icon_rect crop.
+    `count` (>=1) lets repeat pickups of the same card_id stack onto one slot
+    instead of consuming a second one -- see Inventory.add_card."""
 
     def __init__(self, card_id):
         self.card_id = card_id
