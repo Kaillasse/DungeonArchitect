@@ -217,7 +217,6 @@ class Creator:
         self.pan_last_pos = None
 
         self.camera = Camera(zoom=1.0)
-        self.grid_zoom = self.camera.zoom
 
         self.spawn_preview = None
 
@@ -1393,7 +1392,6 @@ class Creator:
                     if not self.mechanics_frame.collapsed and self.mechanics_panel.handle_wheel(mouse_pos, event.y):
                         continue
                     self.camera.zoom_at(mouse_pos[0], mouse_pos[1], event.y, self.screen.get_width(), self.screen.get_height())
-                    self.grid_zoom = self.camera.zoom
 
                 elif event.type == pygame.KEYDOWN:
 

@@ -1209,14 +1209,14 @@ def _finalize_dungeon_exit(assembly, edges):
     best-effort push toward ceil(room_count / 2), not a hard guarantee, once
     a large room_count makes for a very bushy (shallow, wide) graph."""
     distances = _room_hop_distances(edges, len(assembly.rooms)) if assembly.rooms else {}
-    best_room, best_obj, best_distance = None, None, -1
+    best_obj, best_distance = None, -1
     for room in assembly.rooms:
         for obj in room.dungeon.object_manager.objects:
             if room.dungeon.object_manager.get_role(obj) != "dungeon_exit":
                 continue
             distance = distances.get(room.index, -1)
             if distance > best_distance:
-                best_room, best_obj, best_distance = room, obj, distance
+                best_obj, best_distance = obj, distance
 
     for room in assembly.rooms:
         manager = room.dungeon.object_manager

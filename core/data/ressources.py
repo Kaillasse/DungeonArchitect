@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Dict, Optional, TypedDict
+from typing import Dict, Optional
 
 import pygame
 
@@ -26,7 +26,6 @@ WORLD_SCALE = 2  # world grid cells render source art at 2x (16px art -> 32px ce
 DEFAULT_ANIM_SPEED = 0.12
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TILESET_PATH = PROJECT_ROOT / "assets" / "tiles" / "tileset.png"
-DEFAULT_TILE_METADATA_PATH = PROJECT_ROOT / "assets" / "tiles" / "tile_categories.json"
 
 ROOMS_DIRECTORY = PROJECT_ROOT / "assets" / "rooms"
 ROOMS_DIRECTORY.mkdir(parents=True, exist_ok=True)
@@ -394,10 +393,6 @@ def rename_autotile_pack(old_name, new_name):
 
     return safe_new_name
 
-class TileMetadata(TypedDict):
-    category: str
-
-
 def _find_tileset_path(tileset_path: Optional[Path] = None) -> Path:
     if tileset_path is not None:
         candidate = Path(tileset_path)
@@ -445,18 +440,6 @@ def load_tileset(tileset_path: Optional[Path] = None) -> pygame.Surface:
 
     return _tileset_cache[path]
 
-
-def _load_tile_metadata(path: Path) -> Dict[int, TileMetadata]:
-    if not path.exists():
-        return {}
-
-    with path.open("r", encoding="utf-8") as handle:
-        raw = json.load(handle)
-
-    metadata: Dict[int, TileMetadata] = {}
-    for key, value in raw.items():
-        metadata[int(key)] = {"category": str(value.get("category", "other")).lower()}
-    return metadata
 
 def get_tile_surface(
     tileset: pygame.Surface,

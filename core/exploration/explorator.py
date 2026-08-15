@@ -170,8 +170,6 @@ class Explorator(NetworkSessionMixin):
         # uses to reach clients that never simulate it themselves.
         self.dungeon_entrance_ready = set()
 
-        self.grid_zoom = 1
-
         # -----------------------------
         # Joueurs -- toujours pilotee par le clavier local (_local_player_id).
         # Toute la simulation/rendu boucle sur self.players.values() plutot
