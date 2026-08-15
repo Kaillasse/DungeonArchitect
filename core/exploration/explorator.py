@@ -1506,8 +1506,9 @@ class Explorator(NetworkSessionMixin):
                     mob.take_damage(1)
                     hit_landed = True
                     if was_alive and not mob.alive:
-                        if mob.aggro_capable:
+                        if mob.combat_capable:
                             self._spawn_loot(mob, mob_dungeon)
+                        if mob.aggro_capable:
                             self._grant_xp(session, XP_ENEMY_KILL)
                         else:
                             self._grant_xp(session, XP_ANIMAL_KILL)

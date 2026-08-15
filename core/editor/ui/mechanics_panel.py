@@ -74,7 +74,7 @@ import pygame
 from core.editor.ui.mixins import _ResizableCornerMixin
 from core.ui.widgets import BorderManager, Stepper
 from core.world.object_manager import (
-    OBJECT_TYPES, ITEM_DEFINITIONS, ARCHETYPES, CELL_MODES, ENEMY_ANIMATIONS, CURRENCY_FILES, ENEMY_FOLDERS,
+    OBJECT_TYPES, ITEM_DEFINITIONS, ARCHETYPES, CELL_MODES, ENEMY_ANIMATIONS, CURRENCY_FILES, mob_kind as _mob_kind,
     NPC_DIRECTIONS, load_npc_frames, load_enemy_frames, load_animal_frames, load_object_frames,
     action_direction_coverage, effective_loot_cards,
     update_type_mechanics, update_item_overrides, update_item, is_builtin_item,
@@ -392,7 +392,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         is_pnj = bool(config.get("entity_pack"))
         is_mob = bool(config.get("mob")) and not is_pnj
         if is_mob:
-            self.mob_kind = "enemy" if card_id in ENEMY_FOLDERS else "animal"
+            self.mob_kind = _mob_kind(card_id)
             # Fixed sets -- animal/enemy are always fully hand-authored
             # Python entries, never partially registered like a custom
             # PNJ, so there's no per-card variation to read here, unlike

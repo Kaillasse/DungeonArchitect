@@ -3,7 +3,7 @@
 import pygame
 
 from core.ui.widgets import BorderManager, RoomBrowser
-from core.world.object_manager import OBJECT_TYPES, ITEM_DEFINITIONS, ENEMY_ANIMATIONS, ENEMY_FOLDERS
+from core.world.object_manager import OBJECT_TYPES, ITEM_DEFINITIONS, ENEMY_ANIMATIONS, mob_kind
 from core.data.cards import CardManager, room_name_from_card_id
 from core.data.profile_manager import ADMINGOD_STOCK
 from core.editor.ui.mixins import _ResizableCornerMixin
@@ -344,7 +344,7 @@ class CardPanelUI(_ResizableCornerMixin):
                         # Purely informational -- a flat-frame mob has no
                         # custom-registration path, so its animation set is
                         # a fixed constant, never partial.
-                        states = ENEMY_ANIMATIONS if card_id in ENEMY_FOLDERS else ("idle", "move")
+                        states = ENEMY_ANIMATIONS if mob_kind(card_id) == "enemy" else ("idle", "move")
                         lines.append(f"Etats : {', '.join(states)}")
             for index, line in enumerate(lines):
                 surface = self.font.render(line, True, (220, 220, 220))

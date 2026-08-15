@@ -155,6 +155,64 @@ def _iter_dungeons(explorator):
         yield None, explorator.dungeon
 
 
+def _serialize_category(room_ref, items, field_fn):
+    """One dungeon-category's live entities -> their wire-snapshot dicts --
+    `field_fn(item)` returns everything but "room" (id/x/y/state/etc, shape
+    varies per category), shared by every category build_snapshot serializes
+    below instead of each hand-rolling its own `for item in items:
+    list.append({"room": room_ref, ...})` loop."""
+    return [{"room": room_ref, **field_fn(item)} for item in items]
+
+
+def _mob_fields(mob):
+    return {
+        "id": id(mob), "mob_type": mob.mob_type,
+        "x": mob.position.x, "y": mob.position.y, "state": mob.state,
+        "dir_x": mob.direction.x, "dir_y": mob.direction.y,
+        "flip": mob.flip, "frame": mob.frame,
+        "health": mob.health, "alive": mob.alive,
+    }
+
+
+def _currency_pickup_fields(pickup):
+    return {
+        "id": id(pickup), "kind": "currency", "currency_type": pickup.currency_type,
+        "x": pickup.position.x, "y": pickup.position.y,
+        "state": pickup.state, "frame": pickup.frame,
+    }
+
+
+def _item_pickup_fields(item_pickup):
+    return {
+        "id": id(item_pickup), "kind": "item",
+        "item_id": item_pickup.item.item_id, "slot": item_pickup.slot,
+        "x": item_pickup.position.x, "y": item_pickup.position.y,
+    }
+
+
+def _card_pickup_fields(card_pickup):
+    return {
+        "id": id(card_pickup), "kind": "card", "card_id": card_pickup.card_id,
+        "x": card_pickup.position.x, "y": card_pickup.position.y,
+    }
+
+
+def _object_fields(indexed_obj):
+    index, obj = indexed_obj
+    return {
+        "index": index,
+        "activated": obj.get("activated", False),
+        "open": obj.get("open", False),
+        "frame": obj.get("frame", 0),
+    }
+
+
+def _projectile_fields(projectile):
+    """Shared by dynamites and explosions -- both are just a position +
+    single animation frame on the wire."""
+    return {"id": id(projectile), "x": projectile.position.x, "y": projectile.position.y, "frame": projectile.frame}
+
+
 def build_snapshot(explorator, tick: int, terrain_versions: dict) -> dict:
     """Full authoritative world state for one server tick. `terrain_versions`
     is the server's own {room_ref: last_sent_version} bookkeeping -- mutated
@@ -187,47 +245,16 @@ def build_snapshot(explorator, tick: int, terrain_versions: dict) -> dict:
     mobs, pickups, objects, dynamites, explosions, terrain = [], [], [], [], [], []
 
     for room_ref, dungeon in _iter_dungeons(explorator):
-        for mob in dungeon.mob_manager.mobs:
-            mobs.append({
-                "id": id(mob), "room": room_ref, "mob_type": mob.mob_type,
-                "x": mob.position.x, "y": mob.position.y, "state": mob.state,
-                "dir_x": mob.direction.x, "dir_y": mob.direction.y,
-                "flip": mob.flip, "frame": mob.frame,
-                "health": mob.health, "alive": mob.alive,
-            })
+        mobs.extend(_serialize_category(room_ref, dungeon.mob_manager.mobs, _mob_fields))
 
-        for pickup in dungeon.pickup_manager.pickups:
-            pickups.append({
-                "id": id(pickup), "room": room_ref, "kind": "currency",
-                "currency_type": pickup.currency_type,
-                "x": pickup.position.x, "y": pickup.position.y,
-                "state": pickup.state, "frame": pickup.frame,
-            })
-        for item_pickup in dungeon.pickup_manager.item_pickups:
-            pickups.append({
-                "id": id(item_pickup), "room": room_ref, "kind": "item",
-                "item_id": item_pickup.item.item_id, "slot": item_pickup.slot,
-                "x": item_pickup.position.x, "y": item_pickup.position.y,
-            })
+        pickups.extend(_serialize_category(room_ref, dungeon.pickup_manager.pickups, _currency_pickup_fields))
+        pickups.extend(_serialize_category(room_ref, dungeon.pickup_manager.item_pickups, _item_pickup_fields))
+        pickups.extend(_serialize_category(room_ref, dungeon.pickup_manager.card_pickups, _card_pickup_fields))
 
-        for index, obj in enumerate(dungeon.object_manager.objects):
-            objects.append({
-                "room": room_ref, "index": index,
-                "activated": obj.get("activated", False),
-                "open": obj.get("open", False),
-                "frame": obj.get("frame", 0),
-            })
+        objects.extend(_serialize_category(room_ref, enumerate(dungeon.object_manager.objects), _object_fields))
 
-        for dynamite in dungeon.projectile_manager.dynamites:
-            dynamites.append({
-                "id": id(dynamite), "room": room_ref,
-                "x": dynamite.position.x, "y": dynamite.position.y, "frame": dynamite.frame,
-            })
-        for explosion in dungeon.projectile_manager.explosions:
-            explosions.append({
-                "id": id(explosion), "room": room_ref,
-                "x": explosion.position.x, "y": explosion.position.y, "frame": explosion.frame,
-            })
+        dynamites.extend(_serialize_category(room_ref, dungeon.projectile_manager.dynamites, _projectile_fields))
+        explosions.extend(_serialize_category(room_ref, dungeon.projectile_manager.explosions, _projectile_fields))
 
         if terrain_versions.get(room_ref) != dungeon.terrain_version:
             terrain_versions[room_ref] = dungeon.terrain_version

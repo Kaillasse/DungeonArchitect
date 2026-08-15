@@ -9,7 +9,7 @@ import pygame
 from core.data.ressources import WORLD_SCALE, TILE_SIZE
 from core.data.sound_manager import SoundManager, play_card_sound
 from core.world.object_manager import (
-    load_animal_frames, load_enemy_frames, load_currency_frames, ENEMY_FOLDERS,
+    load_animal_frames, load_enemy_frames, load_currency_frames, mob_kind,
     load_dynamite_frames, load_explosion_frames, load_star_frames,
     OBJECT_TYPES, load_npc_frames, mob_types, NPC_DIRECTIONS, effective_loot_cards,
     ITEM_DEFINITIONS, make_item,
@@ -497,6 +497,32 @@ def _is_over_void(dungeon, entity):
     return dungeon.is_void_at(*dungeon.world_to_grid(entity.position.x, entity.position.y))
 
 
+def _prune(dungeon, entities, is_done):
+    """Drops every entity that's either finished/dead per `is_done(entity)`
+    or has fallen over destroyed/void terrain (see _is_over_void) -- the
+    two-part cleanup rule shared by MobManager and PickupManager's own
+    per-frame list-filtering (mobs, currency pickups, item pickups, card
+    pickups), so a future pickup kind can't forget the void check."""
+    return [entity for entity in entities if not is_done(entity) and not _is_over_void(dungeon, entity)]
+
+
+def _nearest_player_ref(player_refs, position):
+    """(ref, distance_px) for whichever PlayerRef in `player_refs` sits
+    closest to `position`, or (None, None) if there are none. Shared by
+    Mob's own aggro/attack/chase targeting, MobManager's death-reward
+    spark, and ProjectileManager's destruction sparks -- all four pick
+    "whichever player is nearest right now" the same way; PickupManager's
+    ground-loot magnetism layers its own radius check on top of this same
+    nearest-ref result instead of re-searching independently."""
+    nearest = None
+    nearest_distance = None
+    for ref in player_refs:
+        distance = pygame.Vector2(ref.hitbox.center).distance_to(position)
+        if nearest_distance is None or distance < nearest_distance:
+            nearest, nearest_distance = ref, distance
+    return nearest, nearest_distance
+
+
 class _EntityManager:
     """Shared shape for MobManager (and, historically, NpcManager before it
     -- kept generic rather than folded directly into MobManager in case a
@@ -669,7 +695,7 @@ class Mob(_WanderingEntity):
             # never play its move animation at all).
             self._entity_pack = None
             self.wander_actions = {}
-            uses_enemy_states = mob_type in ENEMY_FOLDERS
+            uses_enemy_states = mob_kind(mob_type) == "enemy"
             self.frames = load_enemy_frames(mob_type) if uses_enemy_states else load_animal_frames(mob_type)
             if uses_enemy_states:
                 self.LOOPING_STATES = ("idle", "movement", "attack")
@@ -973,15 +999,7 @@ class Mob(_WanderingEntity):
         closest to this mob right now, or (None, None) if there are none
         -- aggro/attack-range/chase all target whichever player is
         nearest."""
-        nearest = None
-        nearest_distance = None
-        for ref in player_refs:
-            dx = ref.hitbox.centerx - self.position.x
-            dy = ref.hitbox.centery - self.position.y
-            distance = math.hypot(dx, dy)
-            if nearest_distance is None or distance < nearest_distance:
-                nearest, nearest_distance = ref, distance
-        return nearest, nearest_distance
+        return _nearest_player_ref(player_refs, self.position)
 
     def _on_loop_frame_advanced(self):
         if self.state != "attack":
@@ -1120,10 +1138,7 @@ class MobManager(_EntityManager):
                 # corpse.
                 mob.reward_spawned = True
                 self._spawn_death_reward(mob, player_refs, room_offset)
-        self.mobs = [
-            mob for mob in self.mobs
-            if not mob.despawn_ready and not _is_over_void(self.dungeon, mob)
-        ]
+        self.mobs = _prune(self.dungeon, self.mobs, lambda mob: mob.despawn_ready)
 
     def _spawn_death_reward(self, mob, player_refs, room_offset):
         """Magnetic star toward whichever player is nearest, spawning the
@@ -1133,9 +1148,7 @@ class MobManager(_EntityManager):
         the room has no players in it right now."""
         if not player_refs:
             return
-        nearest = min(
-            player_refs, key=lambda ref: pygame.Vector2(ref.hitbox.center).distance_squared_to(mob.position),
-        )
+        nearest, _ = _nearest_player_ref(player_refs, mob.position)
         target_player = nearest.player
         card_id = mob.mob_type
 
@@ -1360,15 +1373,10 @@ class PickupManager:
         not just this one, so it can't reuse this same shortcut)."""
         if magnet_radius <= 0:
             return None
-        best = None
-        best_dist_sq = magnet_radius * magnet_radius
-        for ref in player_refs:
-            target = pygame.Vector2(ref.hitbox.center)
-            dist_sq = pickup.position.distance_squared_to(target)
-            if dist_sq <= best_dist_sq:
-                best_dist_sq = dist_sq
-                best = target
-        return best
+        ref, distance = _nearest_player_ref(player_refs, pickup.position)
+        if ref is None or distance > magnet_radius:
+            return None
+        return pygame.Vector2(ref.hitbox.center)
 
     def update(self, dt, player_refs=(), magnet_radius=0):
         for pickup in self.pickups:
@@ -1394,18 +1402,9 @@ class PickupManager:
         # (see Dungeon.destroy_area) falls through and is lost, same as
         # every other live entity's void-culling (AnimalManager/
         # EnemyManager) -- ground loot has no "recover it" mechanic.
-        self.pickups = [
-            pickup for pickup in self.pickups
-            if not pickup.finished and not _is_over_void(self.dungeon, pickup)
-        ]
-        self.item_pickups = [
-            pickup for pickup in self.item_pickups
-            if not pickup.collected and not _is_over_void(self.dungeon, pickup)
-        ]
-        self.card_pickups = [
-            pickup for pickup in self.card_pickups
-            if not pickup.collected and not _is_over_void(self.dungeon, pickup)
-        ]
+        self.pickups = _prune(self.dungeon, self.pickups, lambda pickup: pickup.finished)
+        self.item_pickups = _prune(self.dungeon, self.item_pickups, lambda pickup: pickup.collected)
+        self.card_pickups = _prune(self.dungeon, self.card_pickups, lambda pickup: pickup.collected)
 
     def collect(self, player_hitbox, inventory):
         """Credits inventory.currency[pickup.currency_type] += 1 the instant
@@ -1654,7 +1653,7 @@ class ProjectileManager:
         its own card(s)."""
         if not destroyed_cells or not player_refs:
             return
-        nearest = min(player_refs, key=lambda ref: pygame.Vector2(ref.hitbox.center).distance_squared_to(blast_position))
+        nearest, _ = _nearest_player_ref(player_refs, blast_position)
         target_player = nearest.player
         for grid_x, grid_y in destroyed_cells:
             local_x, local_y = self.dungeon.grid_to_world(grid_x, grid_y)

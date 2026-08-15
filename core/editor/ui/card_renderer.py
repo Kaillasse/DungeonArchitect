@@ -5,7 +5,7 @@ from pathlib import Path
 import pygame
 
 from core.data.cards import CardManager, resolve_card_sprite, room_card_properties, card_completeness
-from core.world.object_manager import OBJECT_TYPES, ENEMY_ANIMATIONS, ENEMY_FOLDERS
+from core.world.object_manager import OBJECT_TYPES, ENEMY_ANIMATIONS, mob_kind
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -164,7 +164,7 @@ class CardRenderer:
             # idle/move-or-5-state set to show here at all -- their states
             # are whichever actions their own wander_actions names, shown
             # instead via CardPanelUI's completeness check.
-            states = ENEMY_ANIMATIONS if card.card_id in ENEMY_FOLDERS else ("idle", "move")
+            states = ENEMY_ANIMATIONS if mob_kind(card.card_id) == "enemy" else ("idle", "move")
             extra_text = "Etats : " + ", ".join(states)
         if extra_text:
             extra_surface = self._render_fitted(label_font, extra_text, (60, 60, 95), text_max_width)

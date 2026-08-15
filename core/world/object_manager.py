@@ -444,26 +444,36 @@ def _derive_card_type(config):
     return "tile_decor"
 
 
+def _merge_mechanics_override(base, entry, keys):
+    """`base` with every key in `keys` replaced by whichever of them
+    `entry` (a full snapshot, never a sparse diff, so a flag can be
+    explicitly turned back off) actually carries -- the shared merge step
+    behind _merge_builtin (OBJECT_TYPES, MECHANICS_KEYS +
+    DOORWAY_MECHANICS_KEYS) and update_item_overrides (ITEM_DEFINITIONS,
+    its own smaller key set). Clearing every key first rather than only
+    the ones `base` happens to already carry is deliberate -- `.pop(key,
+    None)` is a no-op for an absent key, so this stays correct even for a
+    non-doorway builtin that never had DOORWAY_MECHANICS_KEYS to begin
+    with."""
+    merged = dict(base)
+    for key in keys:
+        merged.pop(key, None)
+    for key in keys:
+        if key in entry:
+            merged[key] = entry[key]
+    return merged
+
+
 def _merge_builtin(type_id, override):
     """A builtin's own Python-sourced entry, with its mechanics keys
     replaced by `override`'s (an OVERRIDE_MARKER-tagged entry holding a
-    full snapshot of MECHANICS_KEYS/DOORWAY_MECHANICS_KEYS -- never a
-    sparse diff, so a flag can be explicitly turned back off). None if
+    full snapshot of MECHANICS_KEYS/DOORWAY_MECHANICS_KEYS). None if
     type_id no longer names a real builtin (a stale override left over
     from a since-removed one)."""
     base = _BUILTIN_OBJECT_TYPES.get(type_id)
     if base is None:
         return None
-    merged = dict(base)
-    for key in MECHANICS_KEYS:
-        merged.pop(key, None)
-    if base.get("placement") == "doorway":
-        for key in DOORWAY_MECHANICS_KEYS:
-            merged.pop(key, None)
-    for key in MECHANICS_KEYS + DOORWAY_MECHANICS_KEYS:
-        if key in override:
-            merged[key] = override[key]
-    return merged
+    return _merge_mechanics_override(base, override, MECHANICS_KEYS + DOORWAY_MECHANICS_KEYS)
 
 
 def _merged_object_types():
@@ -721,6 +731,18 @@ def reset_builtin_mechanics(type_id):
     OBJECT_TYPES[type_id] = dict(_BUILTIN_OBJECT_TYPES[type_id])
 
 
+def _validate_new_id(id_, registry):
+    """Raises ValueError if `id_` isn't a well-formed, still-free key for
+    `registry` -- shared by register_custom_type/register_npc_type
+    (OBJECT_TYPES) and register_item (ITEM_DEFINITIONS), each registering
+    a brand-new entry and needing the same "letters/digits/_ only, not
+    already taken" guard before writing anything."""
+    if not id_ or not all(c.isalnum() or c == "_" for c in id_):
+        raise ValueError("Identifiant invalide (lettres/chiffres/_ uniquement)")
+    if id_ in registry:
+        raise ValueError(f"'{id_}' existe deja")
+
+
 def register_custom_type(
     type_id, name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None,
     interactable=False, lockable=False, frame_rects=None,
@@ -731,10 +753,7 @@ def register_custom_type(
     pour le mode edition). Leve ValueError sur un id/archetype invalide ou
     deja pris, pour que l'appelant affiche un message plutot que de
     corrompre le registre silencieusement."""
-    if not type_id or not all(c.isalnum() or c == "_" for c in type_id):
-        raise ValueError("Identifiant invalide (lettres/chiffres/_ uniquement)")
-    if type_id in OBJECT_TYPES:
-        raise ValueError(f"'{type_id}' existe deja")
+    _validate_new_id(type_id, OBJECT_TYPES)
     entry = _build_visual_fields(name, tileset, rect, size, archetype, frame_rects)
     entry.update(_build_mechanics_fields(entry, blocks_movement, cell_modes, interactable, lockable))
     _write_custom_type(type_id, entry)
@@ -931,6 +950,21 @@ ENEMY_FOLDERS = {
     "skeleton2": "skeleton2",
 }
 ENEMY_ANIMATIONS = ("idle", "movement", "attack", "damaged", "death")
+
+
+def mob_kind(type_id):
+    """"enemy"/"animal"/"pnj" for a mob type, or None if `type_id` isn't a
+    mob at all. Mirrors core.world.entities.Mob.__init__'s own frame-source
+    dispatch (entity_pack presence first, then ENEMY_FOLDERS membership) --
+    the single source of truth for what 4 separate call sites (Mob itself,
+    the Forge, CardPanelUI, CardRenderer) used to each re-derive
+    independently via `type_id in ENEMY_FOLDERS`."""
+    config = OBJECT_TYPES.get(type_id)
+    if config is None or not config.get("mob"):
+        return None
+    if config.get("entity_pack"):
+        return "pnj"
+    return "enemy" if type_id in ENEMY_FOLDERS else "animal"
 
 # ENEMY_STATS (health/move_speed/aggro_range/attack_range/loot/item_loot) is
 # now merged directly into each enemy's own _BUILTIN_OBJECT_TYPES[...]["stats"]
@@ -1134,10 +1168,7 @@ def register_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, 
     """Valide et persiste un NOUVEL item -- l'equivalent register_custom_type
     pour ITEM_DEFINITIONS. Leve ValueError sur un id invalide/deja pris ou
     un slot inconnu."""
-    if not item_id or not all(c.isalnum() or c == "_" for c in item_id):
-        raise ValueError("Identifiant invalide (lettres/chiffres/_ uniquement)")
-    if item_id in ITEM_DEFINITIONS:
-        raise ValueError(f"'{item_id}' existe deja")
+    _validate_new_id(item_id, ITEM_DEFINITIONS)
     if slot not in ("attack", "interact", "passive"):
         raise ValueError(f"Slot inconnu : {slot}")
     entry = _build_item_entry(name, slot, icon_path, icon_rect, capabilities, effects, sounds, sound_pitch, loot_cards)
@@ -1204,12 +1235,9 @@ def update_item_overrides(item_id, capabilities, effects, sounds=None, sound_pit
         merged = dict(base)
     else:
         overrides[item_id] = entry
-        merged = dict(base)
-        for key in ("capabilities", "effects", "sounds", "sound_pitch", "loot_cards"):
-            if key in entry:
-                merged[key] = entry[key]
-            else:
-                merged.pop(key, None)
+        merged = _merge_mechanics_override(
+            base, entry, ("capabilities", "effects", "sounds", "sound_pitch", "loot_cards")
+        )
     _persist_custom_item_overrides(overrides)
     ITEM_DEFINITIONS[item_id] = merged
     return merged
@@ -1583,10 +1611,7 @@ def register_npc_type(type_id, name, entity_pack, tileset, icon_rect, size, wand
     specifiquement pour etre un PNJ dialogable, donc part interactable par
     defaut -- reste editable/desactivable ensuite comme n'importe quel
     autre flag MECHANICS_KEYS, via update_type_mechanics."""
-    if not type_id or not all(c.isalnum() or c == "_" for c in type_id):
-        raise ValueError("Identifiant invalide (lettres/chiffres/_ uniquement)")
-    if type_id in OBJECT_TYPES:
-        raise ValueError(f"'{type_id}' existe deja")
+    _validate_new_id(type_id, OBJECT_TYPES)
     entry = _build_npc_type_entry(name, entity_pack, tileset, icon_rect, size, wander_actions)
     entry["interactable"] = True
     _write_custom_type(type_id, entry)

@@ -22,7 +22,7 @@ import threading
 
 import pygame
 
-from core.world.entities import Mob, Pickup, ItemPickup, ThrownDynamite, Explosion
+from core.world.entities import Mob, Pickup, ItemPickup, CardPickup, ThrownDynamite, Explosion
 from core.world.object_manager import make_item
 from core.exploration.player_session import PlayerSession
 from core.engine.gamestate import GameState
@@ -286,6 +286,9 @@ class NetworkSessionMixin:
     def _apply_item_pickup_entry(self, item_pickup, entry):
         self._register_network_target(item_pickup, entry["x"], entry["y"])
 
+    def _apply_card_pickup_entry(self, card_pickup, entry):
+        self._register_network_target(card_pickup, entry["x"], entry["y"])
+
     def _apply_projectile_entry(self, projectile, entry):
         self._register_network_target(projectile, entry["x"], entry["y"])
         projectile.frame = entry["frame"]
@@ -491,12 +494,13 @@ class NetworkSessionMixin:
             if dungeon is None:
                 continue
             mirrors = self._network_mirrors.setdefault(room_ref, {
-                "mobs": {}, "pickups": {}, "item_pickups": {},
+                "mobs": {}, "pickups": {}, "item_pickups": {}, "card_pickups": {},
                 "dynamites": {}, "explosions": {},
             })
 
             currency_entries = [e for e in categories.get("pickups", []) if e["kind"] == "currency"]
             item_entries = [e for e in categories.get("pickups", []) if e["kind"] == "item"]
+            card_entries = [e for e in categories.get("pickups", []) if e["kind"] == "card"]
 
             self._sync_mirror_list(
                 mirrors["mobs"], dungeon.mob_manager.mobs, categories.get("mobs", []),
@@ -512,6 +516,11 @@ class NetworkSessionMixin:
                 mirrors["item_pickups"], dungeon.pickup_manager.item_pickups, item_entries,
                 factory=lambda e: ItemPickup(make_item(e["item_id"]), e["slot"], e["x"], e["y"]),
                 updater=self._apply_item_pickup_entry,
+            )
+            self._sync_mirror_list(
+                mirrors["card_pickups"], dungeon.pickup_manager.card_pickups, card_entries,
+                factory=lambda e: CardPickup(e["card_id"], e["x"], e["y"]),
+                updater=self._apply_card_pickup_entry,
             )
             self._sync_mirror_list(
                 mirrors["dynamites"], dungeon.projectile_manager.dynamites, categories.get("dynamites", []),
