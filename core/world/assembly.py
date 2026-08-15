@@ -28,47 +28,33 @@ GENERATION_ATTEMPTS = 25
 
 
 def _valid_entry_exits(dungeon):
-    """gate/wall/cave_entrance/big_entrance objects (plus any custom type
-    registered with the "porte" archetype -- ObjectManager.is_es_type is
-    the single source of truth for E/S membership, so a custom E/S is a
-    genuine assembler-eligible connector here, not just placeable in the
-    editor) that actually qualify as a room-to-room connection:
-    ObjectManager.is_valid_doorway (a WALL cell with one FLOOR neighbor
-    opposite one EMPTY neighbor, WALL flanking the rest) means this exit
-    genuinely borders the void, not just another spot inside the room. A
-    gate/wall placed with no void neighbor (e.g. a locked door gating a
-    side room) still works as an ordinary in-room obstacle -- it's just
-    never picked as a connector here. Also excludes anything flagged
-    "dungeon_entrance"/"dungeon_exit" (ObjectManager.get_role) -- neither
-    is ever an ordinary inter-room connector: a dungeon_entrance only ever
-    lives in home (never generation material in practice) and a
-    dungeon_exit is meant to stay a genuine dead end in whichever room it
-    lands in, not get merged with another room."""
+    """gate/wall/cave_entrance/big_entrance objects (plus any custom "porte"
+    type -- ObjectManager.is_es_type is the source of truth) that actually
+    qualify as a room-to-room connection: is_valid_doorway (a WALL cell with
+    one FLOOR neighbor opposite one EMPTY neighbor) means this exit genuinely
+    borders the void, not just another spot inside the room -- a gate/wall
+    with no void neighbor still works as an in-room obstacle, just never
+    picked as a connector. Also excludes anything role-flagged
+    "dungeon_entrance"/"dungeon_exit" -- neither is an ordinary inter-room
+    connector: entrance only lives in home, exit must stay a genuine dead end."""
     return [
         obj for obj in dungeon.object_manager.objects
         if dungeon.object_manager.is_es_type(obj["type"])
         and dungeon.object_manager.get_role(obj) == "connector"
-        # The object's own anchor cell (bottom-center of its footprint), not
-        # just its stored origin -- same check placement itself already
-        # went through (see ObjectManager._valid_doorway_anchor's own
-        # docstring), so a multi-cell E/S (a 2-wide "wall"/"big_entrance",
-        # or a custom "porte" of any size) is validated identically here
-        # and at placement time.
+        # The anchor cell (bottom-center of footprint), same check placement
+        # itself uses -- so a multi-cell E/S validates identically here.
         and dungeon.object_manager._valid_doorway_anchor(obj["type"], obj["x"], obj["y"])
     ]
 
 
 def _border_edges(dungeon):
-    """Contiguous runs of FLOOR cells sitting exactly on one of the room's
-    own 4 grid edges -- e.g. every cell in row 0 that's FLOOR. A FLOOR cell
-    on a grid edge naturally has no WALL on the side facing off-grid
-    (build_walls_around never walls an out-of-bounds neighbor -- see
-    autotile.py), so these are already open, wall-free connection points
-    with no gate/wall object needed at all: two rooms glued here just
-    continue as one uninterrupted floor, no door in between (see
-    _attach_via_border). Returns a list of (side, start, length) tuples,
-    "start" being the local row (north/south) or column (east/west) index
-    where the run begins."""
+    """Contiguous runs of FLOOR cells sitting exactly on one of the room's 4
+    grid edges. A FLOOR cell on a grid edge naturally has no WALL on the
+    off-grid side (build_walls_around never walls an out-of-bounds
+    neighbor), so these are already open, wall-free connection points --
+    two rooms glued here continue as one uninterrupted floor, no door in
+    between (see _attach_via_border). Returns (side, start, length) tuples,
+    "start" the local row (north/south) or column (east/west) index."""
     w, h = dungeon.width, dungeon.height
     grid = dungeon.logical_grid
     edges = []
@@ -95,10 +81,8 @@ def _border_edges(dungeon):
 class PlacedRoom:
     """A Dungeon placed at a given floor and global grid offset within a DungeonAssembly.
 
-    `index` is this room's position in the owning DungeonAssembly.rooms list,
-    known to the caller at construction time (generate_assembly/load_assembly
-    both add rooms in a stable, deterministic order) -- it's how a door object's
-    "door_target_room" reference resolves back to a specific PlacedRoom.
+    `index` is this room's position in the owning DungeonAssembly.rooms list
+    -- how a door object's "door_target_room" reference resolves back to a specific PlacedRoom.
     """
 
     def __init__(self, dungeon, room_name, floor, offset_x, offset_y, index):
@@ -115,14 +99,10 @@ class PlacedRoom:
 
     def occupied_cells(self):
         """Global (x, y) -> logical cell type, for every non-empty cell in
-        this room. Cached: a placed room's own logical_grid never changes
-        for the lifetime of this PlacedRoom (destructibility isn't
-        implemented yet -- see CLAUDE.md -- and Creator's painting tools
-        are suspended while a generated dungeon is being previewed), so the
-        first scan is reused for every later call instead of rescanning the
-        full grid every time -- this is called repeatedly inside
-        generate_assembly's own placement search (_fits, _collides), where
-        it used to dominate generation cost on a large room pool."""
+        this room. Cached: a placed room's grid never changes for the
+        lifetime of this PlacedRoom -- called repeatedly inside
+        generate_assembly's placement search (_fits, _collides), where it
+        used to dominate generation cost on a large room pool."""
         if self._occupied_cells_cache is None:
             cells = {}
             for y, row in enumerate(self.dungeon.logical_grid):
@@ -148,28 +128,18 @@ class DungeonAssembly:
     def __init__(self):
         self.rooms = []
         # floor -> [PlacedRoom, ...], kept in sync by add_room (the only
-        # place self.rooms is ever mutated after __init__ -- generate_assembly
-        # always finalizes a room's .floor before calling add_room, never
-        # after). rooms_on_floor is called from nearly every per-frame
-        # collision/render/button query in this class and from Explorator's
-        # own _rooms_with_offset, so an O(total rooms) scan per call adds up
-        # fast on an assembly with many rooms/floors -- this makes it O(1)
-        # plus the size of just that floor's own room list.
+        # mutator). rooms_on_floor is called from nearly every per-frame
+        # query in this class, so this makes it O(1) + that floor's own room list.
         self._rooms_by_floor = {}
         self._shadow_cache = {}
         self._gradient_hole_cache = {}
         self._below_cache = {}
         self._border_cache = {}  # floor -> (terrain_version tuple, {room: hide_border_cells}) -- see _border_cells_by_room
-        # floor -> merged occupied_cells() dict, see occupied_cells_on_floor
-        # -- invalidated per-floor by add_room, the only mutator.
-        self._occupied_cache = {}
+        self._occupied_cache = {}  # floor -> merged occupied_cells(), invalidated per-floor by add_room
 
     def add_room(self, placed_room):
         self.rooms.append(placed_room)
         self._rooms_by_floor.setdefault(placed_room.floor, []).append(placed_room)
-        # A new room on this floor changes what occupied_cells_on_floor(floor)
-        # must return -- drop just that floor's cached merge (individual
-        # rooms' own occupied_cells() stay valid and cached, see PlacedRoom).
         self._occupied_cache.pop(placed_room.floor, None)
 
     def rooms_on_floor(self, floor):
@@ -180,12 +150,9 @@ class DungeonAssembly:
 
     def occupied_cells_on_floor(self, floor):
         """Merged occupied_cells() of every room on `floor`. Cached per
-        floor (unlike PlacedRoom.occupied_cells(), which is cheap to keep
-        forever, a floor's merge must invalidate whenever add_room places a
-        new room there -- see add_room) -- called repeatedly inside
-        generate_assembly's own placement search (_fits/_collides), where
-        re-merging every room on a floor from scratch on every candidate
-        placement used to dominate generation cost as the room pool grew."""
+        floor (invalidated by add_room) -- called repeatedly inside
+        generate_assembly's placement search, where re-merging from scratch
+        on every candidate used to dominate generation cost."""
         cached = self._occupied_cache.get(floor)
         if cached is not None:
             return cached
@@ -212,18 +179,15 @@ class DungeonAssembly:
         """The room *on `floor`* that actually occupies (global_x, global_y).
 
         Scoped to a single floor on purpose: collision must never consider
-        another floor's rooms, or two rooms that happen to share a bounding
-        box (they're built from the same source rooms, so this is common)
-        could let the player "phase" through a wall that's solid on their
-        own floor just because an unrelated room on another floor happens to
-        have FLOOR at that same global cell. Crossing floors (or rooms) is
-        handled separately, via `resolve_room_transition` -- see
-        generate_assembly's door_target_room.
+        another floor's rooms, or two rooms sharing a bounding box (common,
+        built from the same source rooms) could let the player "phase"
+        through a wall solid on their own floor. Crossing floors/rooms is
+        handled separately via `resolve_room_transition`.
 
-        Prefers staying in `prefer_room` if it still claims the cell (checked
-        first), then falls back to any other room on `floor`. Checks FLOOR
-        ownership first, only falling back to "any non-empty cell" (a WALL,
-        e.g. an unrelated auto-generated halo) if nothing claims FLOOR there.
+        Prefers `prefer_room` if it still claims the cell, then falls back
+        to any other room on `floor`. Checks FLOOR ownership first, only
+        falling back to "any non-empty cell" (a WALL, e.g. an unrelated auto
+        halo) if nothing claims FLOOR there.
         """
         rooms = self.rooms_on_floor(floor)
         candidates = ([prefer_room] if prefer_room in rooms else []) + rooms
@@ -244,22 +208,18 @@ class DungeonAssembly:
 
     def resolve_room_transition(self, current_room, last_door_obj, global_x, global_y):
         """Edge-triggered room switch across a gate/wall entry-exit: stepping
-        onto a door cell that carries a "door_target_room" (stamped by
-        generate_assembly on both halves of a merged doorway, whether it's a
-        same-floor E/S or a cross-floor portal -- both use the identical
-        mechanism now) switches to that room exactly once, on entry.
+        onto a door cell carrying a "door_target_room" (stamped by
+        generate_assembly on both halves of a merged doorway, same-floor or
+        cross-floor alike) switches to that room exactly once, on entry.
 
-        This deliberately does NOT re-derive the current room from FLOOR
-        ownership every frame (that's what `locate_room` is for, and it's
-        still used for collision/button resolution) -- a door crossing is a
-        discrete event, not a continuous "which room owns this pixel" query.
-        Standing still on the shared door cell must not flip back and forth,
-        and going back the way you came requires fully leaving the door cell
-        and re-entering it from the other room's side.
+        Deliberately does NOT re-derive the current room from FLOOR
+        ownership every frame (that's locate_room, still used for
+        collision/button resolution) -- a door crossing is a discrete
+        event. Standing still on the shared cell must not flip back and
+        forth; going back requires fully leaving and re-entering from the other side.
 
-        `last_door_obj` is the door object (a plain dict from some room's
-        object list) the player was resolved to be on last frame, or None.
-        Returns (room, last_door_obj) for the caller to store back.
+        `last_door_obj` is the door object the player was resolved to be on
+        last frame, or None. Returns (room, last_door_obj) to store back.
         """
         local_x, local_y = global_x - current_room.offset_x, global_y - current_room.offset_y
         door_obj = current_room.dungeon.object_manager.get_object_at(local_x, local_y)
@@ -273,23 +233,17 @@ class DungeonAssembly:
         target_room = self.rooms[door_obj["door_target_room"]]
         target_local_x = global_x - target_room.offset_x
         target_local_y = global_y - target_room.offset_y
-        # Re-derive the door as seen from the *target* room, not the one we
-        # just left -- next frame's lookup happens via target_room, so
-        # comparing against door_obj (the source room's copy) would never
-        # match and would re-trigger a bounce straight back.
+        # Re-derive the door as seen from the target room -- next frame's
+        # lookup happens via target_room, so comparing against door_obj
+        # (source room's copy) would never match and would bounce back.
         target_door_obj = target_room.dungeon.object_manager.get_object_at(target_local_x, target_local_y)
 
-        # The player could only physically reach this cell because door_obj
-        # (this room's own copy) read as open -- but the two halves of a
-        # merged doorway are separate object dicts with independent state
-        # (see generate_assembly), and could disagree (an assembly_links
-        # propagation gap, or a stale save carrying a baked-in "open" key).
-        # Force them back into agreement at the moment of crossing so a
-        # crossing that was valid on this side can never stand the player
-        # against a closed copy on the other side -- this is what was
-        # actually producing "stuck inside a wall after taking an open
-        # door" (resolve_room_transition never used to check the
-        # destination at all).
+        # The two halves of a merged doorway are separate object dicts with
+        # independent state and could disagree (an assembly_links
+        # propagation gap, or a stale save). Force them into agreement at
+        # the moment of crossing so a valid crossing can never strand the
+        # player against a closed copy on the other side -- this was what
+        # produced "stuck inside a wall after taking an open door".
         if target_door_obj is not None and door_obj.get("open"):
             target_door_obj["open"] = True
             target_door_obj["activated"] = door_obj.get("activated", True)
@@ -305,12 +259,10 @@ class DungeonAssembly:
         return room.dungeon.object_manager.is_cell_walkable(global_x - room.offset_x, global_y - room.offset_y)
 
     def check_button_trigger(self, global_x, global_y, floor, prefer_room=None):
-        """Assembly-aware equivalent of ObjectManager.check_button_trigger -- resolves
-        both same-room links (local {"x","y"}) and cross-room ones
+        """Assembly-aware equivalent of ObjectManager.check_button_trigger --
+        resolves both same-room links (local {"x","y"}) and cross-room ones
         (assembly_links: {"floor","x","y"} in global coordinates, added at
-        generation time -- see generate_assembly). Scoped to `floor` for the
-        same reason locate_room is: the player can only ever press a button
-        that's actually on their current floor.
+        generation time). Scoped to `floor`, same reason as locate_room.
         """
         room = self.locate_room(global_x, global_y, floor, prefer_room=prefer_room)
         if room is None:
@@ -330,17 +282,14 @@ class DungeonAssembly:
             object_manager._open_if_blocking(target, object_manager)
 
         for link_target in obj.get("assembly_links", []):
-            # "room" (a room index, added at generation time -- see
-            # generate_assembly) is the authoritative target when present.
-            # room_at's bounding-box search is ambiguous for a same-floor
-            # doorway merge, where the anchor and candidate rooms' bounds
-            # both legitimately contain the shared door cell -- it always
-            # resolved to whichever room was inserted first (the anchor),
-            # so a button in the anchor room could never actually reach the
-            # candidate's copy through this path. Older saved donjons don't
-            # have "room" on their assembly_links entries yet (additive
-            # field, same as variant/links/open), so room_at is kept as a
-            # best-effort fallback for those rather than breaking them.
+            # "room" (a room index, added at generation time) is the
+            # authoritative target when present. room_at's bounding-box
+            # search is ambiguous for a same-floor doorway merge (anchor and
+            # candidate bounds both contain the shared door cell) -- it
+            # always resolved to whichever room was inserted first, so a
+            # button in the anchor room could never reach the candidate's
+            # copy through this path. Older saved donjons lack "room" on
+            # assembly_links (additive field), so room_at stays a best-effort fallback.
             room_index = link_target.get("room")
             if room_index is not None:
                 target_room = self.rooms[room_index] if 0 <= room_index < len(self.rooms) else None
@@ -355,38 +304,25 @@ class DungeonAssembly:
             target_room.dungeon.object_manager._open_if_blocking(target, target_room.dungeon.object_manager)
 
     def update(self, dt, player_refs_by_floor=None, magnet_radius=0):
-        """player_refs_by_floor ({floor: [PlayerRef, ...]}) only ever gets
-        passed down to rooms on a matching floor -- a mob on
-        another floor has no business colliding (or, for enemies, aggroing)
-        with a player who isn't physically there (mirrors locate_room's
-        per-floor scoping). Grouped by floor rather than one scalar
-        "player_floor" because two sessions can now genuinely be on two
-        different floors at once (see PlayerSession.current_placed_room) --
-        each floor's rooms must only ever see the refs of players actually
-        on that floor. Each ref's hitbox arrives in global coordinates
-        (that's what Explorator/the player use everywhere), but each room's
-        own Dungeon only ever thinks in that room's local coordinates --
-        same as is_global_cell_walkable converting before delegating to a
-        room's ObjectManager -- so it's shifted back by that room's offset
-        here before being handed down. Each ref's `player`/`session` (the
-        actual objects, for take_damage / whichever session a future
-        combat-adjacent feature needs) are forwarded as-is -- no coordinate
-        transform needed since only their identity matters here, never .position (see
-        MobManager/Mob, which only ever read distances
-        from the already-shifted hitbox).
+        """player_refs_by_floor ({floor: [PlayerRef, ...]}) only ever passed
+        down to rooms on a matching floor -- a mob on another floor has no
+        business colliding/aggroing with a player who isn't physically
+        there (mirrors locate_room's per-floor scoping). Grouped by floor
+        since two sessions can be on two different floors at once. Each
+        ref's hitbox arrives in global coordinates but each room's Dungeon
+        only thinks in local coordinates, so it's shifted back by that
+        room's offset before being handed down. Each ref's `player`/`session`
+        forwarded as-is -- only identity matters here, never .position.
 
         Only rooms on a floor within SHADOW_MAX_DISTANCE of some occupied
         floor are actually simulated -- a room nobody is near (no player on
-        its floor, and not even visible as a tinted shadow/below floor,
-        since that's exactly what SHADOW_MAX_DISTANCE bounds -- see render())
-        has its object animations/mob wandering/aggro AI frozen instead of
-        ticking every frame for no one to see. This used to simulate every
-        room in the whole assembly unconditionally, which scales as O(total
-        rooms x entities) regardless of how much of the dungeon is actually
-        in play. Freezing is harmless and self-healing: an object's animation
-        just holds where it was and resumes the next tick a player is close
-        enough again, same as this class's own shadow/below render caches
-        already tolerate staleness on floors that aren't the active one.
+        its floor, not even visible as a shadow/below floor) has its
+        animations/mob AI frozen instead of ticking every frame for no one
+        to see. Used to simulate every room unconditionally (O(total rooms x
+        entities) regardless of how much is in play). Freezing is harmless
+        and self-healing: an object's animation just holds and resumes once a
+        player is close enough again, same as the shadow/below render caches
+        already tolerate staleness on inactive floors.
         """
         player_refs_by_floor = player_refs_by_floor or {}
         if not player_refs_by_floor:
@@ -416,28 +352,24 @@ class DungeonAssembly:
     # ------------------------------------------------------------------
     # Rendering -- the active floor is drawn normally (full tiles/objects/
     # mobs); every other floor is drawn as a cheap cached "shadow" of its
-    # rooms' logical footprints only (see _render_floor_shadow), never a full
-    # re-render, since it's never interacted with directly. Floor distance
-    # from active_floor picks both the tint (black above, grey below) and the
-    # opacity; anything more than SHADOW_MAX_DISTANCE floors away isn't drawn
-    # at all.
+    # rooms' logical footprints only, never a full re-render. Floor distance
+    # from active_floor picks tint (black above, grey below) and opacity;
+    # anything more than SHADOW_MAX_DISTANCE floors away isn't drawn at all.
     #
-    # Floors BELOW draw before the active floor (underneath it, a floor you
-    # glimpse through gaps) -- a flat, constant tint, no hole. Floors ABOVE
-    # draw AFTER the active floor (a ceiling on top of it, blocking the view)
-    # with a soft-edged hole cut out around the player so their own floor
-    # stays visible close to them, exactly like the pre-shadow-cache version.
+    # Floors BELOW draw before the active floor (underneath it, glimpsed
+    # through gaps) -- flat tint, no hole. Floors ABOVE draw AFTER the
+    # active floor (a ceiling on top) with a soft-edged hole cut around the
+    # player so their own floor stays visible close to them.
     # ------------------------------------------------------------------
 
     SHADOW_OPACITY_STEP = 0.34  # opacity lost per floor of distance from active_floor
     SHADOW_MAX_DISTANCE = 2  # floors beyond this aren't drawn at all
     SHADOW_COLOR_ABOVE = (0, 0, 0)
     SHADOW_COLOR_BELOW = (150, 150, 150)
-    # ~50% white/blue BLEND_RGBA_MULT tint for floors below active_floor (see
-    # _get_below_render) -- multiplying (not a plain alpha-over blend) leaves
-    # fully-transparent void pixels at alpha 0 while still tinting the real
-    # tile/object art, so the player can actually see which tile they'd land
-    # on, not just a flat silhouette.
+    # ~50% white/blue BLEND_RGBA_MULT tint for floors below active_floor --
+    # multiplying (not alpha-over) keeps fully-transparent void pixels at
+    # alpha 0 while tinting real tile/object art, so the player can see
+    # which tile they'd land on, not just a silhouette.
     BELOW_TINT_COLOR = (167, 197, 255, 255)
     VISION_RADIUS_TILES = 4.5
     VISION_FALLOFF_TILES = 1.5  # width of the soft edge just inside VISION_RADIUS_TILES
@@ -445,20 +377,18 @@ class DungeonAssembly:
     def render(self, screen, camera, active_floor, player_world_pos=None, hide_object_types=None,
                skip_active_floor_foreground=False, skip_active_floor_mobs=False, show_grid=True):
         """Draw every floor relative to active_floor: floors below first
-        (flat-tinted shadow, no hole), the active floor with full detail,
-        floors above last (shadow with a soft hole around player_world_pos --
-        a continuous world pixel position, omit it, e.g. Creator's static
-        preview with no player, to render them with no hole at all).
+        (flat-tinted shadow, no hole), active floor in full detail, floors
+        above last (shadow with a soft hole around player_world_pos -- a
+        continuous world position; omit it, e.g. Creator's player-less
+        static preview, to render with no hole at all).
 
-        skip_active_floor_foreground lets a caller that draws its own player
+        skip_active_floor_foreground lets a caller drawing its own player
         sprite (Explorator) leave out active_floor's foreground objects (an
         L/R torch) here and draw them afterwards via
         render_active_floor_foreground(), so the player ends up behind them.
-        skip_active_floor_mobs works the same way for active_floor's live
-        Mobs, letting Explorator draw them together with the player via
-        render_active_floor_entities() instead, sorted by feet position so
-        whichever is lower on screen draws in front. Creator, which draws
-        no player sprite, leaves both off and gets everything in one pass.
+        skip_active_floor_mobs works the same for live Mobs, via
+        render_active_floor_entities() (sorted by feet position). Creator,
+        which draws no player, leaves both off and gets everything in one pass.
         """
         for floor in self.floors():
             if floor < active_floor:
@@ -485,18 +415,15 @@ class DungeonAssembly:
 
     def render_active_floor_entities(self, screen, camera, active_floor, players):
         """Y-sorted draw of every live Mob on active_floor plus every player
-        in `players`: whichever entity's feet (.position.y, in the same
-        world-pixel sense Mob/Player.get_hitbox() anchor their hitbox to)
-        sit lower on screen draws in front, matching how a top-down scene
-        actually reads. Call after render(..., skip_active_floor_mobs=True)
-        and before render_active_floor_foreground() -- same slot a single
-        player used to occupy alone via a plain player.draw().
+        in `players`: whichever entity's feet (.position.y) sit lower on
+        screen draws in front, matching a top-down scene. Call after
+        render(..., skip_active_floor_mobs=True) and before
+        render_active_floor_foreground() -- the slot a single player used to occupy alone.
 
-        A mob's .position is local to its own room's Dungeon (no offset
-        baked in, unlike a player's, which is already global -- see
-        DungeonAssembly.update's docstring), so it's converted to a global y
-        here purely for comparison; drawing itself still goes through that
-        room's own offset camera, same as every other per-room draw call.
+        A mob's .position is local to its own room (no offset baked in,
+        unlike a player's, which is already global), so it's converted to a
+        global y here purely for comparison; drawing itself still goes
+        through that room's own offset camera.
         """
         tile_size = Dungeon.TILE_SIZE
         entries = []
@@ -520,16 +447,13 @@ class DungeonAssembly:
         rooms = self.rooms_on_floor(floor)
         hide_border_cells_by_room = self._border_cells_by_room(floor, rooms)
 
-        # Two passes, not one -- every room's own floor/objects first
-        # (show_border=False), THEN every room's border ledge in a second,
-        # guaranteed-last loop (see WorldRenderer.render_border's own
-        # docstring). hide_border_cells_by_room already suppresses a ledge
-        # at a genuine border-merge seam, but this ordering is a real
-        # safety net on top of that filter: even a seam it somehow missed
-        # still gets painted OVER by the neighboring room's real floor
-        # (drawn in THIS SAME pass-1 loop, at a different iteration) rather
-        # than risk a stray ledge landing on top of it depending on
-        # whichever order `rooms` happens to iterate in.
+        # Two passes: every room's floor/objects first (show_border=False),
+        # then every room's border ledge in a second, guaranteed-last loop.
+        # hide_border_cells_by_room already suppresses a ledge at a genuine
+        # border-merge seam, but this ordering is a safety net on top: even
+        # a seam it missed still gets painted OVER by the neighboring room's
+        # real floor (drawn in this same pass-1 loop) rather than risking a
+        # stray ledge on top depending on `rooms` iteration order.
         offset_cameras = {}
         for room in rooms:
             offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
@@ -550,22 +474,16 @@ class DungeonAssembly:
 
     def _border_cells_by_room(self, floor, rooms):
         """{room: hide_border_cells} for every room on `floor` (see
-        _south_seam_cells) -- cached per floor and only recomputed when some
-        room's Dungeon.terrain_version has actually changed (destroy_area is
-        the only thing that bumps it for a room inside an assembly -- Creator
-        painting also bumps terrain_version, but only ever on a standalone
-        single-room Dungeon, never one that's part of a DungeonAssembly),
-        since _render_floor runs every frame at 60fps but the underlying seam
-        data is static except after a rare, event-driven terrain edit.
-        `occupied_cells_on_floor` already does the
-        "merge every room's occupied_cells" work this used to re-derive by
-        hand.
+        _south_seam_cells) -- cached per floor, recomputed only when some
+        room's Dungeon.terrain_version has changed (destroy_area is the only
+        thing that bumps it for a room inside an assembly), since
+        _render_floor runs at 60fps but seam data is static except after a
+        rare terrain edit.
 
         This class's other render caches (_shadow_cache/_below_cache) never
         invalidate at all -- terrain edits are rare enough that staleness
-        there hasn't mattered in practice. This one is versioned instead,
-        since a stale seam would visibly paint a false ledge over (or leave
-        a gap in front of) a room's own floor after a destroy_area."""
+        hasn't mattered. This one is versioned since a stale seam would
+        visibly paint a false ledge (or leave a gap) after a destroy_area."""
         cache_key = tuple(room.dungeon.terrain_version for room in rooms)
         cached = self._border_cache.get(floor)
         if cached is not None and cached[0] == cache_key:
@@ -594,8 +512,7 @@ class DungeonAssembly:
         return seam_cells
 
     def _render_floor_shadow(self, screen, camera, floor, active_floor, player_world_pos=None):
-        """player_world_pos only ever matters for a floor ABOVE active_floor
-        (see render()'s docstring) -- a floor below never gets a hole."""
+        """player_world_pos only matters for a floor ABOVE active_floor -- a floor below never gets a hole."""
         distance = abs(floor - active_floor)
         if distance == 0 or distance > self.SHADOW_MAX_DISTANCE:
             return
@@ -620,15 +537,14 @@ class DungeonAssembly:
             if hole_patch is not None:
                 hole_rect = hole_patch.get_rect(center=(int(hole_center[0]), int(hole_center[1])))
                 if room_rect.colliderect(hole_rect):
-                    # Only rooms the vision circle actually overlaps pay for a
-                    # copy + patch blit -- every other room (the common case)
-                    # stays on the plain cached-blit-only path above. MULT
-                    # (not MIN) because the shadow's own alpha is already
-                    # below 255 (its distance-based opacity) -- multiplying
-                    # scales it proportionally by the hole's 0..255 gradient,
-                    # so the falloff still spans the whole band instead of
-                    # clamping flat as soon as the hole's alpha passes the
-                    # shadow's own (which MIN would do).
+                    # Only rooms the vision circle actually overlaps pay for
+                    # a copy + patch blit -- every other room stays on the
+                    # plain cached-blit path above. MULT (not MIN) because
+                    # the shadow's own alpha is already below 255 (its own
+                    # distance-based opacity) -- multiplying scales it
+                    # proportionally by the hole's 0..255 gradient, so the
+                    # falloff still spans the whole band instead of clamping
+                    # flat as soon as the hole's alpha passes the shadow's own.
                     shadow = shadow.copy()
                     local_pos = (hole_rect.x - room_rect.x, hole_rect.y - room_rect.y)
                     shadow.blit(hole_patch, local_pos, special_flags=pygame.BLEND_RGBA_MULT)
@@ -636,10 +552,9 @@ class DungeonAssembly:
             screen.blit(shadow, screen_pos)
 
     def _render_floor_below(self, screen, camera, floor, active_floor, hide_object_types=None):
-        """Real tiles/objects of `floor` (see _get_below_render), blue-tinted
-        and faded by distance from active_floor -- replaces the old flat grey
-        silhouette so the player can see concretely which tile they'd land on
-        falling through void, not just that "something" is down there."""
+        """Real tiles/objects of `floor` (_get_below_render), blue-tinted and
+        faded by distance -- replaces the old flat grey silhouette so the
+        player can see concretely which tile they'd land on falling through void."""
         distance = active_floor - floor
         if distance <= 0 or distance > self.SHADOW_MAX_DISTANCE:
             return
@@ -655,23 +570,17 @@ class DungeonAssembly:
 
     def _get_below_render(self, room, zoom, hide_object_types):
         """A cached, blue-tinted render of `room`'s actual tiles/objects (not
-        just its logical footprint, unlike _get_shadow) -- mobs are
-        excluded since this cache isn't refreshed every frame, so a live
-        position baked into it would go stale immediately. Rendered onto its
-        own zero-offset surface via _ZoomOnlyCamera, independent of the real
-        camera's current pan position, then tinted once with
-        BLEND_RGBA_MULT. Cached per (room, zoom) -- distance-based fade is
-        applied afterwards via set_alpha, not baked in, so one cached surface
-        covers every distance.
+        just its logical footprint, unlike _get_shadow) -- mobs excluded
+        since this cache isn't refreshed every frame. Rendered onto its own
+        zero-offset surface via _ZoomOnlyCamera, independent of the real
+        camera's pan, then tinted once with BLEND_RGBA_MULT. Cached per
+        (room, zoom) -- distance fade applied afterwards via set_alpha, not baked in.
 
-        Keyed on tile_px (the rounded per-tile pixel size zoom actually
-        resolves to), not the raw zoom float -- same reasoning as
-        WorldRenderer._get_scaled_tile's own cache: Camera.zoom_at's
-        *1.2/0.8 steps rarely land on the exact same float twice, so keying
-        on zoom made this cache grow by one full room-sized Surface per
-        room x every distinct zoom float ever visited, for the entire
-        lifetime of the assembly, instead of collapsing every zoom that
-        rounds to the same pixel size onto one entry."""
+        Keyed on tile_px (rounded per-tile pixel size), not the raw zoom
+        float -- Camera.zoom_at's *1.2/0.8 steps rarely land on the exact
+        same float twice, so keying on zoom made this cache grow by one
+        room-sized Surface per room x every distinct zoom float ever
+        visited, instead of collapsing every zoom that rounds to the same pixel size onto one entry."""
         tile_size = Dungeon.TILE_SIZE
         tile_px = round(tile_size * zoom)
         key = (room, tile_px)
@@ -698,18 +607,15 @@ class DungeonAssembly:
 
     def _get_shadow(self, room, color, zoom):
         """A cached, pre-tinted silhouette of `room`'s logical footprint --
-        every non-EMPTY cell filled with `color` (an (r, g, b, alpha) tuple),
-        no tiles/objects/mobs at all -- scaled to `zoom`. Built once per
-        (room, color, zoom): color is fully determined by floor distance and
-        direction (see _render_floor_shadow), so at most 2*SHADOW_MAX_DISTANCE
-        variants of a given room's shadow are ever cached, each a single blit
-        per frame afterwards instead of a full tile-by-tile re-render.
+        every non-EMPTY cell filled with `color` (r,g,b,alpha), no
+        tiles/objects/mobs, scaled to `zoom`. Built once per (room, color,
+        zoom): color is fully determined by floor distance/direction, so at
+        most 2*SHADOW_MAX_DISTANCE variants of a room's shadow are ever
+        cached, each a single blit per frame afterwards.
 
         Keyed on tile_px, not the raw zoom float -- same reasoning as
-        _get_below_render's own cache (see its docstring): keying on zoom
-        made this grow by one room-sized Surface per room x color x every
-        distinct zoom float ever visited, instead of collapsing every zoom
-        that rounds to the same pixel size onto one entry."""
+        _get_below_render's own cache: keying on zoom made this grow by one
+        room-sized Surface per room x color x every distinct zoom float ever visited."""
         tile_size = Dungeon.TILE_SIZE
         tile_px = round(tile_size * zoom)
         key = (room, color, tile_px)
@@ -730,13 +636,12 @@ class DungeonAssembly:
 
     def _gradient_hole(self, radius_px, falloff_px):
         """A small cached SRCALPHA patch: alpha 0 (fully punched) out to
-        (radius_px - falloff_px), then a linear ramp up to alpha 255 (no
-        effect once multiplied into a shadow) at radius_px and beyond -- a
-        soft-edged hole instead of a hard-edged circle. Built once per
-        (radius_px, falloff_px) pair (both vary only with zoom, not every
-        frame) by stamping successively smaller filled circles from the
-        outside in, each one's alpha computed for its own radius -- O(radius_px)
-        draw calls on a cache miss instead of a per-pixel loop.
+        (radius_px - falloff_px), then a linear ramp to alpha 255 (no effect
+        once multiplied into a shadow) at radius_px and beyond -- a
+        soft-edged hole instead of hard-edged. Built once per (radius_px,
+        falloff_px) by stamping successively smaller filled circles from the
+        outside in, each with its own alpha -- O(radius_px) draw calls on a
+        cache miss instead of a per-pixel loop.
         """
         key = (radius_px, falloff_px)
         patch = self._gradient_hole_cache.get(key)
@@ -780,8 +685,7 @@ class _OffsetCamera:
 class _ZoomOnlyCamera:
     """A stationary camera at a fixed zoom, no panning -- used by
     _get_below_render to render a room's own tiles/objects into an
-    independent cache surface, decoupled from wherever the live scrolling
-    camera currently points (only its zoom matters for that cache)."""
+    independent cache surface, decoupled from the live scrolling camera."""
 
     def __init__(self, zoom):
         self.zoom = zoom
@@ -799,13 +703,12 @@ def _load_room(room_name):
 def _collides(existing_cells, new_cells, ignore=None):
     """True if any new cell conflicts with an existing one at the same global position.
 
-    Two rooms meeting at a shared WALL is expected (their auto-generated wall
+    Two rooms meeting at a shared WALL is expected (auto-generated wall
     halos naturally coincide at a doorway) and not a collision -- only a
-    mismatch (floor vs. floor, or floor vs. wall) counts. `ignore` excludes the
-    shared entry-exit cell itself, which is *always* floor-on-floor by
-    construction (that's the point of aligning the two rooms there) and isn't
-    a real conflict -- without excluding it, two rooms could never end up on
-    the same floor at all.
+    mismatch (floor vs floor, or floor vs wall) counts. `ignore` excludes the
+    shared entry-exit cell itself (always floor-on-floor by construction,
+    the point of aligning the two rooms there) -- without excluding it, two
+    rooms could never end up on the same floor at all.
     """
     for pos, cell_type in new_cells.items():
         if pos == ignore:
@@ -818,13 +721,9 @@ def _collides(existing_cells, new_cells, ignore=None):
 
 def _find_start_room(room_names, rng=None):
     """A random room among room_names with both a spawn and a valid way out
-    -- a gate/wall entry-exit or a border-floor edge (see _border_edges),
-    either is enough to start growing the assembly from. Previously always
-    the FIRST such room in room_names order, which meant every generation
-    from a given pool started from the same room every time (whichever the
-    multi-select pool happened to list first) -- rng.choice over every
-    qualifying candidate instead, same rng generate_assembly already
-    threads through every other random pick here."""
+    -- a gate/wall entry-exit or a border-floor edge. Previously always the
+    FIRST such room in room_names order (every generation from a given pool
+    started identically) -- now rng.choice over every qualifying candidate."""
     if rng is None:
         rng = random
     candidates = []
@@ -841,9 +740,8 @@ def _find_start_room(room_names, rng=None):
 def _border_offset(anchor_room, anchor_edge, candidate_dungeon, candidate_edge):
     """Global (offset_x, offset_y) placing candidate_dungeon directly,
     seamlessly adjacent to anchor_room along anchor_edge's side -- the two
-    border-floor runs (see _border_edges) end up continuing as one
-    uninterrupted strip of floor, no shared/overlapping cell at all (unlike
-    an entry-exit merge, which aligns onto the *same* global cell)."""
+    border-floor runs end up continuing as one uninterrupted strip, no
+    shared/overlapping cell (unlike an entry-exit merge, which aligns onto the same global cell)."""
     side, anchor_start, _length = anchor_edge
     _cand_side, candidate_start, _cand_length = candidate_edge
     anchor_w, anchor_h = anchor_room.dungeon.width, anchor_room.dungeon.height
@@ -866,16 +764,13 @@ def _border_offset(anchor_room, anchor_edge, candidate_dungeon, candidate_edge):
 
 def _attach_via_border(rng, room_names, assembly, anchor_room, anchor_edge):
     """Try to glue another room directly onto anchor_room's border-floor run
-    (anchor_edge) -- no gate/wall object at all, the floor just continues
-    seamlessly across the seam, reading as one continuous room rather than
-    two rooms joined by a door. Requires an exact length match on the
-    opposite side (kept simple on purpose: partial-overlap alignment would
-    need its own conflict-resolution story). Unlike an entry-exit merge,
-    this never steps to a different floor on collision -- a seam that
-    doesn't fit as a flat, same-floor continuation just isn't placed at all,
-    since a floor-shifted "seamless" room would no longer actually read as
-    one continuous room. Returns (new PlacedRoom, the edge it consumed) or
-    None if nothing fit."""
+    (anchor_edge) -- no gate/wall object, floor continues seamlessly across
+    the seam, reading as one continuous room. Requires an exact length match
+    on the opposite side (kept simple -- partial-overlap alignment would
+    need its own conflict story). Unlike an entry-exit merge, never steps to
+    a different floor on collision -- a seam that doesn't fit as a flat,
+    same-floor continuation just isn't placed at all. Returns (new
+    PlacedRoom, the edge it consumed) or None if nothing fit."""
     opposite = OPPOSITE_SIDE[anchor_edge[0]]
 
     candidate_name = rng.choice(room_names)
@@ -902,29 +797,24 @@ def _attach_via_border(rng, room_names, assembly, anchor_room, anchor_edge):
 
 
 def _room_has_dungeon_exit(dungeon):
-    """True if `dungeon` carries at least one object explicitly tagged
-    role="dungeon_exit" (an E/S or a chest, see ObjectManager.get_role) --
-    the pool-level test used to find which rooms in a player's selection
-    are even CAPABLE of ending a generated dungeon, before generate_assembly
-    tries to guarantee one gets placed (see its own docstring)."""
+    """True if `dungeon` carries at least one object tagged role="dungeon_exit"
+    -- the pool-level test for which rooms in a player's selection are even
+    CAPABLE of ending a generated dungeon, before generate_assembly tries to guarantee one gets placed."""
     manager = dungeon.object_manager
     return any(manager.get_role(obj) == "dungeon_exit" for obj in manager.objects)
 
 
 def _attach_via_exit(rng, room_names, assembly, anchor_room, anchor_exit):
     """Try to attach a new room onto anchor_room via an entry-exit merge
-    through anchor_exit -- the "exit"-kind pending item's own placement
-    logic (aligning two same-typed gate/wall objects onto one shared global
-    cell, stepping to an adjacent floor on collision, propagating a button
-    link across the merged doorway). Returns (new PlacedRoom, the exit it
-    consumed) or None if no room in room_names has a same-typed connector.
+    through anchor_exit -- aligns two same-typed gate/wall objects onto one
+    shared global cell, steps to an adjacent floor on collision, propagates
+    a button link across the merged doorway. Returns (new PlacedRoom, the
+    exit it consumed) or None if no room in room_names has a same-typed connector.
 
     Extracted out of generate_assembly's own main loop (which still calls
-    this for its ordinary random draws) so the guaranteed-exit pass below
-    can reuse the EXACT same attachment mechanics against a narrower pool
-    (only rooms carrying a dungeon_exit-tagged object, see
-    _room_has_dungeon_exit) -- same "one mechanism, two callers" shape as
-    _attach_via_border already has."""
+    this for ordinary draws) so the guaranteed-exit pass can reuse the same
+    attachment mechanics against a narrower pool (only dungeon_exit-carrying
+    rooms) -- same "one mechanism, two callers" shape as _attach_via_border."""
     candidate_name = rng.choice(room_names)
     candidate_dungeon = _load_room(candidate_name)
     candidate_exits = _valid_entry_exits(candidate_dungeon)
@@ -990,13 +880,11 @@ def _attach_via_exit(rng, room_names, assembly, anchor_room, anchor_exit):
 
 def _room_hop_distances(edge_pairs, room_count, start_index=0):
     """BFS hop-count (edges, not rooms) from `start_index` to every other
-    room index reachable via `edge_pairs` (a list of (a, b) room-index
-    pairs recorded as generate_assembly attaches each room, both merge
-    kinds alike -- a border glue is just as much a real room-to-room
-    adjacency as a door merge, even though it stamps no door_target_room).
-    A room never reached (shouldn't happen -- every placed room attaches
-    to the growing assembly by construction) reads as float('inf'), so it
-    always sorts last/never satisfies a >= distance check."""
+    room index reachable via `edge_pairs` ((a, b) room-index pairs recorded
+    as generate_assembly attaches each room, either merge kind alike -- a
+    border glue is just as much a real adjacency as a door merge, even
+    though it stamps no door_target_room). A room never reached (shouldn't
+    happen) reads as float('inf'), so it always sorts last."""
     adjacency = {i: [] for i in range(room_count)}
     for a, b in edge_pairs:
         adjacency[a].append(b)
@@ -1016,13 +904,12 @@ def _room_hop_distances(edge_pairs, room_count, start_index=0):
 
 def _run_expansion(rng, room_names, assembly, pending, edges, target_count):
     """The shared random-expansion loop -- pops a pending connection point,
-    tries to attach a new room from `room_names` there (an entry-exit merge
-    or a border glue, see generate_assembly's own docstring), and keeps
-    going until either `target_count` rooms are placed or `pending` runs
-    dry. Records every successful attachment's (anchor_index, new_index)
-    pair into `edges` (mutated in place) -- the room-to-room adjacency
-    graph _dungeon_exit_score/_finalize_dungeon_exit rank a finished
-    attempt's dungeon_exit placement by (see _room_hop_distances)."""
+    tries to attach a new room from `room_names` there (entry-exit merge or
+    border glue), keeps going until `target_count` rooms are placed or
+    `pending` runs dry. Records every successful attachment's
+    (anchor_index, new_index) pair into `edges` (mutated in place) -- the
+    adjacency graph _dungeon_exit_score/_finalize_dungeon_exit rank a
+    finished attempt's dungeon_exit placement by (see _room_hop_distances)."""
     while len(assembly.rooms) < target_count and pending:
         anchor_room, (kind, item) = pending.popleft()
 
@@ -1056,13 +943,10 @@ def _generate_assembly_once(room_names, room_count, rng):
     """One full, ordinary generation pass -- the original algorithm,
     unchanged: start from a random room with both a spawn and a way out,
     then expand via _run_expansion until room_count rooms are placed or
-    pending runs dry. No exit-guarantee logic at all; that's
-    generate_assembly's job, layered on top by calling this repeatedly (see
-    its own docstring for why repeating whole attempts, rather than trying
-    to steer a single attempt, turned out to be the robust way to do that).
-    Returns (assembly, edges) -- edges is generate_assembly's own
-    room-to-room adjacency list (see _room_hop_distances) -- or (None,
-    None) if no room in room_names has both a spawn and a way out."""
+    pending runs dry. No exit-guarantee logic; that's generate_assembly's
+    job, layered on top by calling this repeatedly. Returns (assembly,
+    edges) -- edges is the room-to-room adjacency list -- or (None, None) if
+    no room in room_names has both a spawn and a way out."""
     start_name, start_dungeon = _find_start_room(room_names, rng)
     if start_name is None:
         return None, None
@@ -1072,9 +956,8 @@ def _generate_assembly_once(room_names, room_count, rng):
     assembly.add_room(start_room)
 
     # deque, not a plain list -- pending.pop(0) on a list is O(len(pending)),
-    # trending the whole generation loop toward O(n^2) in room_count/pool
-    # size as pending keeps growing (every accepted room appends its own new
-    # exits/border-edges below). popleft() is O(1).
+    # trending the whole loop toward O(n^2) as pending keeps growing
+    # (every accepted room appends its own new exits/border-edges). popleft() is O(1).
     pending = deque((start_room, ("exit", exit_obj)) for exit_obj in start_room.entry_exits())
     pending.extend((start_room, ("border", edge)) for edge in start_room.border_edges())
 
@@ -1085,11 +968,10 @@ def _generate_assembly_once(room_names, room_count, rng):
 
 def _dungeon_exit_score(assembly, edges):
     """-1 if no "dungeon_exit"-tagged object exists anywhere in `assembly`
-    (the "no exit at all" bug this whole mechanism exists to catch), else
-    the LARGEST room-hop-distance (see _room_hop_distances) among however
-    many dungeon_exit objects it does have -- generate_assembly's own
-    ranking of "how good is this attempt", used to pick the best of several
-    full regeneration attempts (see its own docstring)."""
+    (the "no exit at all" bug this mechanism exists to catch), else the
+    LARGEST room-hop-distance among however many dungeon_exit objects it
+    has -- generate_assembly's ranking of "how good is this attempt", used
+    to pick the best of several full regeneration attempts."""
     distances = _room_hop_distances(edges, len(assembly.rooms)) if assembly.rooms else {}
     best = -1
     for room in assembly.rooms:
@@ -1120,32 +1002,24 @@ def generate_assembly(room_names, room_count, rng=None):
       no floor-stepping fallback -- see its docstring for why.
 
     Guaranteed dungeon exit: if the room pool has at least one room carrying
-    a "dungeon_exit"-tagged object (see _room_has_dungeon_exit) AND
-    room_count > 1, a single ordinary generation attempt (_generate_assembly_once)
-    is run up to GENERATION_ATTEMPTS times, scored by _dungeon_exit_score
-    (-1 = no exit at all, otherwise how many room-hops away it landed), and
-    the BEST-scoring attempt is kept -- stopping early the moment one meets
-    math.ceil(room_count / 2) rooms of distance from spawn (the user's own
-    hardened rule). Earlier tries at steering a single attempt toward this
-    (reserving a room slot, then forcing an exit-capable room into it) kept
-    running into the same trap: whatever budget was reserved for "explore
-    more connectors if the first one doesn't fit" was also the ONLY budget
-    left to actually place the exit once a fit was found, so it could
-    never both explore AND still have room to land. Regenerating the WHOLE
-    attempt from scratch sidesteps that entirely -- every attempt is the
-    ordinary, already-correct algorithm, unmodified, so there's nothing new
-    to get subtly wrong; only the "which finished attempt do we keep" logic
-    is new. This is what makes "no exit at all" (a real bug the user hit)
-    vanishingly unlikely whenever the pool can support one at all -- it
-    already happens on its own within a handful of ordinary attempts most
-    of the time, and the loop still returns the best attempt seen even if
-    none ever meets the full distance target, rather than an unlucky worst
-    case forcing a hard failure. Still not a mathematical guarantee for a
-    very small/awkward room pool (a pool where the exit-capable room's own
-    connectors never once fit anywhere across every attempt stays exit-less,
-    same residual limitation _finalize_dungeon_exit documents) -- but this
-    is a world away from "essentially left to chance" the single-attempt
-    version had.
+    a "dungeon_exit"-tagged object AND room_count > 1, a single ordinary
+    generation attempt (_generate_assembly_once) is run up to
+    GENERATION_ATTEMPTS times, scored by _dungeon_exit_score (-1 = no exit at
+    all, otherwise room-hops away it landed), and the BEST-scoring attempt is
+    kept -- stopping early once one meets math.ceil(room_count / 2) rooms of
+    distance from spawn. Earlier tries at steering a single attempt toward
+    this (reserving a room slot, forcing an exit-capable room into it) kept
+    hitting the same trap: the budget reserved for "explore more connectors"
+    was also the ONLY budget left to place the exit once a fit was found, so
+    it could never both explore AND land. Regenerating the WHOLE attempt
+    sidesteps that -- every attempt is the ordinary, unmodified algorithm;
+    only "which finished attempt do we keep" is new. This makes "no exit at
+    all" vanishingly unlikely whenever the pool can support one -- it
+    already happens on its own within a handful of ordinary attempts most of
+    the time, and the loop still returns the best attempt seen even if none
+    ever meets the full distance target. Still not a mathematical guarantee
+    for a very small/awkward pool (same residual limitation
+    _finalize_dungeon_exit documents).
 
     Returns None if no room in room_names has both a spawn and a way out.
     """
@@ -1181,33 +1055,26 @@ def generate_assembly(room_names, room_count, rng=None):
 
 
 def _finalize_dungeon_exit(assembly, edges):
-    """At most one "dungeon_exit"-role object (an E/S or a chest --
-    ObjectManager.get_role) survives across the whole assembled dungeon --
-    every candidate is ranked by its own room's hop-distance from spawn
-    (see _room_hop_distances) and the FARTHEST one wins; every other one is
-    demoted back to its type's own default role. Runs once, after every
-    room is already placed, rather than tracking a "claimed" flag per
-    add_room call site -- simpler and provably correct regardless of which
-    of the two attach paths (entry-exit merge or border glue) placed a
-    given room. Only mutates each room's already-generation-local copy of
-    its objects (PlacedRoom.dungeon is a fresh load, never the same
-    in-memory objects as the source room file on disk), so a room reused
-    unflagged in a later, separate generation is unaffected.
+    """At most one "dungeon_exit"-role object survives across the whole
+    assembled dungeon -- every candidate ranked by its room's hop-distance
+    from spawn and the FARTHEST one wins; every other one demoted back to
+    its type's own default role. Runs once, after every room is placed,
+    rather than tracking a "claimed" flag per add_room call -- simpler and
+    correct regardless of which attach path placed a given room. Only
+    mutates each room's already-generation-local object copies (a fresh
+    load, never the same in-memory objects as the source file), so a room
+    reused unflagged in a later, separate generation is unaffected.
 
-    Ranking by distance (not just "first found") matters even though
-    generate_assembly already tries to force a suitably-far exit room in:
-    an EARLIER room from the main expansion can independently carry its own
-    dungeon_exit tag too (nothing stops a player from using more than one
-    exit-capable room in the same pool), and the farther of the two should
-    always win regardless of placement order.
+    Ranking by distance (not "first found") matters even though
+    generate_assembly already tries to force a far exit room in: an EARLIER
+    room from the main expansion can independently carry its own
+    dungeon_exit tag too, and the farther of the two should win regardless of placement order.
 
     Documented limitation: still an upper bound only for a pool with no
     exit-capable room at all -- a generation can end up with zero
     dungeon_exit objects if none of the placed rooms happened to carry one.
-    No amount of ranking here can force one into existence; that's
-    generate_assembly's own job (see its docstring), and even that is a
-    best-effort push toward ceil(room_count / 2), not a hard guarantee, once
-    a large room_count makes for a very bushy (shallow, wide) graph."""
+    That's generate_assembly's own job, and even that is a best-effort push
+    toward ceil(room_count / 2), not a hard guarantee, for a very bushy graph."""
     distances = _room_hop_distances(edges, len(assembly.rooms)) if assembly.rooms else {}
     best_obj, best_distance = None, -1
     for room in assembly.rooms:
