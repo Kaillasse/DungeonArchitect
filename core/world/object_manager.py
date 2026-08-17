@@ -426,6 +426,20 @@ DOORWAY_MECHANICS_KEYS = ("linkable", "blocks_until_open")
 OVERRIDE_MARKER = "__override_of_builtin__"
 
 
+def _is_builtin_type(type_id):
+    """The real discriminator behind "is `type_id` a builtin, non-editable-
+    identity type" -- id membership in `_BUILTIN_OBJECT_TYPES`, not the
+    `isinstance(asset, dict)` shape check update_type_visual/
+    update_type_mechanics/delete_custom_type used to test directly (asset
+    being a dict only ever coincided with "custom" because every custom
+    type used to be created exclusively via the sprite editor's tileset-
+    region crop flow -- fuse_card below is the first path that registers a
+    custom type by cloning a builtin's own asset field verbatim, a plain
+    string, which the old shape check would have misread as "builtin" and
+    crashed on)."""
+    return type_id in _BUILTIN_OBJECT_TYPES
+
+
 def _derive_card_type(config):
     """Best-effort card_type for a custom_object_types.json entry saved
     before this field existed -- same rule core.data.cards.default_card_for
@@ -442,6 +456,165 @@ def _derive_card_type(config):
     if config.get("is_es") or config.get("chest"):
         return "tile_special"
     return "tile_decor"
+
+
+def derive_card_type_from_capabilities(entry):
+    """The NEW, capability-driven card_type rule -- confirmed with the
+    user, replacing _derive_card_type's own explicit-flag approach
+    (mob/is_es/chest) as the long-term source of truth for what KIND of
+    card something is. Properties determine the type, not the other way
+    around:
+
+      1. real stats (a "stats" dict with at least something in it, e.g.
+         health) -> "mob" -- a creature stays a creature even though it's
+         ALSO technically placable in Creator like any other object;
+         health wins outright.
+      2. placable_on_floor/placable_on_wall present, PLUS at least one
+         OTHER capability -> "tile_special".
+      3. placable_on_floor/placable_on_wall present, alone -> "tile_decor".
+      4. neither -> "item".
+
+    Deliberately NOT yet the single source of truth anywhere (see the
+    staged rollout plan confirmed with the user) -- introduced to run
+    ALONGSIDE the existing stored "card_type" field first, so every
+    disagreement between the two can be found and resolved (either by
+    fixing this rule or by fixing the entry's own data, e.g. giving an
+    entity-pack-backed mob with no combat stats at least a health value
+    so it still reads as a creature) before anything actually switches
+    over to reading this instead of the stored field. Only meaningful for
+    OBJECT_TYPES/ITEM_DEFINITIONS entries (tile/object/mob/item) -- room
+    and propriete cards are not capability-bearing registry entries at
+    all and stay explicitly typed (core.data.cards), confirmed out of
+    scope for this rule."""
+    if entry.get("stats"):
+        return "mob"
+    capabilities = entry.get("capabilities") or {}
+    placable_keys = {"placable_on_floor", "placable_on_wall"}
+    if not (set(capabilities) & placable_keys):
+        return "item"
+    return "tile_special" if (set(capabilities) - placable_keys) else "tile_decor"
+
+
+# What actually makes a type placeable in Creator (see
+# Creator._try_place_object's own gate on this) -- confirmed with the
+# user: this used to be a purely implicit consequence of just existing in
+# OBJECT_TYPES with a "placement" field, invisible anywhere in the card
+# system itself (a tile-object card showed no tearable properties at all
+# in the Forge even though it plainly "uses" a placement capability to be
+# placeable to begin with). "floor"/"stairs" placement -> placable_on_floor,
+# "wall"/"doorway" -> placable_on_wall (a doorway object like gate/
+# cave_entrance still occupies a WALL cell, see is_valid_doorway) -- same
+# two surfaces card_tear.py's own base-tile equivalent
+# (core.data.cards.BASE_TILE_CARDS' floor_placable/wall_placable) names,
+# just for a placed OBJECT instead of raw terrain.
+_PLACABLE_CAPABILITY_BY_PLACEMENT = {
+    "floor": "placable_on_floor",
+    "stairs": "placable_on_floor",
+    "wall": "placable_on_wall",
+    "doorway": "placable_on_wall",
+}
+
+# Object types that function as an entry/exit (a doorway between rooms, or
+# the boundary of a room's void edge) -- the only types get_role/set_role
+# accept a "connector"/"dungeon_entrance"/"dungeon_exit" role for, and what
+# core.world.assembly's procedural generator treats as a possible room-to-
+# room connector (imported there instead of a second, separately
+# maintained tuple). Moved up here (used to live right before
+# ES_ROLES/ENEMY_FOLDERS, much further down) so
+# _with_derived_special_capabilities below -- called from _merged_object_types
+# at IMPORT time, before the rest of this module has executed -- can see it.
+ES_TYPES = ("gate", "wall", "cave_entrance", "big_entrance")
+
+
+def _with_derived_placable_capability(entry):
+    """Backfills `entry`'s own "capabilities" dict with a
+    placable_on_floor/placable_on_wall entry derived from its "placement"
+    field, UNLESS it already explicitly carries one of the two (an
+    override actually saved via the Forge, see MechanicsPanelUI.
+    _passthrough_capabilities -- once real, never silently replaced).
+    Mirrors _derive_card_type's own "backfill once, at the registry
+    level" shape -- called from every path that produces a live OBJECT_TYPES
+    entry (_merged_object_types, register_custom_type) so this is true
+    the instant a type exists, builtin or custom, not just after the next
+    restart re-runs _merged_object_types. A type with no recognized
+    "placement" (there is none today, but a future one is possible) is
+    returned completely unchanged -- never made "placable" by fiat."""
+    key = _PLACABLE_CAPABILITY_BY_PLACEMENT.get(entry.get("placement"))
+    if key is None:
+        return entry
+    capabilities = entry.get("capabilities") or {}
+    if "placable_on_floor" in capabilities or "placable_on_wall" in capabilities:
+        return entry
+    entry = dict(entry)
+    entry["capabilities"] = {**capabilities, key: {}}
+    return entry
+
+
+def _with_derived_special_capabilities(type_id, entry):
+    """Backfills linkable/doorway/lootable into `entry`'s own
+    "capabilities" dict, mirrored from the SAME flat flags/membership
+    that already drive real behavior elsewhere (is_linkable/is_es_type/
+    is_chest below) -- confirmed with the user: what made a type
+    "tile_special" instead of plain "tile_decor" used to live entirely
+    outside the capabilities vocabulary (linkable, is_es, chest were
+    plain flat flags), so derive_card_type_from_capabilities' own
+    "placable + another capability = tile_special" rule could never see
+    it. This does NOT reimplement or replace any of that behavior --
+    is_valid_doorway, check_button_trigger, and core.world.assembly's
+    procedural generator all keep reading the original flags/ES_TYPES
+    exactly as before. It only ADDS a parallel, visible, tearable
+    capability entry that reflects the same fact. "doorway" covers
+    is_es_type's own two sources (ES_TYPES membership for a builtin, or
+    config["is_es"] for a custom "porte"-archetype type) so it can never
+    silently drift out of sync with the real rule.
+
+    Left deliberately incomplete: "spawn" and "stairs" are hardcoded
+    tile_special in their own Python source entries for reasons that
+    aren't linkable/is_es/chest at all (a spawn marker, a level-transition
+    marker) -- neither gets backfilled anything here, so both still
+    compute as tile_decor under the new rule. Flagged, not silently
+    "fixed" by inventing a capability for them -- see the conversation
+    this was introduced in."""
+    additions = {}
+    if entry.get("linkable"):
+        additions["linkable"] = {}
+    if type_id in ES_TYPES or entry.get("is_es"):
+        additions["doorway"] = {}
+    if entry.get("chest"):
+        additions["lootable"] = {}
+    if not additions:
+        return entry
+    capabilities = entry.get("capabilities") or {}
+    merged = dict(capabilities)
+    changed = False
+    for key, value in additions.items():
+        if key not in merged:
+            merged[key] = value
+            changed = True
+    if not changed:
+        return entry
+    entry = dict(entry)
+    entry["capabilities"] = merged
+    return entry
+
+
+def is_placable(object_type, on="any"):
+    """Whether `object_type` currently carries a placable_on_floor/
+    placable_on_wall capability (see _with_derived_placable_capability) --
+    the real, explicit gate for "can this be placed at all", replacing
+    the old implicit "it exists in OBJECT_TYPES, therefore it's
+    placeable" assumption nothing else could see or check. `on` narrows
+    to one specific surface ("floor"/"wall"); the default "any" accepts
+    either. Shared by Creator._try_place_object today -- meant to be
+    reused unchanged by a future Exploration-side placement gesture
+    (picking up/re-placing a broken tile mid-run, see CLAUDE.md's
+    roadmap): same capability, same check, wherever it happens to run."""
+    capabilities = OBJECT_TYPES.get(object_type, {}).get("capabilities", {})
+    if on == "floor":
+        return "placable_on_floor" in capabilities
+    if on == "wall":
+        return "placable_on_wall" in capabilities
+    return "placable_on_floor" in capabilities or "placable_on_wall" in capabilities
 
 
 def _merge_mechanics_override(base, entry, keys):
@@ -476,20 +649,36 @@ def _merge_builtin(type_id, override):
     return _merge_mechanics_override(base, override, MECHANICS_KEYS + DOORWAY_MECHANICS_KEYS)
 
 
+def _with_all_derived_capabilities(type_id, entry):
+    """Both backfills combined -- the one call every producer of a live
+    OBJECT_TYPES entry should make (see _merged_object_types/
+    _write_custom_type)."""
+    entry = _with_derived_placable_capability(entry)
+    return _with_derived_special_capabilities(type_id, entry)
+
+
 def _merged_object_types():
     """The live registry: every builtin, with any persisted mechanics
     override merged on top, plus every genuine custom/NPC type as-is
-    (card_type backfilled once if the entry predates that field)."""
-    merged = dict(_BUILTIN_OBJECT_TYPES)
+    (card_type backfilled once if the entry predates that field). Every
+    entry also gets its placable_on_floor/placable_on_wall/linkable/
+    doorway/lootable capabilities backfilled here (see
+    _with_all_derived_capabilities) -- the single place every OBJECT_TYPES
+    entry, builtin or custom, overridden or not, ultimately flows
+    through."""
+    merged = {
+        type_id: _with_all_derived_capabilities(type_id, entry)
+        for type_id, entry in _BUILTIN_OBJECT_TYPES.items()
+    }
     for type_id, entry in _custom_types.items():
         if entry.get(OVERRIDE_MARKER):
             result = _merge_builtin(type_id, entry)
             if result is not None:
-                merged[type_id] = result
+                merged[type_id] = _with_all_derived_capabilities(type_id, result)
         else:
             entry = dict(entry)
             entry.setdefault("card_type", _derive_card_type(entry))
-            merged[type_id] = entry
+            merged[type_id] = _with_all_derived_capabilities(type_id, entry)
     return merged
 
 
@@ -670,10 +859,17 @@ def _write_custom_type(type_id, entry):
     (meme regle que _merged_object_types, ici pour qu'une entree ecrite
     CETTE session l'ait deja en memoire sans attendre un redemarrage) --
     jamais pour un override de builtin (OVERRIDE_MARKER), dont le
-    card_type reste celui, deja correct, du builtin lui-meme."""
+    card_type reste celui, deja correct, du builtin lui-meme. Meme
+    raisonnement pour placable_on_floor/placable_on_wall/linkable/doorway/
+    lootable (voir _with_all_derived_capabilities) -- un override n'a de
+    toute facon pas de champ "placement"/"linkable"/"is_es"/"chest" du
+    tout (identite/visuel, jamais touche par une mecanique), donc
+    s'applique en pratique seulement aux vraies creations/edits de type
+    custom, exactement comme card_type ci-dessus."""
     if not entry.get(OVERRIDE_MARKER):
         entry = dict(entry)
         entry.setdefault("card_type", _derive_card_type(entry))
+        entry = _with_all_derived_capabilities(type_id, entry)
 
     custom = _load_custom_object_types()
     custom[type_id] = entry
@@ -774,7 +970,7 @@ def update_type_visual(type_id, name, tileset, rect, size, archetype, frame_rect
     existing = OBJECT_TYPES.get(type_id)
     if existing is None:
         raise ValueError(f"'{type_id}' n'existe pas")
-    if not isinstance(existing.get("asset"), dict):
+    if _is_builtin_type(type_id):
         raise ValueError(f"'{type_id}' est un type integre au jeu, non modifiable")
     entry = dict(existing)
     for key in _ARCHETYPE_FLAG_KEYS:
@@ -809,7 +1005,7 @@ def update_type_mechanics(type_id, blocks_movement=False, cell_modes=None,
         existing, blocks_movement, cell_modes, interactable, lockable, capabilities, stats, effects, sounds,
         sound_pitch, loot_cards,
     )
-    if not isinstance(existing.get("asset"), dict):
+    if _is_builtin_type(type_id):
         _write_builtin_mechanics_override(type_id, fields)
         return OBJECT_TYPES[type_id]
     entry = dict(existing)
@@ -854,7 +1050,7 @@ def delete_custom_type(type_id):
     existing = OBJECT_TYPES.get(type_id)
     if existing is None:
         raise ValueError(f"'{type_id}' n'existe pas")
-    if not isinstance(existing.get("asset"), dict):
+    if _is_builtin_type(type_id):
         raise ValueError(f"'{type_id}' est un type integre au jeu, non supprimable")
 
     custom = _load_custom_object_types()
@@ -926,14 +1122,6 @@ def mob_types():
 # direction vocabulary in this codebase, not two equivalent ones that
 # could drift apart.
 NPC_DIRECTIONS = ("front", "front_right", "right", "back_right", "back", "back_left", "left", "front_left")
-
-# Object types that function as an entry/exit (a doorway between rooms, or
-# the boundary of a room's void edge) -- the only types get_role/set_role
-# below accept a "connector"/"dungeon_entrance"/"dungeon_exit" role for, and
-# what core.world.assembly's procedural generator treats as a possible
-# room-to-room connector (imported there instead of a second, separately
-# maintained tuple).
-ES_TYPES = ("gate", "wall", "cave_entrance", "big_entrance")
 
 # Allowed "role" values (ObjectManager.get_role/set_role) per object kind --
 # an E/S (ES_TYPES) or a chest (is_chest()). Each kind's first entry is its
@@ -1159,6 +1347,165 @@ def effective_loot_cards(card_id):
     return {card_id: 1}
 
 
+def extract_property_payload(entry, category, kind=None):
+    """The single mechanical fragment named by (category, kind) currently
+    carried by a live OBJECT_TYPES/ITEM_DEFINITIONS `entry` -- the read
+    half of the Forge's "Dechirer" feature (core.editor.ui.mechanics_panel)
+    and core.data.cards.default_card_for's property-card bridge, which both
+    need the exact same extraction logic (a torn-out property card is
+    always resolved live from its source, never snapshotted -- see that
+    module's own docstring). None if `entry` doesn't currently carry this
+    fragment at all (a capability/effect kind it never had, or a mob/item
+    with no stats/loot_cards saved) -- the caller's signal that there's
+    nothing to tear or fuse.
+
+    `category` in {"capability", "effect", "stats", "aggressivity", "state",
+    "loot"} -- "capability"/"effect"/"state" need `kind` (which capability/
+    effect/wander_actions role, e.g. "explosive"/"heal"/"idle" -- a card
+    can carry more than one of any of the three); "stats"/"aggressivity"/
+    "loot" are singleton blocks, `kind` is ignored for them.
+
+    "aggressivity" is a finer-grained VIEW into the same "stats" block
+    "stats" already exposes whole -- just aggro_range/attack_range, never
+    active_attack_frames (deliberately excluded, same reasoning as every
+    other place that field is kept out of Dechirer/Coller: those frame
+    indices are specific to the SOURCE mob's own sprite sheet, so
+    transplanting them onto a target with a differently-shaped attack
+    animation would silently point at the wrong frames) -- so "l'agressivite"
+    (confirmed with the user) can be torn/fused on its own, without
+    dragging health/move_speed/loot along with it.
+
+    "state" reads a PNJ's own wander_actions (which tagged action of its
+    entity pack plays for role `kind`, e.g. "idle"/"sitting") -- None if
+    that role isn't actually configured, same "nothing to tear" signal as
+    every other category."""
+    if category == "capability":
+        return entry.get("capabilities", {}).get(kind)
+    if category == "effect":
+        for effect in entry.get("effects", []):
+            if effect.get("kind") == kind:
+                return effect
+        return None
+    if category == "stats":
+        return entry.get("stats")
+    if category == "aggressivity":
+        stats = entry.get("stats") or {}
+        payload = {key: stats[key] for key in ("aggro_range", "attack_range") if key in stats}
+        return payload or None
+    if category == "state":
+        return entry.get("wander_actions", {}).get(kind)
+    if category == "loot":
+        return entry.get("loot_cards")
+    return None
+
+
+def _apply_property_payload(entry, category, kind, payload):
+    """Writes `payload` (see extract_property_payload) into `entry` in
+    place -- always a REPLACE of that one fragment, never a merge/sum (a
+    fused card's stats/capability/effect are exactly the source's, not the
+    base's-plus-the-source's -- confirmed with the user: "remplacer les
+    stats d'une carte par celle d'une autre" is the fun version, a simple
+    sum "semble un peu fort"). Only the named fragment's own key is
+    touched -- an "explosive" capability payload never disturbs an existing
+    "throwable" one on the same entry, an "heal" effect never disturbs a
+    differently-kinded effect already present. Same for "aggressivity"
+    (only aggro_range/attack_range within "stats" -- health/move_speed/
+    loot, if the target already had them, survive untouched) and "state"
+    (only that one wander_actions role -- every other role the target's
+    pack already had configured survives untouched)."""
+    if category == "capability":
+        capabilities = dict(entry.get("capabilities", {}))
+        capabilities[kind] = dict(payload)
+        entry["capabilities"] = capabilities
+    elif category == "effect":
+        entry["effects"] = [e for e in entry.get("effects", []) if e.get("kind") != kind] + [dict(payload)]
+    elif category == "stats":
+        entry["stats"] = dict(payload)
+    elif category == "aggressivity":
+        stats = dict(entry.get("stats") or {})
+        stats.update(payload)
+        entry["stats"] = stats
+    elif category == "state":
+        wander_actions = dict(entry.get("wander_actions", {}))
+        wander_actions[kind] = payload
+        entry["wander_actions"] = wander_actions
+    elif category == "loot":
+        entry["loot_cards"] = dict(payload)
+
+
+def _write_custom_item(item_id, entry):
+    """The ITEM_DEFINITIONS twin of _write_custom_type -- writes `entry`
+    into custom_items.json (merged, not replaced) and updates
+    ITEM_DEFINITIONS in memory immediately. Unlike _write_custom_type, never
+    needs a card_type backfill -- every ITEM_DEFINITIONS entry (builtin or
+    custom) already always carries "card_type": "item" explicitly (see
+    _build_item_entry/_BUILTIN_ITEM_DEFINITIONS), so a clone of one already
+    has it."""
+    custom = _load_custom_items()
+    custom[item_id] = entry
+    _persist_custom_items(custom)
+    ITEM_DEFINITIONS[item_id] = entry
+
+
+def fuse_card(base_id, category, kind, payload):
+    """The write half of the Forge's "Coller" feature: greffe le fragment
+    (category, kind, payload) -- deja resolu par l'appelant depuis la
+    propriete torn dechiree, voir core.data.cards.parse_property_card_id/
+    TORN_PROPERTIES_PATH, cette fonction ne connait plus aucune source --
+    sur une copie de `base_id`, enregistree sous un TOUT NOUVEL id --
+    jamais une mutation de `base_id` lui-meme (c'est le point entier de
+    cette fonction : une carte fusionnee doit rester independante de tout
+    ce qui reste range sous `base_id`, contrairement a
+    update_type_mechanics/update_item, qui mettent a jour un type
+    partage). Retourne le nouvel id, ou None si `base_id` porte deja ce
+    fragment exact (no-op deliberement silencieux, jamais une erreur --
+    greffer deux fois la meme propriete doit rester 1 seule carte, jamais
+    consommer deux fois pour rien, voir le module docstring).
+
+    L'id du nouveau type est deterministe : `root_id` (la racine non
+    fusionnee -- remonte a travers `fused_from` si `base_id` est deja lui-
+    meme une fusion, pour qu'une deuxieme greffe ne s'imbrique jamais en
+    "id__x__y" mais reste "root__x_y") plus l'ensemble TRIE des fragments
+    deja appliques -- deux chemins de creation differents aboutissant a la
+    meme combinaison (base, {fragments}) retombent donc toujours sur le
+    meme id, et leurs comptes en collection s'empilent au lieu de dupliquer
+    des cartes visuellement identiques (confirme avec l'utilisateur)."""
+    write = _write_custom_type
+    base_entry = OBJECT_TYPES.get(base_id)
+    if base_entry is None:
+        write = _write_custom_item
+        base_entry = ITEM_DEFINITIONS.get(base_id)
+    if base_entry is None:
+        raise ValueError(f"'{base_id}' n'existe pas")
+
+    fused_from = base_entry.get("fused_from")
+    root_id = fused_from["base"] if fused_from else base_id
+    existing_fragments = set(fused_from["fragments"]) if fused_from else set()
+    # alnum/underscore only, same charset _validate_new_id enforces for
+    # every other freshly-minted type_id -- this one flows straight into
+    # new_id below without going through that guard (a derived id can
+    # legitimately already exist, see the no-op check right after), so it
+    # has to be safe on its own.
+    fragment_key = f"{category}_{kind}" if kind else category
+    new_fragments = existing_fragments | {fragment_key}
+    if new_fragments == existing_fragments:
+        return None
+
+    new_id = f"{root_id}__{'_'.join(sorted(new_fragments))}"
+    new_entry = dict(base_entry)
+    _apply_property_payload(new_entry, category, kind, payload)
+    new_entry["fused_from"] = {"base": root_id, "fragments": sorted(new_fragments)}
+    root_entry = OBJECT_TYPES.get(root_id, ITEM_DEFINITIONS.get(root_id, {}))
+    root_name = root_entry.get("name") or root_id.replace("_", " ").title()
+    # No more source card to name -- the property's own generic label
+    # (see core.data.cards.property_label) is all there is to attach now
+    # (confirmed with the user: provenance never mattered here either).
+    from core.data.cards import property_label
+    new_entry["name"] = f"{root_name} + {property_label(category, kind)}"
+    write(new_id, new_entry)
+    return new_id
+
+
 def is_builtin_item(item_id):
     return item_id in _BUILTIN_ITEM_DEFINITIONS
 
@@ -1312,6 +1659,34 @@ def load_star_frames():
         size = STAR_FRAME_SIZE
         _star_frames_cache = [sheet.subsurface((i * size, 0, size, size)).copy() for i in range(STAR_FRAME_COUNT)]
     return _star_frames_cache
+
+
+# Flame VFX (assets/effect/fire/flamme.png) -- a single 96x16 sheet, 6
+# frames of 16x16 sliced left-to-right, same convention as
+# load_star_frames. Played on a loop (not once, unlike explosion/star) by
+# core.editor.ui.card_burn.BurnAnimation while a torn-off card piece burns
+# away in core.editor.ui.mechanics_panel.MechanicsPanelUI's Dechirer
+# gesture -- the one sprite-sheet loader in this module used from UI code
+# rather than the live world, kept here anyway since this is already the
+# single place every other sprite sheet in the project is loaded/cached
+# from.
+FLAME_FOLDER = "effect/fire"
+FLAME_FILENAME = "flamme.png"
+FLAME_FRAME_SIZE = 16
+FLAME_FRAME_COUNT = 6
+
+
+_flame_frames_cache = None
+
+
+def load_flame_frames():
+    """Cached at module level, same reasoning as load_star_frames."""
+    global _flame_frames_cache
+    if _flame_frames_cache is None:
+        sheet = pygame.image.load(PROJECT_ROOT / "assets" / FLAME_FOLDER / FLAME_FILENAME).convert_alpha()
+        size = FLAME_FRAME_SIZE
+        _flame_frames_cache = [sheet.subsurface((i * size, 0, size, size)).copy() for i in range(FLAME_FRAME_COUNT)]
+    return _flame_frames_cache
 
 
 def make_item(item_id):

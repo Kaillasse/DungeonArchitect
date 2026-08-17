@@ -9,13 +9,10 @@ class ObjectTool:
 
         self.position = pygame.Vector2(100, 230)
         self.dragging = False
-        # "collection" (the default -- a card dragged from CardPanelUI, the
-        # only source before StashPanelUI existed) or "stash" (dragged from
-        # core.editor.ui.stash_panel.StashPanelUI instead) -- lets
-        # Creator._resolve_dragged_card tell the two apart on drop, since a
-        # stash-sourced card isn't actually owned yet (never placeable in
-        # the world, never opens the Forge -- its only valid drop target is
-        # the collection panel itself, to deposit it).
+        # "collection" is the only source today -- a card dragged from
+        # CardPanelUI. Kept as an explicit field (rather than assuming
+        # "collection" everywhere) since Creator._resolve_dragged_card
+        # branches on it for property-card fuse drags.
         self.drag_source = "collection"
 
     def start_drag(self, object_type, mouse_pos, source="collection"):

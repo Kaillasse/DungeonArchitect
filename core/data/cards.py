@@ -19,12 +19,15 @@ directory-constant convention.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pygame
 
-from core.world.object_manager import OBJECT_TYPES, ITEM_DEFINITIONS, load_object_frames, make_item, npc_completeness
+from core.world.object_manager import (
+    OBJECT_TYPES, ITEM_DEFINITIONS, load_object_frames, make_item, npc_completeness,
+)
 from core.data.ressources import load_tileset, get_tile_surface, list_rooms, ROOMS_DIRECTORY
 from core.editor.autotile import DEFAULT_FLOOR_SPRITE, DEFAULT_WALL_SPRITE, FLOOR, WALL
 
@@ -44,7 +47,7 @@ CARDS_DIRECTORY.mkdir(parents=True, exist_ok=True)
 # (tile_floor/tile_wall), see object_manager._derive_card_type for the rule
 # that assigns the other two to an OBJECT_TYPES entry that doesn't declare
 # card_type explicitly.
-CARD_TYPES = ("tile", "tile_decor", "tile_special", "item", "mob", "room")
+CARD_TYPES = ("tile", "tile_decor", "tile_special", "item", "mob", "room", "propriete")
 
 # Prefix namespacing a saved room (assets/rooms/<name>.json) as a Card id --
 # a double underscore rather than e.g. ":" since a room name is already
@@ -65,8 +68,18 @@ ROOM_CARD_PREFIX = "room__"
 # instance here could get corrupted by a future caller that mutates the
 # Card it was handed.
 BASE_TILE_CARDS = {
-    "tile_floor": {"name": "Sol", "images": ["tiles/basictileset.png"]},
-    "tile_wall": {"name": "Mur", "images": ["tiles/basictileset.png"]},
+    # "capabilities" here is the raw-terrain equivalent of an OBJECT_TYPES
+    # card's own placable_on_floor/placable_on_wall (see object_manager.
+    # is_placable/_with_derived_placable_capability) -- floor_placable/
+    # wall_placable name the SAME two surfaces for the base autotile tile
+    # itself rather than a placed object. Always present, never toggled
+    # (there's no "non-placable" variant of raw terrain today) -- exists
+    # so the capability is real, visible card data (see default_card_for's
+    # own BASE_TILE_CARDS branch), ready for a future consumer (a
+    # dynamite-recovered floor/wall fragment placeable mid-run, see
+    # CLAUDE.md's roadmap) without inventing a second vocabulary for it.
+    "tile_floor": {"name": "Sol", "images": ["tiles/basictileset.png"], "capabilities": {"floor_placable": {}}},
+    "tile_wall": {"name": "Mur", "images": ["tiles/basictileset.png"], "capabilities": {"wall_placable": {}}},
 }
 
 # What a brand-new Profile's card_collection starts with (see
@@ -89,6 +102,128 @@ def room_name_from_card_id(card_id):
     return None
 
 
+PROPERTY_CARD_PREFIX = "prop__"
+
+# "kind" only means anything for "capability"/"effect"/"state" (a card can
+# carry more than one of any of the three, e.g. dynamite's throwable AND
+# explosive) -- "stats"/"aggressivity"/"loot" are singleton blocks (see
+# object_manager.extract_property_payload).
+_PROPERTY_LABELS = {
+    "capability": {
+        "throwable": "Lancable", "explosive": "Explosif",
+        "placable_on_floor": "Placable (sol)", "placable_on_wall": "Placable (mur)",
+        "linkable": "Liable (bouton)", "doorway": "Entree/sortie", "lootable": "Contient du butin",
+    },
+    "effect": {"heal": "Soin"},
+    "stats": {None: "Statistiques"},
+    "aggressivity": {None: "Agressivite"},
+    "state": {
+        "idle": "Etat (immobile)", "move": "Etat (deplacement)", "sitting": "Etat (assis)",
+        "laying": "Etat (allonge)", "run": "Etat (course)",
+    },
+    "loot": {None: "Butin"},
+}
+
+
+def property_label(category, kind):
+    return _PROPERTY_LABELS.get(category, {}).get(kind) or (kind or category).replace("_", " ").title()
+
+
+# Where every torn property's own frozen snapshot lives -- {property_card_id:
+# {"category":..., "kind":..., "payload":...}}. Confirmed with the user:
+# provenance (which base card a property was torn FROM) stopped mattering
+# entirely -- tearing "placable_on_floor" off a vase or a pillar is the
+# exact same property card either way, no reason to track or care which.
+# That meant dropping source_id from the id scheme below, which in turn
+# meant a torn property card can no longer be resolved "live" by re-reading
+# its (now nonexistent) source -- see property_card_id's own docstring.
+# This file is what it's resolved from instead: a payload snapshot taken
+# once, at the moment of tearing (see register_torn_property), which two
+# DIFFERENT-valued extractions of the same (category, kind) -- e.g.
+# "Explosif" torn off two items with different blast radii -- correctly
+# keep as two separate entries/cards, confirmed with the user (never
+# silently overwritten). Same "stateless converter, small JSON store"
+# shape as every other custom_*.json registry in this project.
+TORN_PROPERTIES_PATH = CARDS_DIRECTORY / "torn_properties.json"
+
+
+def _load_torn_properties():
+    if not TORN_PROPERTIES_PATH.exists():
+        return {}
+    try:
+        with TORN_PROPERTIES_PATH.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _persist_torn_properties(data):
+    TORN_PROPERTIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with TORN_PROPERTIES_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, ensure_ascii=False)
+
+
+def _payload_digest(payload):
+    """A short, deterministic, order-independent fingerprint of `payload`
+    (a dict for every category except "state", where it's a plain tagged-
+    action-name string) -- two extractions with the EXACT same value
+    always produce the same digest, so they resolve to the same property
+    card id and stack instead of duplicating; two extractions with
+    DIFFERENT values always produce different digests, so they never
+    collide or silently overwrite each other (confirmed with the user)."""
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:10]
+
+
+def property_card_id(category, kind, payload):
+    """The deterministic id for the property card representing (category,
+    kind, payload) -- purely a function of WHAT was torn and its actual
+    value, never of WHERE it came from (see TORN_PROPERTIES_PATH's own
+    docstring for why source tracking was dropped entirely). Tearing the
+    exact same fragment with the exact same value, from any source at
+    all, always resolves to this same id, so repeated extractions stack a
+    collection count instead of minting visually-identical duplicate
+    cards."""
+    digest = _payload_digest(payload)
+    if kind:
+        return f"{PROPERTY_CARD_PREFIX}{category}__{kind}__{digest}"
+    return f"{PROPERTY_CARD_PREFIX}{category}__{digest}"
+
+
+def register_torn_property(category, kind, payload):
+    """Computes this fragment's own property_card_id and makes sure its
+    snapshot is actually persisted to TORN_PROPERTIES_PATH -- called once,
+    at the exact moment a fragment is torn (see MechanicsPanelUI._try_tear),
+    while `payload` is still being read live off the card actually being
+    torn. Idempotent: if this exact (category, kind, payload) combination
+    was already torn before (by anyone, from any source), the existing
+    snapshot is left untouched and just its id is returned -- no redundant
+    write, no risk of clobbering it with a merely-equal-but-reordered
+    payload. Returns the id."""
+    card_id = property_card_id(category, kind, payload)
+    data = _load_torn_properties()
+    if card_id not in data:
+        data[card_id] = {"category": category, "kind": kind, "payload": payload}
+        _persist_torn_properties(data)
+    return card_id
+
+
+def parse_property_card_id(card_id):
+    """(category, kind, payload) resolved from this property card's own
+    frozen snapshot (see TORN_PROPERTIES_PATH), or None if `card_id` isn't
+    a property-card id at all OR names one that was never actually
+    registered (shouldn't normally happen -- a property card id only ever
+    exists in the first place because register_torn_property minted it --
+    but never worth crashing a caller over)."""
+    if not card_id.startswith(PROPERTY_CARD_PREFIX):
+        return None
+    snapshot = _load_torn_properties().get(card_id)
+    if snapshot is None:
+        return None
+    return snapshot.get("category"), snapshot.get("kind"), snapshot.get("payload")
+
+
 def _room_file_exists(room_name):
     """A single stat() check, not list_rooms()'s full directory glob --
     default_card_for is called once per card id every time CardPanelUI/
@@ -101,7 +236,7 @@ def _room_file_exists(room_name):
 
 class Card:
     def __init__(self, card_id, name, images, card_type, effects=None, capabilities=None, sounds=None,
-                 sound_pitch=None, loot_cards=None):
+                 sound_pitch=None, loot_cards=None, stats=None):
         self.card_id = card_id
         self.name = name
         self.images = list(images) if images else []
@@ -149,6 +284,15 @@ class Card:
         # persisted (an empty dict here really does mean "drops nothing",
         # not "unedited").
         self.loot_cards = dict(loot_cards) if loot_cards is not None else None
+        # A mob-enemy's health/move_speed/aggro_range/attack_range/loot
+        # block (see object_manager.MECHANICS_KEYS' own "stats" entry) --
+        # unlike every other field above, no OBJECT_TYPES/ITEM_DEFINITIONS-
+        # bridged Card ever populates this (stats aren't part of a placed/
+        # collected card's own identity today, only a mob TYPE's combat
+        # tuning) -- it exists purely so a "stats" property card (see
+        # PROPERTY_CARD_PREFIX below) has something to display. None means
+        # "not a stats property card", never "empty stats".
+        self.stats = dict(stats) if stats is not None else None
 
 
 def default_card_for(card_id):
@@ -159,7 +303,10 @@ def default_card_for(card_id):
     matches neither registry (not yet a resolvable card)."""
     base_tile = BASE_TILE_CARDS.get(card_id)
     if base_tile is not None:
-        return Card(card_id, base_tile["name"], base_tile["images"], "tile")
+        return Card(
+            card_id, base_tile["name"], base_tile["images"], "tile",
+            capabilities=base_tile.get("capabilities"),
+        )
 
     room_name = room_name_from_card_id(card_id)
     if room_name is not None and _room_file_exists(room_name):
@@ -169,6 +316,37 @@ def default_card_for(card_id):
         # baked into the Card, so they never go stale after an edit in
         # Creator.
         return Card(card_id, room_name, [], "room")
+
+    parsed_property = parse_property_card_id(card_id)
+    if parsed_property is not None:
+        # A property card is resolved from its own frozen snapshot now
+        # (see TORN_PROPERTIES_PATH's own docstring) -- provenance was
+        # dropped entirely (confirmed with the user: which base card a
+        # property happened to be torn FROM never mattered), so unlike the
+        # OBJECT_TYPES/ITEM_DEFINITIONS branch below, this is no longer a
+        # live bridge back to anything -- the payload IS the card, fixed
+        # at the moment register_torn_property first minted this id.
+        category, kind, payload = parsed_property
+        name = property_label(category, kind)
+        return Card(
+            card_id, name, [], "propriete",
+            capabilities={kind: payload} if category == "capability" else None,
+            effects=[payload] if category == "effect" else None,
+            # "aggressivity" is stats-shaped (aggro_range/attack_range),
+            # rendered the same way a full "stats" property already is.
+            # "state" isn't stats at all (a single tagged-action-name
+            # string, see object_manager.extract_property_payload's own
+            # docstring) but reuses the same {key: value} rendering path
+            # purely for display -- Card has no dedicated field for a
+            # lone string payload, and inventing one for this single case
+            # isn't worth it.
+            stats=(
+                payload if category in ("stats", "aggressivity")
+                else {kind: payload} if category == "state"
+                else None
+            ),
+            loot_cards=payload if category == "loot" else None,
+        )
 
     config = OBJECT_TYPES.get(card_id)
     if config is not None:
@@ -335,15 +513,30 @@ class CardManager:
             )
         return path
 
-    def list_known_card_ids(self):
+    def list_known_card_ids(self, owned_ids=()):
         """Every card id currently resolvable via load(): custom
-        assets/cards/*.json files, plus every OBJECT_TYPES/ITEM_DEFINITIONS
-        key (the automatic bridge) -- sorted, same "one entry per named
-        thing" spirit as core.data.ressources.list_rooms(), just unioned
-        across three sources instead of one directory scan."""
+        assets/cards/*.json files, every OBJECT_TYPES/ITEM_DEFINITIONS key
+        (the automatic bridge), plus whichever of `owned_ids` are property-
+        card ids (see PROPERTY_CARD_PREFIX) -- sorted, same "one entry per
+        named thing" spirit as core.data.ressources.list_rooms(), just
+        unioned across sources instead of one directory scan.
+
+        Unlike every other source here, a property card has no registry/
+        directory of its own to enumerate from -- it only "exists" once a
+        player has actually torn it out at least once, which is exactly
+        what owning a copy in card_collection already records. The caller
+        (CardPanelUI.refresh, the only one with a Profile in hand) passes
+        `profile.card_collection` for this; every other caller (none
+        today, but see resolve_card_sprite/room_card_manifest, which never
+        need the full known-id list at all) can omit it -- a card that was
+        torn but never owned yet simply doesn't show up, same as any other
+        card_type."""
         custom_ids = {path.stem for path in CARDS_DIRECTORY.glob("*.json")}
         room_ids = {room_card_id(name) for name in list_rooms()}
-        return sorted(custom_ids | set(OBJECT_TYPES) | set(ITEM_DEFINITIONS) | set(BASE_TILE_CARDS) | room_ids)
+        property_ids = {card_id for card_id in owned_ids if parse_property_card_id(card_id) is not None}
+        return sorted(
+            custom_ids | set(OBJECT_TYPES) | set(ITEM_DEFINITIONS) | set(BASE_TILE_CARDS) | room_ids | property_ids
+        )
 
 
 def render_room_thumbnail(room_name):

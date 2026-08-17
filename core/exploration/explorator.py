@@ -26,6 +26,7 @@ from core.engine.gamestate import GameState
 from core.engine.camera import Camera
 from core.data.sound_manager import SoundManager, play_card_sound
 from core.data.profile_manager import ProfileManager, apply_to_fresh_profile
+from core.editor.ui.card_renderer import CardRenderer
 from core.data.progression import XP_ENEMY_KILL, XP_ANIMAL_KILL, XP_DUNGEON_CLEAR
 from core.world.home import home_room_name, wants_creator
 
@@ -212,6 +213,11 @@ class Explorator(NetworkSessionMixin):
         # session's inventory_open. No dedicated GameState -- ESC still
         # returns to the menu normally from here.
         self.victory = False
+        # Shared with Creator's own card art (see CardRenderer's own
+        # docstring) so the found-cards row on the victory banner
+        # (_draw_victory_banner/_victory_found_cards) reads as the exact
+        # same card image the player will later see in their Collection.
+        self.card_renderer = CardRenderer()
 
         # -----------------------------
         # Camera
@@ -313,10 +319,12 @@ class Explorator(NetworkSessionMixin):
             # re-placing position at the spawn point above.
             session.player.health = session.player.MAX_HEALTH
             # A fresh run (whether this is a genuine new attempt or just
-            # returning to home after one ended) starts with an empty card
-            # stash -- see Inventory.clear_cards/_trigger_victory for why
-            # anything still in grid_slots at this point was never banked
-            # (a defeat, or simply never having won yet).
+            # returning to home after one ended) starts with empty
+            # grid_slots -- see Inventory.clear_cards/_return_to_home's own
+            # _bank_found_cards call, which already ran (and already
+            # cleared grid_slots) for a real victory BEFORE this open_room
+            # -- this only matters for the "never banked" case: a defeat,
+            # or simply never having won yet.
             session.inventory.clear_cards()
         # Same reasoning for victory (see _interact_with_chest) -- otherwise
         # re-entering exploration would start right back on the frozen
@@ -1127,7 +1135,19 @@ class Explorator(NetworkSessionMixin):
         ever have drifted) is the server's own answer to that. Falls back
         to self.current_room only if neither of those applies (e.g. dying
         in a single-room test session opened straight from the menu,
-        never through home at all)."""
+        never through home at all).
+
+        A real win (self.victory still set at this point -- open_room
+        clears it right after) banks every session's found cards straight
+        into card_collection first (see _bank_found_cards), since
+        open_room's own grid_slots reset below would otherwise erase them
+        unbanked. A death/fall never sets victory, so this is a no-op
+        there -- matches "garde l'inventaire en cas de victoire, le perd en
+        cas de defaite" exactly as before, just automatic now instead of a
+        manual stash deposit."""
+        if self.victory:
+            for session in self.players.values():
+                self._bank_found_cards(session)
         if self.settings is not None and self.settings.local_player_name:
             self.open_room(home_room_name(self.settings.local_player_name))
         elif self._home_room_name is not None:
@@ -1406,17 +1426,14 @@ class Explorator(NetworkSessionMixin):
     def _bank_found_cards(self, session):
         """Moves every card sitting in session.inventory.grid_slots (see
         core.world.inventory.Inventory.add_card/CardStub -- cards physically
-        picked up this run) into the persisted Profile.card_stash, then
-        empties grid_slots -- called only from _trigger_victory, once per
-        session, the moment ANY session reaches the dungeon_exit (co-op is
-        a shared win). Same apply_to_fresh_profile pattern as _grant_xp,
-        for the exact same reason: a fresh reload before mutating avoids
-        clobbering a card_stash/card_collection change Creator made
-        mid-run. A no-op if grid_slots is empty or this session has no
-        profile at all. Banking into card_stash, NOT card_collection --
-        the player still has to manually drag each one into their
-        permanent collection later, from core.editor.ui.stash_panel.
-        StashPanelUI in the Home/Creator (see that panel's own docstring)."""
+        picked up this run) directly into the persisted Profile.
+        card_collection, then empties grid_slots -- called from
+        _return_to_home, once per session, right before a real (self.
+        victory) return-to-home wipes grid_slots via open_room. Same
+        apply_to_fresh_profile pattern as _grant_xp, for the exact same
+        reason: a fresh reload before mutating avoids clobbering a
+        card_collection change Creator made mid-run. A no-op if grid_slots
+        is empty or this session has no profile at all."""
         gained = {stub.card_id: stub.count for stub in session.inventory.grid_slots if stub is not None}
         if not gained:
             return
@@ -1424,26 +1441,43 @@ class Explorator(NetworkSessionMixin):
 
         def _mutate(profile):
             for card_id, count in gained.items():
-                profile.card_stash[card_id] = profile.card_stash.get(card_id, 0) + count
+                profile.card_collection[card_id] = profile.card_collection.get(card_id, 0) + count
 
         apply_to_fresh_profile(session, _mutate)
+
+    def _victory_found_cards(self):
+        """{card_id -> count} found this run, aggregated across every
+        session's still-unbanked grid_slots -- reads the same data
+        _bank_found_cards will later consume, purely for
+        _draw_victory_banner's display. Safe to call every frame while
+        self.victory is set: grid_slots stays untouched between
+        _trigger_victory and the click that calls _return_to_home (player
+        input is frozen during victory, see run()'s own victory branch), so
+        this always reflects exactly what's about to be banked."""
+        found = {}
+        for session in self.players.values():
+            for stub in session.inventory.grid_slots:
+                if stub is not None:
+                    found[stub.card_id] = found.get(stub.card_id, 0) + stub.count
+        return found
 
     def _trigger_victory(self, session):
         """Sets self.victory (whole-session -- see its own field comment,
         co-op shares one win) and grants the triggering session's own
-        XP_DUNGEON_CLEAR, same as before this existed -- plus banks EVERY
-        connected session's own found cards (see _bank_found_cards), not
-        just the triggering one's, since co-op is a shared win. A defeat
-        (_game_over) never calls this, so cards found that run are simply
-        never banked -- they vanish along with the rest of grid_slots on
-        the next open_room/_enter_assembly reset, matching "garde
-        l'inventaire en cas de victoire, le perd en cas de defaite."
-        Shared by both dungeon_exit triggers (_check_dungeon_exit and
-        _interact_with_chest's own chest branch)."""
+        XP_DUNGEON_CLEAR. Cards found this run are deliberately left sitting
+        in each session's own grid_slots rather than banked here --
+        _draw_victory_banner shows them straight from there
+        (_victory_found_cards), and _return_to_home (clicking through the
+        banner) is what actually deposits them into card_collection, once
+        per session (see _bank_found_cards). A defeat (_game_over) never
+        calls this, so cards found that run are simply never banked -- they
+        vanish along with the rest of grid_slots on the next open_room/
+        _enter_assembly reset, matching "garde l'inventaire en cas de
+        victoire, le perd en cas de defaite." Shared by both dungeon_exit
+        triggers (_check_dungeon_exit and _interact_with_chest's own chest
+        branch)."""
         self.victory = True
         self._grant_xp(session, XP_DUNGEON_CLEAR)
-        for other_session in self.players.values():
-            self._bank_found_cards(other_session)
 
     def _resolve_player_attacks(self):
         """Every session's attack, checked against the same one
@@ -2057,17 +2091,83 @@ class Explorator(NetworkSessionMixin):
 
     def _draw_victory_banner(self):
         """The only win condition that exists right now (see
-        _interact_with_chest) -- a plain centered text overlay, no dedicated
-        art. Drawn every frame the flag stays set; ESC still returns to the
-        menu normally, same as any other time in Exploration."""
+        _interact_with_chest) -- a centered text overlay plus a row of the
+        cards found this run (see _draw_victory_found_cards), no dedicated
+        art beyond that. Drawn every frame the flag stays set; ESC still
+        returns to the menu normally, same as any other time in
+        Exploration."""
         overlay = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 120))
         self.screen.blit(overlay, (0, 0))
 
         font = pygame.font.SysFont("arial", 64)
         text = font.render("VICTOIRE !", True, (255, 220, 90))
-        rect = text.get_rect(center=(self.screen.get_width() / 2, self.screen.get_height() / 2))
+        rect = text.get_rect(center=(self.screen.get_width() / 2, self.screen.get_height() / 2 - 140))
         self.screen.blit(text, rect)
+
+        self._draw_victory_found_cards(rect.bottom + 30)
+
+        hint_font = pygame.font.SysFont("arial", 20)
+        hint = hint_font.render(
+            "Cliquez pour rentrer au home -- ces cartes rejoignent votre collection", True, (230, 230, 230),
+        )
+        hint_rect = hint.get_rect(center=(self.screen.get_width() / 2, self.screen.get_height() - 60))
+        self.screen.blit(hint, hint_rect)
+
+    def _draw_victory_found_cards(self, top_y):
+        """Row (wrapped if it would overflow the screen) of every card
+        found this run -- see _victory_found_cards -- rendered via the
+        shared CardRenderer so this reads as the exact same card art the
+        player sees everywhere else, with an "xN" badge (same idiom as
+        CardPanelUI's own stacked-copies display) for a stack of more than
+        one copy. No-op (draws nothing) if nothing was found, e.g. a
+        victory reached without picking up a single card."""
+        found = self._victory_found_cards()
+        if not found:
+            return
+
+        card_height = 96
+        spacing = 16
+        entries = []
+        for card_id, count in found.items():
+            card = self.card_renderer.get_card(card_id)
+            if card is None:
+                continue
+            entries.append((self.card_renderer.get_surface(card, card_height), count))
+        if not entries:
+            return
+
+        max_row_width = self.screen.get_width() - 80
+        badge_font = pygame.font.SysFont("arial", 15, bold=True)
+
+        rows = []
+        current_row = []
+        current_width = 0
+        for surface, count in entries:
+            entry_width = surface.get_width() + spacing
+            if current_row and current_width + entry_width > max_row_width:
+                rows.append(current_row)
+                current_row = []
+                current_width = 0
+            current_row.append((surface, count))
+            current_width += entry_width
+        if current_row:
+            rows.append(current_row)
+
+        y = top_y
+        for row in rows:
+            row_width = sum(surface.get_width() for surface, _ in row) + spacing * (len(row) - 1)
+            x = self.screen.get_width() / 2 - row_width / 2
+            for surface, count in row:
+                self.screen.blit(surface, (x, y))
+                if count > 1:
+                    badge = badge_font.render(f"x{count}", True, (255, 255, 255))
+                    badge_bg = pygame.Rect(0, 0, badge.get_width() + 6, badge.get_height() + 4)
+                    badge_bg.bottomright = (x + surface.get_width(), y + surface.get_height())
+                    pygame.draw.rect(self.screen, (30, 30, 30), badge_bg, border_radius=4)
+                    self.screen.blit(badge, (badge_bg.x + 3, badge_bg.y + 2))
+                x += surface.get_width() + spacing
+            y += card_height + spacing
 
     DEBUG_VOID_RADIUS_TILES = 3
 

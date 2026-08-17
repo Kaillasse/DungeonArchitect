@@ -1418,9 +1418,9 @@ class PickupManager:
 
         Returns the list of card_id collected THIS call (possibly empty) --
         unlike currency/items, a card can't just be credited into
-        `inventory` here: it needs to reach Profile.card_stash eventually
-        (see Explorator._resolve_pickups/_trigger_victory), which this
-        method has no access to. inventory.add_card still handles the
+        `inventory` here: it needs to reach Profile.card_collection
+        eventually (see Explorator._resolve_pickups/_return_to_home), which
+        this method has no access to. inventory.add_card still handles the
         immediate, visible part (stacking into grid_slots, see
         core.world.inventory.Inventory.add_card) -- a full grid leaves the
         pickup on the ground untouched, same spirit as a full main_slot."""

@@ -75,8 +75,9 @@ class Inventory:
 
     def clear_cards(self):
         """Empties grid_slots -- called once a run's cards have been moved
-        elsewhere (Explorator._trigger_victory banks them into
-        Profile.card_stash; a fresh run/session simply never had any to
+        elsewhere (Explorator._bank_found_cards, called from
+        _return_to_home on a real victory, banks them into
+        Profile.card_collection; a fresh run/session simply never had any to
         begin with, see PlayerSession.__init__), never partway through a
         live run."""
         self.grid_slots = [None] * (self.GRID_ROWS * self.GRID_COLS)

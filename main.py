@@ -43,6 +43,11 @@ def build_arg_parser():
         "--admingod", action="store_true",
         help="Donne au profil local une collection complete et illimitee (le stock affiche ne baisse jamais en jeu), sans lancer le jeu.",
     )
+    parser.add_argument(
+        "--admingod-off", action="store_true",
+        help="Desactive admingod sur le profil local et remet card_collection a un stock fini "
+             "(valeurs de depart + 2 exemplaires de chaque carte connue), sans lancer le jeu.",
+    )
     parser.add_argument("--count", type=int, default=1, help="Nombre d'exemplaires a donner par carte (defaut 1).")
     parser.add_argument(
         "--player", default=None,
@@ -127,11 +132,44 @@ def _apply_admingod(args):
     print(f"{player} est desormais en admingod : {len(card_ids)} cartes, stock illimite.")
 
 
+def _apply_admingod_off(args):
+    """Inverse of _apply_admingod: clears Profile.admingod (so Creator's
+    card-consumption gates/CardPanelUI's display go back to reading real
+    card_collection counts) and replaces the collection's admingod-era
+    counts with a finite, testable stock -- STARTING_CARD_COLLECTION's own
+    values (see core.data.cards) plus 2 extra copies of every card
+    CardManager knows about, so nothing reads as 0/unplaceable right after
+    turning this off. Repeatable any time admingod needs to come back off
+    after a future --admingod test pass."""
+    from core.data.cards import CardManager, STARTING_CARD_COLLECTION
+    from core.data.profile_manager import ProfileManager
+
+    player = args.player or load_settings().local_player_name
+    if not player:
+        print("Aucun joueur local configure -- passe --player <nom>.")
+        return
+
+    manager = ProfileManager()
+    profile = manager.load(player)
+    card_manager = CardManager()
+    card_ids = card_manager.list_known_card_ids()
+    profile.card_collection = {
+        card_id: STARTING_CARD_COLLECTION.get(card_id, 0) + 2 for card_id in card_ids
+    }
+    profile.admingod = False
+    manager.save(profile)
+    print(f"{player} n'est plus en admingod : stock reinitialise sur {len(card_ids)} cartes connues.")
+
+
 def main():
     args = build_arg_parser().parse_args()
 
     if args.admingod:
         _apply_admingod(args)
+        return
+
+    if args.admingod_off:
+        _apply_admingod_off(args)
         return
 
     if args.give_all_cards:

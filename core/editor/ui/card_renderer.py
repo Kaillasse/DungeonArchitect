@@ -56,6 +56,17 @@ class CardRenderer:
             self._cache[key] = surface
         return surface
 
+    def card_backing(self):
+        """The raw, unscaled card.png backing -- a plain flat-color rounded
+        rect with a border (no fine detail/pattern), safe to stretch
+        non-uniformly to any shape without visible distortion. Used by
+        core.editor.ui.mechanics_panel.MechanicsPanelUI to cover its ENTIRE
+        panel with this same backing while a card is loaded -- confirmed
+        with the user: the whole Forge should read as zones of one
+        continuous giant card, not a small card portrait glued above an
+        unrelated plain panel."""
+        return self._backing
+
     def get_card(self, card_id):
         """The Card for card_id, loaded via CardManager().load() at most
         once per clear_cache() cycle instead of once per frame per visible
@@ -166,6 +177,16 @@ class CardRenderer:
             # instead via CardPanelUI's completeness check.
             states = ENEMY_ANIMATIONS if mob_kind(card.card_id) == "enemy" else ("idle", "move")
             extra_text = "Etats : " + ", ".join(states)
+        elif card.stats:
+            # A "stats" property card (see core.data.cards.
+            # PROPERTY_CARD_PREFIX) -- the only Card kind that ever
+            # populates .stats at all, so this never fires for a plain mob
+            # card (those show "Etats : ..." above instead).
+            extra_text = "Stats : " + ", ".join(
+                f"{key}={value}" for key, value in card.stats.items() if isinstance(value, (int, float, str))
+            )
+        elif card.loot_cards:
+            extra_text = "Butin : " + ", ".join(f"{key} x{value}" for key, value in card.loot_cards.items())
         if extra_text:
             extra_surface = self._render_fitted(label_font, extra_text, (60, 60, 95), text_max_width)
             surface.blit(extra_surface, (width / 2 - extra_surface.get_width() / 2, pixel_height * 0.77))
