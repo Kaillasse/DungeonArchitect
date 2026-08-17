@@ -13,13 +13,13 @@ from core.engine.camera import Camera
 from core.data.ressources import FLOOR, next_new_donjon_name
 from core.editor.autotile import WALL, LOCAL_EDIT_SPRITE_RADIUS
 from core.data.profile_manager import ProfileManager, ADMINGOD_STOCK
-from core.data.cards import room_name_from_card_id, room_card_manifest
-from core.world.object_manager import ITEM_DEFINITIONS, OBJECT_TYPES
+from core.data.cards import room_name_from_card_id, room_card_manifest, parse_property_card_id
+from core.world.object_manager import ITEM_DEFINITIONS, OBJECT_TYPES, is_placable
 from core.data.sound_manager import play_card_sound
 from core.world.home import home_room_name, wants_exploration
 from core.editor.ui import (
     GeneratorPanelUI, RoomPanelUI, ChestPanelUI, RolePanelUI, CardPanelUI, CardRenderer,
-    SpriteEditorPanelUI, AutotileThemePanelUI, MechanicsPanelUI, StashPanelUI,
+    SpriteEditorPanelUI, AutotileThemePanelUI, MechanicsPanelUI, SoundBoxPanelUI,
 )
 from core.editor.tools import ObjectTool
 
@@ -88,12 +88,6 @@ class Creator:
             y=180,
         )
         self.card_panel = CardPanelUI(x=460, y=340, renderer=self.card_renderer)
-        # Cards found during a run (Profile.card_stash) but not yet
-        # deposited into card_collection -- see StashPanelUI's own module
-        # docstring and _resolve_dragged_card's "stash" drag_source branch
-        # below. Docked next to card_panel since depositing means dragging
-        # straight from one onto the other.
-        self.stash_panel = StashPanelUI(x=750, y=340, renderer=self.card_renderer)
         # Fondation "carte"/sprite editor -- panneau modal centre (comme
         # chest_panel/role_panel), pas un panneau docke/draggable (pas
         # besoin de PanelFrame ici). Bouton d'ouverture toujours visible,
@@ -136,19 +130,25 @@ class Creator:
         self.tools_frame = PanelFrame(self.palette, "Tuile de base", on_change=self._on_panel_frame_change)
         self.room_frame = PanelFrame(self.room_panel, "Sauvegarder / Charger", on_change=self._on_panel_frame_change)
         self.generator_frame = PanelFrame(self.generator_panel, "Generation procedurale", on_change=self._on_panel_frame_change)
-        self.card_frame = PanelFrame(self.card_panel, "Cartes", on_change=self._on_panel_frame_change)
-        self.stash_frame = PanelFrame(self.stash_panel, "Cartes trouvees", on_change=self._on_panel_frame_change)
+        self.card_frame = PanelFrame(self.card_panel, "Collection", on_change=self._on_panel_frame_change)
         # Mechanical counterpart to sprite_editor_panel (visual/identity vs.
         # gameplay flags -- see MechanicsPanelUI's own module docstring) --
         # docked/draggable/resizable like every other panel here, not
         # modal. Reached only by dragging an owned card onto its own body
         # (see the object_tool.dragging handling in run()), never a
         # dedicated open button.
-        self.mechanics_panel = MechanicsPanelUI(x=460, y=460)
+        self.mechanics_panel = MechanicsPanelUI(x=460, y=460, renderer=self.card_renderer)
         self.mechanics_frame = PanelFrame(self.mechanics_panel, "Forge", on_change=self._on_panel_frame_change)
+        # The sound counterpart to the Forge -- confirmed with the user:
+        # sounds moved entirely out of the Forge into this dedicated tool,
+        # unlocked by proximity to a placed "boxbig" instead of "Totem 3"
+        # (see SOUND_BOX_ENTITY_TYPE/_sound_box_unlocked), same drop-a-
+        # card-to-edit-it shape.
+        self.sound_box_panel = SoundBoxPanelUI(x=900, y=460)
+        self.sound_box_frame = PanelFrame(self.sound_box_panel, "Sound Box", on_change=self._on_panel_frame_change)
         self.panel_frames = [
-            self.tools_frame, self.room_frame, self.generator_frame, self.card_frame, self.stash_frame,
-            self.mechanics_frame,
+            self.tools_frame, self.room_frame, self.generator_frame, self.card_frame,
+            self.mechanics_frame, self.sound_box_frame,
         ]
         # name -> frame, purely for _refresh_panel_layout/_on_panel_frame_change's
         # own round-trip through Profile.panel_layout (see those methods).
@@ -157,8 +157,8 @@ class Creator:
             "room": self.room_frame,
             "generator": self.generator_frame,
             "card": self.card_frame,
-            "stash": self.stash_frame,
             "mechanics": self.mechanics_frame,
+            "sound_box": self.sound_box_frame,
         }
 
         # See _refresh_generator_panel/_refresh_panel_layout -- seeded
@@ -435,15 +435,31 @@ class Creator:
         card-panel-originated drag)."""
         card_id = self.object_tool.object_type
 
-        if self.object_tool.drag_source == "stash":
-            # A stash-sourced card isn't owned yet -- the only meaningful
-            # drop target is the collection panel itself, to deposit it
-            # (see _deposit_stash_card). Never placeable in the world,
-            # never opens the Forge, regardless of card_id/card_type --
-            # checked first, before every other branch below, so a stash
-            # drag can never be misrouted into one of those.
-            if self.card_frame.contains(event.pos):
-                self._deposit_stash_card(card_id)
+        if parse_property_card_id(card_id) is not None:
+            # A property card (see core.data.cards.PROPERTY_CARD_PREFIX) is
+            # never placeable in the world, never deposited in the
+            # Generator/loot table -- the only meaningful drop target is
+            # gluing it onto whatever's currently loaded in the Forge (see
+            # MechanicsPanelUI.preview_property_drop, module docstring's
+            # "Coller" feature). Dropping directly onto another card shown
+            # in the Collection was tried and dropped (confirmed with the
+            # user): CardPanelUI's Carte/Propriete tab split makes that drag
+            # structurally impossible (a property card is only visible/
+            # draggable while the Propriete tab is showing, but its fuse
+            # target only ever shows under Carte, and a drag can't switch
+            # tabs mid-gesture) -- the Forge-preview drop is the one
+            # reliable path, see preview_property_drop's own widened hit
+            # test for why it now accepts a drop anywhere in the Forge, not
+            # just its small sprite box. Dropping anywhere else just
+            # cancels, same as any other drag that misses its target.
+            handled = False
+            if self.mechanics_frame.contains(event.pos) and self._forge_unlocked():
+                result = self.mechanics_panel.preview_property_drop(card_id, event.pos)
+                if result is not None:
+                    self._apply_fuse_result(card_id, result)
+                handled = True
+            if handled:
+                self._refresh_card_panel()
             self.object_tool.dragging = False
             self.object_tool.drag_source = "collection"
             return
@@ -461,23 +477,24 @@ class Creator:
             # An item-card is never placeable in the world grid either
             # (items live in inventory slots/loot tables, not OBJECT_TYPES'
             # add_object -- _try_place_object would KeyError on an id it
-            # doesn't know) -- the only meaningful drop target is the
-            # Forge, to inspect/edit its capacites/effets.
+            # doesn't know) -- the only meaningful drop targets are the
+            # Forge, to inspect/edit its mechanics/capacites/effets, or the
+            # Sound Box, to edit just its sons (see SoundBoxPanelUI's own
+            # docstring for why that's a separate tool now). Butin no
+            # longer has its own drop-to-add table here either (see
+            # MechanicsPanelUI's own module docstring) -- it's a tearable
+            # "loot" property like any other now.
             if self.mechanics_frame.contains(event.pos) and self._forge_unlocked():
-                if not self.mechanics_panel.try_add_loot_card(card_id, event.pos):
-                    self.mechanics_panel.open(card_id)
-        elif self.mechanics_frame.contains(event.pos) and self._forge_unlocked():
-            # try_add_loot_card first: a drop landing specifically on the
-            # Forge's own Cartes section (only possible while it's already
-            # showing a card that supports one, see
-            # MechanicsPanelUI._shows_loot_cards) adds this card as a loot
-            # entry instead of replacing what's loaded -- open() is the
-            # fallback for everywhere else on the panel, same as before.
-            # MechanicsPanelUI.open() already refuses (stays empty) for
-            # anything that isn't a real OBJECT_TYPES/ITEM_DEFINITIONS id --
-            # no extra guard needed here.
-            if not self.mechanics_panel.try_add_loot_card(card_id, event.pos):
                 self.mechanics_panel.open(card_id)
+            elif self.sound_box_frame.contains(event.pos) and self._sound_box_unlocked():
+                self.sound_box_panel.open(card_id)
+        elif self.mechanics_frame.contains(event.pos) and self._forge_unlocked():
+            self.mechanics_panel.open(card_id)
+        elif self.sound_box_frame.contains(event.pos) and self._sound_box_unlocked():
+            # Same "open() self-guards for anything without a sounds
+            # concept" reasoning as the Forge branch above -- no extra
+            # check needed here either.
+            self.sound_box_panel.open(card_id)
         elif not any(frame.contains(event.pos) for frame in self.panel_frames):
             # Only attempt world placement if the drop isn't sitting over
             # ANY docked panel -- without this, a drop on e.g. tools_frame/
@@ -491,6 +508,27 @@ class Creator:
 
         self.object_tool.dragging = False
         self.object_tool.drag_source = "collection"
+
+    def _apply_fuse_result(self, property_card_id, result):
+        """Shared consume/credit bookkeeping for a successful "Coller" --
+        called from _resolve_dragged_card's property-card drop branch
+        (onto the Forge preview -- the one reliable path, see that
+        branch's own comment for why a direct-onto-Collection-card drop
+        was dropped entirely). Consumes the property card ONLY once the base
+        card is confirmed consumed -- shouldn't normally fail (both were
+        owned >=1 to be loaded/dragged in the first place), but if it
+        somehow does, this never refunds a card that was never actually
+        taken (that would mint a free copy), and never credits a half-
+        paid-for id. Reopens the Forge onto the freshly fused card either
+        way, as visible feedback of what was just created."""
+        base_card_id, new_card_id = result
+        base_consumed = self._consume_card(base_card_id)
+        prop_consumed = base_consumed and self._consume_card(property_card_id)
+        if prop_consumed:
+            self._credit_new_card(new_card_id)
+            self.mechanics_panel.open(new_card_id)
+        elif base_consumed:
+            self._refund_card(base_card_id)
 
     def _apply_generation(self, request):
         room_names, room_count = request
@@ -580,24 +618,25 @@ class Creator:
         self._active_profile.card_collection[card_id] = self._active_profile.card_collection.get(card_id, 0) + 1
         self._card_stock_dirty = True
 
-    def _deposit_stash_card(self, card_id):
-        """Moves one copy of `card_id` from the cached profile's card_stash
-        into card_collection -- the only thing a "stash" drag_source drag
-        can ever do (see _resolve_dragged_card), dropped onto card_frame.
-        No-op if there's no active profile or this card isn't actually in
-        the stash (stale drag, e.g. StashPanelUI wasn't refreshed after
-        some other change emptied it first)."""
-        if self._active_profile is None:
+    def _credit_new_card(self, card_id):
+        """Credits one copy of a BRAND NEW card id that has never existed
+        in any registry -- a torn property card or a freshly fused card
+        (see MechanicsPanelUI's Dechirer/Coller results). Unlike
+        _refund_card, NEVER a no-op under admingod: _refund_card's "nothing
+        to give back, it already reads as unlimited" reasoning only holds
+        for an id CardPanelUI can enumerate independently of ownership
+        (every OBJECT_TYPES/ITEM_DEFINITIONS/room key, scanned directly --
+        see CardManager.list_known_card_ids). A property/fused card has no
+        such registry of its own: list_known_card_ids only ever discovers
+        one by finding it as an actual card_collection KEY (see that
+        method's own docstring). Skipping the write under admingod, like
+        _refund_card does, wouldn't just leave the count wrong -- it would
+        leave the card permanently invisible/undraggable in the Collection,
+        forever, admingod or not."""
+        if self._active_profile is None or card_id is None:
             return
-        stash = self._active_profile.card_stash
-        if stash.get(card_id, 0) <= 0:
-            return
-        stash[card_id] -= 1
-        if stash[card_id] <= 0:
-            del stash[card_id]
         self._active_profile.card_collection[card_id] = self._active_profile.card_collection.get(card_id, 0) + 1
-        self._flush_active_profile()
-        self._refresh_card_panel()
+        self._card_stock_dirty = True
 
     def _flush_active_profile(self):
         """Persists the cached profile's card_collection to disk -- called
@@ -762,9 +801,15 @@ class Creator:
         (unlike terrain painting, add_object can still fail its own
         placement-rule validation, so the stock is only ever actually
         decremented once placement has genuinely succeeded -- never
-        consume-then-refund)."""
+        consume-then-refund). Gated on object_manager.is_placable first --
+        the real, explicit "can this be placed at all" check (a
+        placable_on_floor/placable_on_wall capability, see that function's
+        own docstring), not just "it happens to be a known OBJECT_TYPES
+        id" like before this capability existed."""
         object_type = self.object_tool.object_type
         if self._active_profile is None:
+            return False
+        if not is_placable(object_type):
             return False
         admingod = self._active_profile.admingod
         if not admingod and self._active_profile.card_collection.get(object_type, 0) <= 0:
@@ -842,18 +887,16 @@ class Creator:
         self._generator_panel_seeded = True
 
     def _refresh_card_panel(self):
-        """Reloads the Card panel's list/owned-counts, and the found-cards
-        Stash panel's own list, from the cached local profile
-        (self._active_profile, see _refresh_active_profile) -- called once
-        per entry into Creator, and again after any card-consuming action
-        (_try_place_object, a stash deposit) so both panels' counts stay
+        """Reloads the Card panel's list/owned-counts from the cached local
+        profile (self._active_profile, see _refresh_active_profile) --
+        called once per entry into Creator, and again after any card-
+        consuming action (_try_place_object) so the panel's counts stay
         live instead of waiting for the next entry. A no-op with no local
         identity yet (headless smoke test, or the very first frame before
-        Menu's name-entry has run) -- both panels just stay on whatever
-        they last showed, empty at the very start."""
+        Menu's name-entry has run) -- the panel just stays on whatever it
+        last showed, empty at the very start."""
         if self._active_profile is not None:
             self.card_panel.refresh(self._active_profile)
-            self.stash_panel.refresh(self._active_profile)
 
     def _refresh_panel_layout(self):
         """Restores each PanelFrame's saved position/collapsed state from
@@ -905,6 +948,7 @@ class Creator:
     # actually comes from.
     GENERATOR_ENTITY_TYPE = "djepeto"
     FORGE_ENTITY_TYPE = "totem3"
+    SOUND_BOX_ENTITY_TYPE = "boxbig"
 
     def _entity_field_radius(self):
         """Mirrors Explorator._magnet_radius's exact 'champ de vision'
@@ -951,6 +995,9 @@ class Creator:
     def _forge_unlocked(self):
         return self._entity_in_range(self.FORGE_ENTITY_TYPE)
 
+    def _sound_box_unlocked(self):
+        return self._entity_in_range(self.SOUND_BOX_ENTITY_TYPE)
+
     def _draw_panel_lock_overlay(self, frame, message):
         """Dims a docked panel's body and explains why it's inaccessible --
         the title bar stays undimmed/draggable (PanelFrame.handle_title_event
@@ -965,6 +1012,27 @@ class Creator:
         self.screen.blit(overlay, body_rect.topleft)
         label = self.assembly_hint_font.render(message, True, (255, 205, 110))
         self.screen.blit(label, label.get_rect(center=body_rect.center))
+
+    def _dragging_property_card(self):
+        """True while a property card (see core.data.cards.
+        PROPERTY_CARD_PREFIX) is mid-drag -- gates the Forge's own drop-
+        target highlight (see _draw_panel_drop_highlight) so it only lights
+        up for a drag that could actually land a fuse there, not every
+        drag (e.g. a placeable tile/object card being dragged onto the
+        world grid)."""
+        return self.object_tool.dragging and parse_property_card_id(self.object_tool.object_type) is not None
+
+    def _draw_panel_drop_highlight(self, frame):
+        """Outlines a docked panel's body while a property card is being
+        dragged -- the Forge is currently the ONLY valid drop target for
+        gluing a property onto a card (see preview_property_drop's own
+        widened hit test/docstring for why direct-onto-Collection-card
+        dragging was dropped), so this is what makes that target
+        discoverable instead of a silent, easy-to-miss zone."""
+        if frame.collapsed:
+            return
+        body_rect = pygame.Rect(frame.panel.x, frame.panel.y, frame.panel.width, frame.panel.height)
+        pygame.draw.rect(self.screen, (120, 220, 140), body_rect, 4, border_radius=6)
 
     def _is_quit_event(self, event):
         """QUIT must always work even while a modal panel (chest/role/
@@ -1112,8 +1180,8 @@ class Creator:
                             self.room_frame.contains(event.pos)
                             or self.generator_frame.contains(event.pos)
                             or self.card_frame.contains(event.pos)
-                            or self.stash_frame.contains(event.pos)
                             or self.mechanics_frame.contains(event.pos)
+                            or self.sound_box_frame.contains(event.pos)
                         )
                     panel_click = self._panel_owns_drag
                     if event.type == pygame.MOUSEBUTTONUP:
@@ -1146,20 +1214,40 @@ class Creator:
                         if drag_card_id is not None:
                             self.object_tool.start_drag(drag_card_id, event.pos)
 
-                    if not self.stash_frame.collapsed:
-                        # A found-but-undeposited card, dragged from here,
-                        # is never placeable/openable -- see
-                        # StashPanelUI.handle_event and
-                        # _resolve_dragged_card's "stash" drag_source
-                        # branch, which is the only thing that treats this
-                        # drag differently from a normal collection one.
-                        drag_stash_card_id = self.stash_panel.handle_event(event)
-                        if drag_stash_card_id is not None:
-                            self.object_tool.start_drag(drag_stash_card_id, event.pos, source="stash")
-
                     if not self.mechanics_frame.collapsed and self._forge_unlocked():
-                        saved_type_id = self.mechanics_panel.handle_event(event)
-                        if saved_type_id is not None:
+                        # A plain string means "Enregistrer" saved the type
+                        # already loaded -- nothing new to credit, just
+                        # refresh. A ("tear", base_card_id, property_card_id)
+                        # tuple means "Dechirer" (see MechanicsPanelUI.
+                        # _try_tear) -- unlike a save, this DOES touch
+                        # card_collection: this panel never holds a Profile
+                        # itself, so Creator (the only thing that does) does
+                        # the actual consume/credit bookkeeping here.
+                        forge_result = self.mechanics_panel.handle_event(event)
+                        if isinstance(forge_result, tuple) and forge_result[0] == "tear":
+                            _, base_card_id, prop_card_id = forge_result
+                            if self._consume_card(base_card_id):
+                                self._credit_new_card(prop_card_id)
+                            # Unlike a paint/erase stroke, this gesture starts
+                            # AND ends inside mechanics_frame, so panel_click
+                            # is True and the generic MOUSEBUTTONUP handler
+                            # below (whose own flush this would otherwise
+                            # rely on) never runs -- skipping this would
+                            # leave a torn property card_collection-consistent
+                            # only in memory, silently lost the moment the
+                            # session ends without some UNRELATED later
+                            # action happening to flush it first.
+                            self._flush_active_profile()
+                            self._refresh_card_panel()
+                        elif forge_result is not None:
+                            self._refresh_card_panel()
+
+                    if not self.sound_box_frame.collapsed and self._sound_box_unlocked():
+                        # No tear/fuse/loot concept here at all -- a
+                        # non-None return is always just "Enregistrer
+                        # saved", same as the Forge's own plain-string
+                        # case, so this only ever needs to refresh.
+                        if self.sound_box_panel.handle_event(event) is not None:
                             self._refresh_card_panel()
 
                     # Resolves an in-progress card drag BEFORE the
@@ -1179,6 +1267,17 @@ class Creator:
                     # hijacking the next unrelated click anywhere on screen.
                     if event.type == pygame.MOUSEBUTTONUP and event.button == 1 and self.object_tool.dragging:
                         self._resolve_dragged_card(event)
+                        # Same reasoning as the tear branch above: a card
+                        # drag release inside a docked panel means
+                        # panel_click is True and the flush below this
+                        # "continue"s past never runs. Covers both fuse
+                        # paths (onto the Forge preview or directly onto a
+                        # Collection card, see _apply_fuse_result) plus
+                        # world object placement (_try_place_object already
+                        # flushes internally -- a second, cheap no-op-ish
+                        # save here for that case is harmless, same as the
+                        # button-3 erase branch below already does).
+                        self._flush_active_profile()
 
                     if panel_click:
                         continue
@@ -1387,8 +1486,6 @@ class Creator:
                     # just by precisely grabbing the thin slider thumb.
                     if not self.card_frame.collapsed and self.card_panel.handle_wheel(mouse_pos, event.y):
                         continue
-                    if not self.stash_frame.collapsed and self.stash_panel.handle_wheel(mouse_pos, event.y):
-                        continue
                     if not self.mechanics_frame.collapsed and self.mechanics_panel.handle_wheel(mouse_pos, event.y):
                         continue
                     self.camera.zoom_at(mouse_pos[0], mouse_pos[1], event.y, self.screen.get_width(), self.screen.get_height())
@@ -1535,6 +1632,10 @@ class Creator:
                     self._draw_panel_lock_overlay(frame, "Approchez-vous de Djepeto")
                 elif frame is self.mechanics_frame and not self._forge_unlocked():
                     self._draw_panel_lock_overlay(frame, "Approchez-vous du Totem 3")
+                elif frame is self.mechanics_frame and self._dragging_property_card():
+                    self._draw_panel_drop_highlight(frame)
+                elif frame is self.sound_box_frame and not self._sound_box_unlocked():
+                    self._draw_panel_lock_overlay(frame, "Approchez-vous de la caisse")
             self.chest_panel.render(self.screen)
             self.role_panel.render(self.screen)
             self.autotile_theme_panel.render(self.screen)

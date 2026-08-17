@@ -4,7 +4,7 @@ import pygame
 
 from core.ui.widgets import BorderManager, RoomBrowser
 from core.world.object_manager import OBJECT_TYPES, ITEM_DEFINITIONS, ENEMY_ANIMATIONS, mob_kind
-from core.data.cards import CardManager, room_name_from_card_id
+from core.data.cards import CardManager, room_name_from_card_id, parse_property_card_id
 from core.data.profile_manager import ADMINGOD_STOCK
 from core.editor.ui.mixins import _ResizableCornerMixin
 from core.editor.ui.card_renderer import CardRenderer
@@ -38,6 +38,14 @@ class CardPanelUI(_ResizableCornerMixin):
     HOVER_SCALE = 1.25
     FOCUS_HEIGHT = 420
     SLIDER_WIDTH = 12
+
+    # (tab_id, label) -- tab_id doubles as the bucket key _tab_bucket()
+    # returns, in display order left-to-right. Lives in the same 34px
+    # header band both display modes already reserve above their own
+    # content (self.browser starts at y+34, _grid_area_rect() too) --
+    # nothing used to draw there, see _render_tabs.
+    TABS = (("room", "Room pack"), ("carte", "Carte"), ("propriete", "Propriete"))
+    TAB_HEIGHT = 28
 
     def __init__(self, x, y, renderer):
         self.x = x
@@ -84,6 +92,18 @@ class CardPanelUI(_ResizableCornerMixin):
         self._dragging_slider = False
         self._focused_card_id = None
 
+        # 3-way category filter (Room pack / Carte / Propriete, see class
+        # docstring) -- "carte" (everything placeable that isn't a room pack
+        # or a torn-out property) is the default since it's the bucket every
+        # existing card used to live in before this split. Applied on top of
+        # whatever refresh(profile) last loaded (see _all_card_ids/_apply_tab_filter),
+        # so switching tabs never needs a fresh profile read.
+        self._tab = "carte"
+        self._all_card_ids = []
+        self._all_entries = []
+        self._all_owned = []
+        self._all_owned_counts = {}
+
     @property
     def _enlarged(self):
         return self.width > self.STANDARD_WIDTH or self.height > self.STANDARD_HEIGHT
@@ -120,18 +140,18 @@ class CardPanelUI(_ResizableCornerMixin):
         very first render after a refresh no longer has to re-resolve every
         visible card from disk a second time."""
         self._renderer.clear_cache()
-        self._card_ids = CardManager().list_known_card_ids()
-        entries = []
-        self._owned = []
-        self._owned_counts = {}
-        for card_id in self._card_ids:
+        self._all_card_ids = CardManager().list_known_card_ids(profile.card_collection)
+        self._all_entries = []
+        self._all_owned = []
+        self._all_owned_counts = {}
+        for card_id in self._all_card_ids:
             card = self._renderer.get_card(card_id)
             if card.card_type == "room":
                 # A room-card's existence is 1:1 with its saved file, not a
                 # card_collection stock -- always "owned" (see the Card
                 # system's room-card plan).
                 owned = 1
-                entries.append(f"{card.name} ({card.card_type}) -- disponible")
+                self._all_entries.append(f"{card.name} ({card.card_type}) -- disponible")
             elif profile.admingod:
                 # Every card reads as owned/unlimited under admingod,
                 # regardless of what's actually in card_collection --
@@ -140,15 +160,56 @@ class CardPanelUI(_ResizableCornerMixin):
                 # even show up here to be dragged, since this panel only
                 # ever lists owned > 0 cards.
                 owned = ADMINGOD_STOCK
-                entries.append(f"{card.name} ({card.card_type}) -- illimitees")
+                self._all_entries.append(f"{card.name} ({card.card_type}) -- illimitees")
             else:
                 owned = profile.card_collection.get(card_id, 0)
-                entries.append(f"{card.name} ({card.card_type}) -- possedees: {owned}")
-            self._owned_counts[card_id] = owned
+                self._all_entries.append(f"{card.name} ({card.card_type}) -- possedees: {owned}")
+            self._all_owned_counts[card_id] = owned
             if owned > 0:
-                self._owned.append((card_id, owned))
-        self.browser.set_rooms(entries)
+                self._all_owned.append((card_id, owned))
+        self._apply_tab_filter()
+
+    def _tab_bucket(self, card_id):
+        card = self._renderer.get_card(card_id)
+        if card is None:
+            return "carte"
+        if card.card_type in ("room", "propriete"):
+            return card.card_type
+        return "carte"
+
+    def _apply_tab_filter(self):
+        """Rebuilds every list/dict actually consumed by rendering/hit-
+        testing (self._card_ids/self.browser's rows/self._owned/
+        self._owned_counts) from the full self._all_* snapshot refresh()
+        last loaded, keeping only cards in the active tab's bucket. Cheap
+        enough to redo on every tab click (same "under 20 entries" cost as
+        refresh() itself, see its own docstring) -- no profile access
+        needed, unlike refresh(), so a tab switch never has to wait for
+        Creator to hand one back in."""
+        indices = [i for i, cid in enumerate(self._all_card_ids) if self._tab_bucket(cid) == self._tab]
+        self._card_ids = [self._all_card_ids[i] for i in indices]
+        self.browser.set_rooms([self._all_entries[i] for i in indices])
+        self._owned = [pair for pair in self._all_owned if self._tab_bucket(pair[0]) == self._tab]
+        self._owned_counts = {
+            cid: count for cid, count in self._all_owned_counts.items() if self._tab_bucket(cid) == self._tab
+        }
         self._scroll_row = 0
+
+    def _tab_rects(self):
+        count = len(self.TABS)
+        tab_w = self.width // count
+        return {
+            tab_id: pygame.Rect(self.x + i * tab_w, self.y, tab_w, self.TAB_HEIGHT)
+            for i, (tab_id, _label) in enumerate(self.TABS)
+        }
+
+    def _render_tabs(self, screen):
+        for tab_id, rect in self._tab_rects().items():
+            active = tab_id == self._tab
+            pygame.draw.rect(screen, (70, 70, 95) if active else (35, 35, 35), rect)
+            label = dict(self.TABS)[tab_id]
+            text = self.badge_font.render(label, True, (255, 255, 255) if active else (170, 170, 170))
+            screen.blit(text, (rect.centerx - text.get_width() / 2, rect.centery - text.get_height() / 2))
 
     # -- enlarged-mode grid layout/scroll --
 
@@ -222,6 +283,7 @@ class CardPanelUI(_ResizableCornerMixin):
                 # _write_custom_type keep them in lockstep).
                 if rect.collidepoint(event.pos) and (
                     card_id in OBJECT_TYPES or card_id in ITEM_DEFINITIONS or room_name_from_card_id(card_id) is not None
+                    or parse_property_card_id(card_id) is not None
                 ):
                     return card_id
             return None
@@ -255,7 +317,10 @@ class CardPanelUI(_ResizableCornerMixin):
             row_index = self.browser.row_at(event.pos)
             if row_index is not None and 0 <= row_index < len(self._card_ids):
                 card_id = self._card_ids[row_index]
-                draggable = card_id in OBJECT_TYPES or card_id in ITEM_DEFINITIONS or room_name_from_card_id(card_id) is not None
+                draggable = (
+                    card_id in OBJECT_TYPES or card_id in ITEM_DEFINITIONS or room_name_from_card_id(card_id) is not None
+                    or parse_property_card_id(card_id) is not None
+                )
                 if draggable and self._owned_counts.get(card_id, 0) > 0:
                     drag_card_id = card_id
         self.browser.handle_event(event)
@@ -270,6 +335,13 @@ class CardPanelUI(_ResizableCornerMixin):
         just via this same call)."""
         if self._handle_resize_event(event):
             return None
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            for tab_id, rect in self._tab_rects().items():
+                if rect.collidepoint(event.pos):
+                    if tab_id != self._tab:
+                        self._tab = tab_id
+                        self._apply_tab_filter()
+                    return None
         if self._enlarged:
             return self._handle_grid_event(event)
         return self._handle_list_event(event)
@@ -296,6 +368,7 @@ class CardPanelUI(_ResizableCornerMixin):
     # -- render --
 
     def render(self, screen):
+        self._render_tabs(screen)
         if self._enlarged:
             self._render_grid(screen)
         else:
