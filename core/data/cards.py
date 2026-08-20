@@ -115,6 +115,7 @@ _PROPERTY_LABELS = {
         "linkable": "Liable (bouton)", "doorway": "Entree/sortie", "lootable": "Contient du butin",
         "editor_tool_unlock": "Deverrouille un outil d'edition",
         "pressable": "Actionnable (marcher dessus)",
+        "errance": "Errance (idle/deplacement)",
     },
     "effect": {"heal": "Soin"},
     "stats": {None: "Statistiques"},

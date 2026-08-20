@@ -353,7 +353,16 @@ class _WanderingEntity:
         Doesn't call _advance_animation -- callers do that themselves, since
         an aggro_capable mob needs to regardless of which state (wander/
         chase/attack) it lands in this
-        frame."""
+        frame.
+
+        No-ops for a Mob whose "errance" capability was torn off (see
+        Mob.__init__'s own self.wandering_capable) -- stays in whatever
+        state it's already in (idle, at construction) forever, a fully
+        static mob. self is always a Mob here in practice (the only
+        _WanderingEntity subclass, which is where wandering_capable is
+        set)."""
+        if not self.wandering_capable:
+            return
         self.state_timer -= dt
         if self.state_timer <= 0:
             self._enter_wander_state(self.MOVE_STATE_NAME if self.state == "idle" else "idle")
@@ -682,6 +691,16 @@ class Mob(_WanderingEntity):
 
         self.combat_capable = "health" in self.stats
         self.aggro_capable = "aggro_range" in self.stats and "attack_range" in self.stats
+        # "errance" (2026-08-20, confirmed with the user -- named over
+        # "balade") -- read from OBJECT_TYPES' own capabilities, backfilled
+        # true for every existing mob by object_manager.
+        # _with_derived_wandering_capability, so this preserves today's
+        # behavior (wander was previously unconditional, see this class's
+        # own docstring) while making a fully static mob buildable by
+        # tearing it off. Only gates _wander_tick (the flat-frame/aggro-
+        # fallback path) -- the entity-pack rest/posture chain below is a
+        # separate, richer state machine left ungated for now.
+        self.wandering_capable = "errance" in config.get("capabilities", {})
 
         entity_pack = config.get("entity_pack")
         if entity_pack is not None:

@@ -611,6 +611,30 @@ def _with_derived_special_capabilities(type_id, entry):
     return entry
 
 
+def _with_derived_wandering_capability(entry):
+    """Backfills "errance" into `entry`'s own "capabilities" dict for ANY
+    mob, UNLESS it already explicitly carries one (an override actually
+    saved via the Forge -- never silently replaced, same guard
+    _with_derived_placable_capability uses). Unlike linkable/doorway/
+    lootable in _with_derived_special_capabilities, this ISN'T purely
+    cosmetic -- Mob.__init__ reads this same capability into
+    self.wandering_capable, which _wander_tick actually gates (2026-08-20,
+    confirmed with the user: "errance" over "balade"). Backfilling it here
+    means every mob that exists today keeps wandering exactly as before
+    (entities.py's class docstring used to say wander is "always present" --
+    that's now this capability's DEFAULT, not a Python-level guarantee), while
+    a future mob card built without it stays put -- a real, new, static-mob
+    option, not just documentation of the status quo."""
+    if not entry.get("mob"):
+        return entry
+    capabilities = entry.get("capabilities") or {}
+    if "errance" in capabilities:
+        return entry
+    entry = dict(entry)
+    entry["capabilities"] = {**capabilities, "errance": {}}
+    return entry
+
+
 def is_placable(object_type, on="any"):
     """Whether `object_type` currently carries a placable_on_floor/
     placable_on_wall capability (see _with_derived_placable_capability) --
@@ -667,7 +691,8 @@ def _with_all_derived_capabilities(type_id, entry):
     OBJECT_TYPES entry should make (see _merged_object_types/
     _write_custom_type)."""
     entry = _with_derived_placable_capability(entry)
-    return _with_derived_special_capabilities(type_id, entry)
+    entry = _with_derived_special_capabilities(type_id, entry)
+    return _with_derived_wandering_capability(entry)
 
 
 def _merged_object_types():
