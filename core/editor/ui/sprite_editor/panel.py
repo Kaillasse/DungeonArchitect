@@ -375,7 +375,6 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixi
         self._archetype_rects = {}
         self._blocks_rect = None
         self._interactable_rect = None
-        self._lockable_rect = None
         self._door_frames_stepper = None
         # NOTE: no self._door_frame_thumb_rects placeholder here on purpose
         # -- a method of that exact name is defined below (computed fresh

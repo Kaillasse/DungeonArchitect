@@ -309,9 +309,12 @@ class DecouperMixin:
             self.cell_modes_grid = [["behind"] * self.width_tiles for _ in range(self.height_tiles)]
         self.blocks_movement = config.get("blocks_movement", False)
         self.interactable = config.get("interactable", False)
-        # blocks_until_open is only ever set on a custom type by this same
-        # editor's own lockable checkbox (see _build_custom_type_entry) --
-        # a reliable proxy for "was this porte saved as lockable".
+        # No dedicated lockable checkbox anymore (2026-08-20, confirmed with
+        # the user -- "ouvrable" as a tear/glue property replaces it, see
+        # object_manager.extract_property_payload's own "ouvrable" branch)
+        # -- this is now a pure passthrough of whatever the card already
+        # carries, re-sent unchanged to register/update below so re-cutting
+        # an existing lockable porte's sprite never silently unlocks it.
         self.lockable = bool(config.get("blocks_until_open"))
         self.door_frame_rects = frame_rects
         self.door_frame_count = len(frame_rects) if frame_rects else 1
@@ -567,10 +570,6 @@ class DecouperMixin:
                 self.archetype = archetype_id
                 return None
 
-        if self.archetype == "porte" and self._lockable_rect.collidepoint(event.pos):
-            self.lockable = not self.lockable
-            return None
-
         # Multiframe -- available for any archetype, not just "porte"
         # (2026-08-18: nothing about individually-picked frames was ever
         # actually specific to doors, see _current_frame_rects).
@@ -687,10 +686,6 @@ class DecouperMixin:
 
         interact_label = "[x] Interagible" if self.interactable else "[ ] Interagible"
         self.border.draw_centered_label(screen, self._interactable_rect, self.font, interact_label)
-
-        if self.archetype == "porte":
-            lock_label = "[x] Porte verrouillable" if self.lockable else "[ ] Porte verrouillable"
-            self.border.draw_centered_label(screen, self._lockable_rect, self.font, lock_label)
 
         # Multiframe -- available for any archetype, not just "porte"
         # (2026-08-18: any type's individually-picked frames can double as
@@ -865,8 +860,6 @@ class DecouperMixin:
 
         column.gap(120)
         self._interactable_rect = column.rect(32)
-        column.gap(8)
-        self._lockable_rect = column.rect(32)
         column.gap(10)
         self._door_frames_stepper = Stepper(column.x, column.y, 28, 50, 1, self.MAX_DOOR_FRAMES)
         column.gap(28 + 76)

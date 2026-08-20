@@ -2,7 +2,7 @@
 
 Where SpriteEditorPanelUI owns a custom type's visual/identity data (asset/
 name/size/frames), this panel owns its gameplay flags (blocks_movement/
-cell_modes/interactable/lockable), capacites (throwable/explosive), effets
+cell_modes/interactable), capacites (throwable/explosive/pressable...), effets
 (heal today), and -- for an enemy mob -- its stats (PV/vitesse/aggro/portee/
 loot). Confirmed split with the user, framed as the long-term "Artiste"
 (sprite editor) vs "Forgeron" (this panel) divide, though no NPC/dialogue
@@ -104,7 +104,7 @@ first.
 
 No buttons drive any of this anymore (confirmed with the user: "rien dans
 des mecaniques parfaitement developpe ne devrait utiliser de boutons").
-Every mechanics toggle (blocks_movement/interactable/lockable) persists
+Every mechanics toggle (blocks_movement/interactable) persists
 itself immediately on click (_try_save, called directly from
 handle_event) instead of waiting for a separate save action -- sounds
 moved to core.editor.ui.sound_box_panel.SoundBoxPanelUI (see its own
@@ -337,6 +337,11 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self._preview_frames = []
         self.preview_frame = 0
         self.preview_animation_timer = 0.0
+        # ("closed/up" label, "open/down" label) for a "pressable"/"ouvrable"
+        # object card, None otherwise -- see open()'s own object branch and
+        # _render_preview_scrub.
+        self._preview_scrub_labels = None
+        self._preview_scrub_dragging = False
 
         # Capacites/Effets -- item/mob/pnj cards, see module docstring.
         # "capabilities"/"effects" vocabulary is the same one
@@ -395,7 +400,6 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
         self._blocks_rect = None
         self._interactable_rect = None
-        self._lockable_rect = None
         self._direction_mode_rect = None
         # True from a MOUSEBUTTONDOWN on the shared preview sprite until
         # the matching MOUSEBUTTONUP -- see handle_event's own multi-event
@@ -519,6 +523,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         first/second respectively -- no id is ever both."""
         self.preview_frame = 0
         self.preview_animation_timer = 0.0
+        self._preview_scrub_labels = None
         self.scroll_offset = 0
         self._tear_target = None
         self._tear_drag_start_x = None
@@ -633,6 +638,19 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self.card_kind = "object"
             self.preview_state = None
             self._preview_frames = load_object_frames(card_id)
+            # A "pressable"/"ouvrable" object's frames go from a base/closed
+            # pose (frame 0) to a pressed/open one (the last frame) -- see
+            # _render_preview_scrub -- rather than auto-looping like a plain
+            # decorative multi-frame object (torch, lilchest) still does.
+            # Reads the live capability/blocks_until_open, same source
+            # _tearable_fragments already surfaces as "Ouvrable"/pressable
+            # in Proprietes, so this always agrees with what's shown there.
+            if config.get("blocks_until_open"):
+                self._preview_scrub_labels = ("Ferme", "Ouvert")
+            elif "pressable" in config.get("capabilities", {}):
+                self._preview_scrub_labels = ("Haut", "Bas")
+            else:
+                self._preview_scrub_labels = None
 
         asset = config["asset"]
         if isinstance(asset, dict):
@@ -823,6 +841,56 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         pygame.draw.rect(screen, (220, 220, 220), handle, border_radius=4)
         pygame.draw.rect(screen, (90, 90, 90), handle, 2, border_radius=4)
 
+    def _preview_scrub_rect(self):
+        """Same track geometry as _preview_state_slider_rect -- the two
+        never draw at once (an object card has no mob/pnj states to list,
+        see _preview_state_options), so reusing the exact same rect keeps
+        both slider kinds visually consistent for free."""
+        return self._preview_state_slider_rect()
+
+    def _frame_at_scrub_y(self, y):
+        """Frame index (0..len(frames)-1) proportional to `y` along the
+        scrub track -- 0 at the top (closed/up, frame 0) to the last frame
+        at the bottom (open/pressed) -- clamped, so dragging past either
+        end just holds at that extreme rather than erroring."""
+        frames = self._preview_current_frames()
+        if len(frames) <= 1:
+            return 0
+        track = self._preview_scrub_rect()
+        fraction = (y - track.y) / track.height if track.height else 0.0
+        fraction = max(0.0, min(1.0, fraction))
+        return round(fraction * (len(frames) - 1))
+
+    def _preview_scrub_handle_rect(self):
+        """The draggable handle, positioned from self.preview_frame's own
+        current value (set by dragging, see handle_event) rather than a
+        snapped named state."""
+        frames = self._preview_current_frames()
+        track = self._preview_scrub_rect()
+        fraction = self.preview_frame / (len(frames) - 1) if len(frames) > 1 else 0.0
+        current_y = track.y + fraction * track.height
+        return pygame.Rect(track.x - 5, current_y - 11, track.width + 10, 22)
+
+    def _render_preview_scrub(self, screen):
+        """Track + top/bottom labels (closed/open or up/down, see open()'s
+        own _preview_scrub_labels) + the draggable handle -- the
+        "pressable"/"ouvrable" counterpart to _render_preview_state_slider,
+        continuous instead of snapping to named stops: moving the cursor
+        from one end to the other shows the actual in-between frames of the
+        animation that plays when the tile really presses/opens in-game."""
+        if self._preview_scrub_labels is None:
+            return
+        track = self._preview_scrub_rect()
+        pygame.draw.rect(screen, (40, 40, 46), track, border_radius=4)
+        top_label, bottom_label = self._preview_scrub_labels
+        top_text = self.small_font.render(top_label, True, self.CARD_TEXT_MUTED_COLOR)
+        screen.blit(top_text, (track.right + 6, track.y - top_text.get_height() / 2))
+        bottom_text = self.small_font.render(bottom_label, True, self.CARD_TEXT_MUTED_COLOR)
+        screen.blit(bottom_text, (track.right + 6, track.bottom - bottom_text.get_height() / 2))
+        handle = self._preview_scrub_handle_rect()
+        pygame.draw.rect(screen, (220, 220, 220), handle, border_radius=4)
+        pygame.draw.rect(screen, (90, 90, 90), handle, 2, border_radius=4)
+
     def _update_pnj_drag(self, event):
         dx = event.pos[0] - self._pnj_drag_last_pos[0]
         if abs(dx) < self.PNJ_DRAG_STEP_PX:
@@ -861,7 +929,11 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                 self._tear_burn = None
 
         frames = self._preview_current_frames()
-        if len(frames) <= 1:
+        # A "pressable"/"ouvrable" object's frame is scrubbed by the cursor
+        # (see _render_preview_scrub/handle_event's own drag block) instead
+        # of auto-looping -- it should sit wherever the cursor left it, not
+        # keep cycling on its own.
+        if len(frames) <= 1 or self._preview_scrub_labels is not None:
             return
         self.preview_animation_timer += dt
         if self.preview_animation_timer >= self.PREVIEW_ANIMATION_SPEED:
@@ -966,9 +1038,9 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         if self.is_mob:  # animal
             return 320
         if self.card_kind == "object":
-            # past blocks/interactable/lockable(+direction mode, only when
+            # past blocks/interactable (+direction mode, only when
             # has_directions) + cell_modes grid's worst case
-            return 480 if self.has_directions else 440
+            return 440 if self.has_directions else 400
         return 300  # pnj
 
     def _shows_properties(self):
@@ -1122,15 +1194,15 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         # Everything below here is scrollable content -- built via _cy(),
         # see its own docstring.
         content_width = self.width - 40 - self.SCROLLBAR_WIDTH - 6
-        # Plain-object mechanics rows (blocks/interactable/lockable) --
-        # start right below the preview + a one-line info label.
+        # Plain-object mechanics rows (blocks/interactable) -- start right
+        # below the preview + a one-line info label. No "lockable" row
+        # anymore (2026-08-20) -- "ouvrable" (see _tearable_fragments) is
+        # the tear/glue property that replaces it now.
         self._blocks_rect = pygame.Rect(content_x, self._cy(270), content_width, 32)
         self._interactable_rect = pygame.Rect(content_x, self._cy(310), content_width, 32)
-        self._lockable_rect = pygame.Rect(content_x, self._cy(350), content_width, 32)
         # Only ever shown for a card with `directions` tagged at crop time
-        # (see self.has_directions) -- any archetype, not just "porte"
-        # (unlike _lockable_rect just above it).
-        self._direction_mode_rect = pygame.Rect(content_x, self._cy(390), content_width, 32)
+        # (see self.has_directions), any archetype.
+        self._direction_mode_rect = pygame.Rect(content_x, self._cy(350), content_width, 32)
         # Proprietes (capacites/effets/stats -- see _tearable_fragments/
         # _render_properties) -- item/mob/pnj cards, right after whatever
         # kind-specific info precedes it (_properties_top_offset, dynamic
@@ -1473,6 +1545,17 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                 self._preview_slider_dragging = False
                 return None
 
+        # The "pressable"/"ouvrable" scrub slider's own drag -- continuous,
+        # unlike the named-state slider above: the frame follows the
+        # cursor exactly, not the nearest of a few fixed stops.
+        if self._preview_scrub_dragging:
+            if event.type == pygame.MOUSEMOTION:
+                self.preview_frame = self._frame_at_scrub_y(event.pos[1])
+                return None
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._preview_scrub_dragging = False
+                return None
+
         if self._scrollbar_dragging:
             if event.type == pygame.MOUSEMOTION:
                 track = self._scrollbar_track_rect()
@@ -1552,16 +1635,25 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             return None
 
         # Animation-state slider grab -- generic, works for both PNJ (roles)
-        # and mob (its fixed animation set). Empty for a plain object/item,
-        # see _preview_state_options, so the track never intercepts a click
-        # in that case. Checked before the preview-drag start below since
-        # the track sits just to the sprite's own right, outside
-        # preview_rect itself.
-        if self._preview_state_slider_rect().collidepoint(event.pos):
+        # and mob (its fixed animation set). Guarded on _preview_state_
+        # options() actually having something to choose (a plain object/item
+        # doesn't, see that method) -- same track rect as the scrub slider
+        # below, so only one of the two kinds is ever live for a given card,
+        # never both. Checked before the preview-drag start below since the
+        # track sits just to the sprite's own right, outside preview_rect
+        # itself.
+        if self._preview_state_options() and self._preview_state_slider_rect().collidepoint(event.pos):
             self._preview_slider_dragging = True
             new_state = self._nearest_preview_state_at(event.pos[1])
             if new_state is not None:
                 self._select_preview_state(new_state)
+            return None
+
+        # The "pressable"/"ouvrable" scrub slider's own grab -- see
+        # _render_preview_scrub/_frame_at_scrub_y.
+        if self._preview_scrub_labels is not None and self._preview_scrub_rect().collidepoint(event.pos):
+            self._preview_scrub_dragging = True
+            self.preview_frame = self._frame_at_scrub_y(event.pos[1])
             return None
 
         # Preview drag start -- for a PNJ this doubles as the direction-
@@ -1610,10 +1702,6 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
             if self._interactable_rect.collidepoint(event.pos):
                 self.interactable = not self.interactable
-                return self._try_save()
-
-            if self.archetype == "porte" and self._lockable_rect.collidepoint(event.pos):
-                self.lockable = not self.lockable
                 return self._try_save()
 
             if self.has_directions and self._direction_mode_rect.collidepoint(event.pos):
@@ -1970,8 +2058,12 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         """Shared preview area for EVERY card kind -- see module docstring's
         "Unified preview" section. Animation selection is the vertical
         slider to the sprite's own right (see _render_preview_state_slider)
-        now, not a row of tab buttons -- confirmed with the user."""
+        now, not a row of tab buttons -- confirmed with the user. A
+        "pressable"/"ouvrable" object gets the scrub-slider variant instead
+        (see _render_preview_scrub) -- the two never both have something to
+        draw for the same card."""
         self._render_preview_state_slider(screen)
+        self._render_preview_scrub(screen)
 
         frames = self._preview_current_frames()
         if frames:
@@ -2053,7 +2145,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
     def _render_object_info(self, screen):
         """Archetype label + mechanics checkboxes (blocks_movement/
-        cell_modes/interactable/lockable) -- plain decorative/special
+        cell_modes/interactable) -- plain decorative/special
         OBJECT_TYPES cards only (card_kind == "object"), extracted out of
         render()'s own kind dispatch for symmetry with _render_mob_info/
         _render_pnj_info."""
@@ -2070,10 +2162,6 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
         interact_label = "[x] Interagible" if self.interactable else "[ ] Interagible"
         self.border.draw_centered_label(screen, self._interactable_rect, self.font, interact_label)
-
-        if self.archetype == "porte":
-            lock_label = "[x] Porte verrouillable" if self.lockable else "[ ] Porte verrouillable"
-            self.border.draw_centered_label(screen, self._lockable_rect, self.font, lock_label)
 
         if self.has_directions:
             direction_label = "Direction : Auto" if self.direction_mode == "auto" else "Direction : Manuel"
