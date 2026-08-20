@@ -78,19 +78,24 @@ class DecouperMixin:
     WALKABLE_GRID_MAX_PX = 140
     def _ensure_cell_modes_grid(self):
         """Keeps cell_modes_grid's shape in sync with width_tiles/
-        height_tiles -- called whenever either stepper changes. 1x1 has no
-        grid at all (None -- the single blocks_movement checkbox is used
-        instead, see _current_cell_modes); a genuinely multi-cell
-        selection always gets a full [height][width] grid, defaulting every
-        cell to "behind" (walkable, normal draw order -- closest match to
-        the single checkbox's own unchecked-by-default state) -- resetting
-        on every resize rather than trying to preserve a smaller grid's
-        values into a larger one, simplest correct behavior for what's
-        expected to be a rare, deliberate resize."""
-        if self.width_tiles == 1 and self.height_tiles == 1:
-            self.cell_modes_grid = None
-            return
-        self.cell_modes_grid = [["behind"] * self.width_tiles for _ in range(self.height_tiles)]
+        height_tiles -- called whenever either stepper changes. Every
+        footprint size gets a full [height][width] grid now, mono-tile
+        included (2026-08-20, confirmed with the user -- no more separate
+        flat "blocks_movement" checkbox, blocking is the grid's job for any
+        size). Default cell mirrors what a fresh 1x1 card used to mean
+        under the old checkbox (unchecked, i.e. walkable) for "sol", but
+        "block" for "mur"/"porte" -- those two never exposed a mono-tile
+        choice at all before, always behaving as blocked-unless-overridden
+        (a wall-mounted decoration sits on an already-blocking WALL cell; a
+        porte's own blocking came from blocks_until_open, which only
+        actually applies when paired with a "block" cell, see
+        ObjectManager.is_cell_walkable) -- "behind" here would silently
+        make a brand-new one walkable/always-open by default. Resets on
+        every resize rather than trying to preserve a smaller grid's values
+        into a larger one, simplest correct behavior for what's expected to
+        be a rare, deliberate resize."""
+        default_cell = "behind" if self.archetype == "sol" else "block"
+        self.cell_modes_grid = [[default_cell] * self.width_tiles for _ in range(self.height_tiles)]
     def _ensure_door_frame_rects(self):
         """Keeps door_frame_rects in sync with door_frame_count/width_tiles/
         height_tiles -- called whenever any of the three changes. A new slot
@@ -160,11 +165,9 @@ class DecouperMixin:
                 )
         return rects
     def _current_cell_modes(self):
-        """None for a 1x1 selection (the plain blocks_movement bool applies
-        instead) -- the value register_custom_type/update_custom_type's own
-        cell_modes param expects."""
-        if self.width_tiles == 1 and self.height_tiles == 1:
-            return None
+        """The grid to persist -- the value register_custom_type/
+        update_custom_type's own cell_modes param expects. Always real now,
+        any footprint size (see _ensure_cell_modes_grid)."""
         return self.cell_modes_grid
     def _current_frame_rects(self):
         """None unless more than 1 frame is configured -- a 1-frame
@@ -287,26 +290,30 @@ class DecouperMixin:
         saved_cell_modes = config.get("cell_modes")
         if saved_cell_modes is not None:
             self.cell_modes_grid = [list(row) for row in saved_cell_modes]
-        elif self.width_tiles == 1 and self.height_tiles == 1:
-            self.cell_modes_grid = None
         else:
-            # A multi-cell card with no saved cell_modes at all (either
-            # saved before this feature existed, or -- like "bigstone" --
-            # simply never had blocks_movement/cell_modes set at creation
-            # time) has nothing to restore here. Without this fallback,
+            # A card with no saved cell_modes at all -- either saved before
+            # this feature existed, mono-tile (no separate flat
+            # "blocks_movement" checkbox anymore, 2026-08-20), or -- like
+            # "bigstone" -- simply never had either set at creation time --
+            # has nothing to restore here. Without this fallback,
             # cell_modes_grid stayed None forever once loaded back for
             # editing (only the width/height steppers' own change handler,
             # _ensure_cell_modes_grid, ever built a fresh grid, and neither
             # stepper needs touching if the loaded size is already
-            # correct) -- so the grid editor silently never appeared and a
-            # multi-cell card's hitbox could never actually be set. Default
-            # every cell to "behind" (walkable, normal draw order), same as
-            # _ensure_cell_modes_grid's own default for a brand-new resize
-            # -- the closest match to this card's current in-game
-            # behavior (no blocks_movement/cell_modes at all falls through
-            # to plain terrain walkability, see ObjectManager.
-            # is_cell_walkable).
-            self.cell_modes_grid = [["behind"] * self.width_tiles for _ in range(self.height_tiles)]
+            # correct). Seeds from whatever the runtime's OWN fallback
+            # priority would have used (see ObjectManager.is_cell_walkable):
+            # blocks_movement/blocks_until_open -> "block", walkable ->
+            # "behind", nothing at all -> "behind" for "sol" (sits on
+            # already-walkable FLOOR) or "block" for "mur"/"porte" (sits on
+            # already-blocking WALL) -- so loading an existing card here
+            # never silently changes its in-game behavior.
+            if config.get("blocks_movement") or config.get("blocks_until_open"):
+                default_cell = "block"
+            elif config.get("walkable"):
+                default_cell = "behind"
+            else:
+                default_cell = "behind" if self.archetype == "sol" else "block"
+            self.cell_modes_grid = [[default_cell] * self.width_tiles for _ in range(self.height_tiles)]
         self.blocks_movement = config.get("blocks_movement", False)
         self.interactable = config.get("interactable", False)
         # No dedicated lockable checkbox anymore (2026-08-20, confirmed with
@@ -337,7 +344,7 @@ class DecouperMixin:
         self.name_box.value = ""
         self.archetype = "sol"
         self.blocks_movement = False
-        self.cell_modes_grid = None
+        self._ensure_cell_modes_grid()
         self.interactable = False
         self.lockable = False
         self.door_frame_count = 1
@@ -594,27 +601,16 @@ class DecouperMixin:
                 return None
 
         if self.archetype in self.CELL_MODES_ARCHETYPES:
-            if self.width_tiles == 1 and self.height_tiles == 1:
-                # The plain blocks_movement checkbox only ever makes sense
-                # for "sol" -- "mur" is already solid by sitting on a WALL
-                # cell (same fallback the built-in plain "torch" relies on,
-                # no flag needed), and "porte" needs its own walkable/
-                # blocks_until_open flags (see ARCHETYPES/_build_custom_type_
-                # entry) to actually WIN in ObjectManager.is_cell_walkable's
-                # precedence -- blocks_movement would short-circuit ahead of
-                # them and make the door permanently solid.
-                if self.archetype == "sol" and self._blocks_rect.collidepoint(event.pos):
-                    self.blocks_movement = not self.blocks_movement
+            # cell_modes is the only blocking mechanism now, any footprint
+            # size (2026-08-20) -- unlike the old mono-tile blocks_movement
+            # checkbox (removed), a "block" cell here correctly defers to
+            # blocks_until_open via ObjectManager.is_cell_walkable's own
+            # cell_mode special case instead of short-circuiting ahead of
+            # it, so "porte" is no longer a special case to avoid.
+            for (row, col), rect in self._cell_mode_grid_rects().items():
+                if rect.collidepoint(event.pos):
+                    self._cycle_cell_mode(row, col, 1)
                     return None
-            else:
-                for (row, col), rect in self._cell_mode_grid_rects().items():
-                    if rect.collidepoint(event.pos):
-                        self._cycle_cell_mode(row, col, 1)
-                        return None
-
-        if self._interactable_rect.collidepoint(event.pos):
-            self.interactable = not self.interactable
-            return None
 
         if self._confirm_rect.collidepoint(event.pos):
             if self.editing_type_id is not None:
@@ -677,15 +673,7 @@ class DecouperMixin:
             self.border.draw_centered_label(screen, rect, self.font, text, (255, 220, 120) if selected else (255, 255, 255))
 
         if self.archetype in self.CELL_MODES_ARCHETYPES:
-            if self.width_tiles == 1 and self.height_tiles == 1:
-                if self.archetype == "sol":
-                    check_label = "[x] Bloque le mouvement" if self.blocks_movement else "[ ] Bloque le mouvement"
-                    self.border.draw_centered_label(screen, self._blocks_rect, self.font, check_label)
-            else:
-                self._render_cell_modes_grid(screen)
-
-        interact_label = "[x] Interagible" if self.interactable else "[ ] Interagible"
-        self.border.draw_centered_label(screen, self._interactable_rect, self.font, interact_label)
+            self._render_cell_modes_grid(screen)
 
         # Multiframe -- available for any archetype, not just "porte"
         # (2026-08-18: any type's individually-picked frames can double as
@@ -852,15 +840,12 @@ class DecouperMixin:
             row_x = rect.right + 8
         column.gap(32 + 12)
 
-        # _blocks_rect doubles as the per-cell walkable grid's anchor once
-        # the tile is multi-cell (see _cell_mode_grid_rects) -- the 120px
-        # gap below clears that grid's own worst-case footprint
-        # (WALKABLE_GRID_MAX_PX) before _interactable_rect.
+        # _blocks_rect is the per-cell walkable grid's own anchor (see
+        # _cell_mode_grid_rects), any footprint size now -- the 120px gap
+        # below clears its worst-case footprint (WALKABLE_GRID_MAX_PX).
         self._blocks_rect = column.rect(32)
 
         column.gap(120)
-        self._interactable_rect = column.rect(32)
-        column.gap(10)
         self._door_frames_stepper = Stepper(column.x, column.y, 28, 50, 1, self.MAX_DOOR_FRAMES)
         column.gap(28 + 76)
         self._confirm_rect = column.rect(40)

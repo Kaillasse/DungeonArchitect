@@ -130,13 +130,13 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixi
         self._file_browser_root = "tiles"
         self.archetype = "sol"
         self.blocks_movement = False
-        # Per-cell walkable override for a multi-cell "sol" tile (see
-        # object_manager._build_custom_type_entry's walkable_cells) --
-        # [row][col] booleans, resized by _ensure_cell_modes_grid whenever
-        # width_tiles/height_tiles changes. None whenever the tile is 1x1,
-        # where the single blocks_movement checkbox above is used instead
-        # (see _current_cell_modes/render/handle_event).
-        self.cell_modes_grid = None
+        # Per-cell walkable/front/behind grid (see
+        # object_manager._build_custom_type_entry's cell_modes) --
+        # [row][col] values, resized by _ensure_cell_modes_grid whenever
+        # width_tiles/height_tiles changes. Always real now, mono-tile
+        # included (2026-08-20, no more separate flat "blocks_movement"
+        # checkbox, see _ensure_cell_modes_grid's own docstring).
+        self._ensure_cell_modes_grid()
         # Generic flag, no behavior yet (see object_manager's "interactable"
         # field) -- confirmed with the user, just reserved for a future PNJ/
         # interaction system.
@@ -374,7 +374,6 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixi
         self._height_stepper = None
         self._archetype_rects = {}
         self._blocks_rect = None
-        self._interactable_rect = None
         self._door_frames_stepper = None
         # NOTE: no self._door_frame_thumb_rects placeholder here on purpose
         # -- a method of that exact name is defined below (computed fresh
@@ -430,7 +429,7 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixi
         self.existing_cards_browser.set_rooms([])
         self.editing_type_id = None
         self.interactable = False
-        self.cell_modes_grid = None
+        self._ensure_cell_modes_grid()
         self.lockable = False
         self.door_frame_count = 1
         self.door_frame_rects = []

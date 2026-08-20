@@ -398,8 +398,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.title_font = get_font("title", 16)
         self.small_font = get_font("text", 13)
 
-        self._blocks_rect = None
-        self._interactable_rect = None
+        self._cell_modes_anchor_rect = None
         self._direction_mode_rect = None
         # True from a MOUSEBUTTONDOWN on the shared preview sprite until
         # the matching MOUSEBUTTONUP -- see handle_event's own multi-event
@@ -691,14 +690,29 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         width_tiles, height_tiles = self.size
         if saved_cell_modes is not None:
             self.cell_modes_grid = [list(row) for row in saved_cell_modes]
-        elif width_tiles == 1 and height_tiles == 1:
-            self.cell_modes_grid = None
         else:
-            # Same fallback as SpriteEditorPanelUI._load_existing_card_for_
-            # edit: a multi-cell card with no saved cell_modes at all (never
-            # had blocks_movement/cell_modes set at creation) gets a fresh
-            # all-"behind" grid rather than staying None forever.
-            self.cell_modes_grid = [["behind"] * width_tiles for _ in range(height_tiles)]
+            # Every object card gets a real cell_modes grid now, mono-tile
+            # included -- no more separate flat "blocks_movement" checkbox
+            # (2026-08-20, confirmed with the user: blocking is the
+            # editor's own cell_modes system's job, for any footprint size).
+            # A card that predates this (no cell_modes saved yet) must seed
+            # its default grid so its behavior doesn't change the moment
+            # it's simply opened here -- mirrors object_manager.
+            # is_cell_walkable's OWN fallback priority exactly (blocks_
+            # movement -> blocks_until_open -> walkable -> raw terrain by
+            # placement), since a cell_modes grid, once present, bypasses
+            # all of that and decides walkability by itself. The terrain
+            # fallback (nothing set at all) depends on which cell the
+            # object actually sits on: "sol" placement means FLOOR
+            # (walkable) beneath it, "mur"/"porte" means WALL (blocking) --
+            # same rule the terrain check itself used to apply.
+            if self.blocks_movement or config.get("blocks_until_open"):
+                default_cell = "block"
+            elif config.get("walkable"):
+                default_cell = "behind"
+            else:
+                default_cell = "behind" if self.archetype == "sol" else "block"
+            self.cell_modes_grid = [[default_cell] * width_tiles for _ in range(height_tiles)]
 
         self._load_capabilities(config.get("capabilities", {}))
         self._load_effects(config.get("effects", []))
@@ -953,7 +967,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
     def _cy(self, offset):
         """Screen-space y for a scrollable-content row at panel-relative
-        offset `offset` (e.g. 270 for _blocks_rect) -- see CONTENT_TOP's
+        offset `offset` (e.g. 270 for _cell_modes_anchor_rect) -- see CONTENT_TOP's
         own docstring. Every row-building call below CONTENT_TOP goes
         through this instead of `self.y + offset` directly, so
         self.scroll_offset shifts every one of them together."""
@@ -1194,12 +1208,12 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         # Everything below here is scrollable content -- built via _cy(),
         # see its own docstring.
         content_width = self.width - 40 - self.SCROLLBAR_WIDTH - 6
-        # Plain-object mechanics rows (blocks/interactable) -- start right
-        # below the preview + a one-line info label. No "lockable" row
-        # anymore (2026-08-20) -- "ouvrable" (see _tearable_fragments) is
-        # the tear/glue property that replaces it now.
-        self._blocks_rect = pygame.Rect(content_x, self._cy(270), content_width, 32)
-        self._interactable_rect = pygame.Rect(content_x, self._cy(310), content_width, 32)
+        # The cell_modes grid's own anchor (top-left cell) -- start right
+        # below the preview + a one-line info label. No separate "blocks"/
+        # "interactable"/"lockable" checkboxes anymore (2026-08-20) -- the
+        # grid itself (any footprint size, see open()'s own seeding
+        # comment) and "ouvrable" (see _tearable_fragments) replace them.
+        self._cell_modes_anchor_rect = pygame.Rect(content_x, self._cy(270), content_width, 32)
         # Only ever shown for a card with `directions` tagged at crop time
         # (see self.has_directions), any archetype.
         self._direction_mode_rect = pygame.Rect(content_x, self._cy(350), content_width, 32)
@@ -1214,7 +1228,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
     def _cell_mode_grid_rects(self):
         width_tiles, height_tiles = self.size
-        anchor = self._blocks_rect
+        anchor = self._cell_modes_anchor_rect
         max_dim = max(width_tiles, height_tiles)
         gap = 2
         cell_px = max(16, min(32, (self.GRID_MAX_PX - gap * (max_dim - 1)) // max_dim))
@@ -1231,11 +1245,6 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         index = CELL_MODES.index(current) if current in CELL_MODES else 0
         self.cell_modes_grid[row][col] = CELL_MODES[(index + step) % len(CELL_MODES)]
 
-    def _is_multi_cell(self):
-        return self.cell_modes_grid is not None
-
-    def _current_cell_modes(self):
-        return self.cell_modes_grid if self._is_multi_cell() else None
 
     def _load_sounds(self, sounds):
         """Passthrough only now (see self.card_sounds' own __init__
@@ -1337,7 +1346,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                 update_type_mechanics(
                     self.type_id,
                     blocks_movement=self.blocks_movement,
-                    cell_modes=self._current_cell_modes(),
+                    cell_modes=self.cell_modes_grid,
                     interactable=self.interactable,
                     lockable=self.lockable,
                     capabilities=capabilities,
@@ -1690,19 +1699,10 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         # handling working unchanged.
         if self.card_kind == "object":
             if self.archetype in CELL_MODES_ARCHETYPES:
-                if not self._is_multi_cell():
-                    if self.archetype == "sol" and self._blocks_rect.collidepoint(event.pos):
-                        self.blocks_movement = not self.blocks_movement
+                for (row, col), rect in self._cell_mode_grid_rects().items():
+                    if rect.collidepoint(event.pos):
+                        self._cycle_cell_mode(row, col, 1)
                         return self._try_save()
-                else:
-                    for (row, col), rect in self._cell_mode_grid_rects().items():
-                        if rect.collidepoint(event.pos):
-                            self._cycle_cell_mode(row, col, 1)
-                            return self._try_save()
-
-            if self._interactable_rect.collidepoint(event.pos):
-                self.interactable = not self.interactable
-                return self._try_save()
 
             if self.has_directions and self._direction_mode_rect.collidepoint(event.pos):
                 self.direction_mode = "manual" if self.direction_mode == "auto" else "auto"
@@ -1996,7 +1996,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         a separate simplified re-draw."""
         self._render_card_background(screen, panel_rect)
 
-        # _layout() rebuilds every cached content rect (_blocks_rect, ...)
+        # _layout() rebuilds every cached content rect (_cell_modes_anchor_rect, ...)
         # from self.x/y/width/height/scroll_offset -- previously only
         # re-run on move() (a PanelFrame drag), which silently left every
         # rect stale after a resize-handle drag (self.width/height
@@ -2144,24 +2144,16 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                 self._draw_dashed_hline(screen, rect.bottom, rect.left, rect.right, self.BURN_LINE_COLOR)
 
     def _render_object_info(self, screen):
-        """Archetype label + mechanics checkboxes (blocks_movement/
-        cell_modes/interactable) -- plain decorative/special
-        OBJECT_TYPES cards only (card_kind == "object"), extracted out of
-        render()'s own kind dispatch for symmetry with _render_mob_info/
-        _render_pnj_info."""
+        """Archetype label + the cell_modes grid (block/behind/front, any
+        footprint size -- see open()'s own grid-seeding comment) -- plain
+        decorative/special OBJECT_TYPES cards only (card_kind == "object"),
+        extracted out of render()'s own kind dispatch for symmetry with
+        _render_mob_info/_render_pnj_info."""
         type_label = self.small_font.render(f"Archetype : {ARCHETYPES.get(self.archetype, {}).get('label', self.archetype)}", True, self.CARD_TEXT_COLOR)
         screen.blit(type_label, (self.x + 20, self._cy(244)))
 
         if self.archetype in CELL_MODES_ARCHETYPES:
-            if not self._is_multi_cell():
-                if self.archetype == "sol":
-                    check_label = "[x] Bloque le mouvement" if self.blocks_movement else "[ ] Bloque le mouvement"
-                    self.border.draw_centered_label(screen, self._blocks_rect, self.font, check_label)
-            else:
-                self._render_cell_modes_grid(screen)
-
-        interact_label = "[x] Interagible" if self.interactable else "[ ] Interagible"
-        self.border.draw_centered_label(screen, self._interactable_rect, self.font, interact_label)
+            self._render_cell_modes_grid(screen)
 
         if self.has_directions:
             direction_label = "Direction : Auto" if self.direction_mode == "auto" else "Direction : Manuel"
@@ -2224,4 +2216,4 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             screen.blit(label, (rect.centerx - label.get_width() / 2, rect.centery - label.get_height() / 2))
         legend_y = max(r.bottom for r in rects.values()) + 6
         legend = self.small_font.render("B = bloquant | D = derriere | F = devant", True, self.CARD_TEXT_MUTED_COLOR)
-        screen.blit(legend, (self._blocks_rect.x, legend_y))
+        screen.blit(legend, (self._cell_modes_anchor_rect.x, legend_y))
