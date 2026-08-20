@@ -30,6 +30,22 @@ class GameManager:
             # save/load code every real launch goes through, isolated from
             # any real player's own data.
             set_active_account("headless")
+            # Profiles (assets/profiles/<name>.json) are NOT account-scoped
+            # (see core.data.ressources' own account bullet in CLAUDE.md) --
+            # rooms/donjons alone being isolated above still left
+            # Creator._load_profile/Explorator resolving the local
+            # PROFILE from settings.local_player_name, which main.py's
+            # unconditional load_settings() populates with whatever a
+            # RETURNING player last saved for real. A live bug, not
+            # hypothetical: found 2026-08-20 when the headless smoke test,
+            # run mid-session, silently loaded-and-resaved the real
+            # "thib" profile (panel_layout coordinates clamped to the
+            # dummy SDL driver's small surface) -- exactly the kind of
+            # mutation this smoke test is supposed to never risk. Setting
+            # the attribute directly (never Settings.set_local_player_name,
+            # which saves to disk) keeps this in-memory-only, so the real
+            # assets/settings.json is untouched either way.
+            self.settings.local_player_name = "headless"
         else:
             # Creator's own __init__ (below) eagerly loads a placeholder
             # room into self.dungeon before Menu's login screen has ever
