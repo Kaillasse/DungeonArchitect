@@ -113,6 +113,7 @@ _PROPERTY_LABELS = {
         "throwable": "Lancable", "explosive": "Explosif",
         "placable_on_floor": "Placable (sol)", "placable_on_wall": "Placable (mur)",
         "linkable": "Liable (bouton)", "doorway": "Entree/sortie", "lootable": "Contient du butin",
+        "editor_tool_unlock": "Deverrouille un outil d'edition",
     },
     "effect": {"heal": "Soin"},
     "stats": {None: "Statistiques"},

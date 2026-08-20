@@ -319,7 +319,12 @@
       [
         "block"
       ]
-    ]
+    ],
+    "capabilities": {
+      "editor_tool_unlock": {
+        "tool": "forge"
+      }
+    }
   },
   "totem4": {
     "asset": {
@@ -535,7 +540,10 @@
       ]
     ],
     "capabilities": {
-      "placable_on_floor": {}
+      "placable_on_floor": {},
+      "editor_tool_unlock": {
+        "tool": "sound_box"
+      }
     }
   },
   "puit": {
@@ -649,7 +657,10 @@
     },
     "card_type": "mob",
     "capabilities": {
-      "placable_on_floor": {}
+      "placable_on_floor": {},
+      "editor_tool_unlock": {
+        "tool": "generator"
+      }
     }
   },
   "skeleton2": {

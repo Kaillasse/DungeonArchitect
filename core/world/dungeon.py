@@ -230,6 +230,16 @@ class Dungeon:
             card_ids.append(obj["type"])
         return card_ids
 
+    def cell_durability(self, x: int, y: int) -> int:
+        """Hits required to clear the terrain cell at (x, y) -- always 1
+        today, for every cell (confirmed with the user, 2026-08-20): a
+        placeholder ahead of a real per-card "durete" stat that doesn't
+        exist yet. destroy_area/destroy_wall_cell go through this single
+        lookup rather than clearing unconditionally, so that once durete
+        becomes a real, editable card property, only this function needs to
+        change -- the two destruction call sites won't."""
+        return 1
+
     def destroy_area(self, center_x: int, center_y: int, radius_tiles: int):
         """Carves a circular hole into the terrain -- both FLOOR and WALL
         cells within `radius_tiles` of (center_x, center_y) become EMPTY.
@@ -250,6 +260,12 @@ class Dungeon:
                     continue
                 x, y = center_x + dx, center_y + dy
                 if 0 <= x < self.width and 0 <= y < self.height and self.logical_grid[y][x] != EMPTY:
+                    # A single explosion is one hit per cell -- only clears
+                    # a cell whose durability that one hit actually meets
+                    # (see cell_durability; always 1 today, so this is a
+                    # no-op check, not a behavior change).
+                    if self.cell_durability(x, y) > 1:
+                        continue
                     card_ids_by_cell[(x, y)] = self._cell_card_ids(x, y)
                     self._play_destroy_sound_at(x, y)
                     self.logical_grid[y][x] = EMPTY
@@ -275,6 +291,11 @@ class Dungeon:
         worth, for the caller to credit once its own spark arrives;
         card_ids is always [] when success is False."""
         if not (0 <= x < self.width and 0 <= y < self.height) or self.logical_grid[y][x] != WALL:
+            return False, []
+        # A single melee swing is one hit -- only clears a cell whose
+        # durability that one hit actually meets (see cell_durability;
+        # always 1 today, so this is a no-op check, not a behavior change).
+        if self.cell_durability(x, y) > 1:
             return False, []
         card_ids = self._cell_card_ids(x, y)
         self._play_destroy_sound_at(x, y)

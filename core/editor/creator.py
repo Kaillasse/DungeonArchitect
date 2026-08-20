@@ -1032,16 +1032,23 @@ class Creator:
         }
         ProfileManager().save(profile)
 
-    # Entity-gated tools -- Generateur unlocks near a placed "djepeto",
-    # Forge unlocks near a placed "totem3" (first pass of attributing
-    # editor tools to specific in-world entities instead of leaving every
-    # tool globally available). Creator itself owns no player entity (only
-    # a camera) -- see Profile.home_player_position/
-    # Explorator._check_home_zoom_switch for where the position this reads
-    # actually comes from.
-    GENERATOR_ENTITY_TYPE = "djepeto"
-    FORGE_ENTITY_TYPE = "totem3"
-    SOUND_BOX_ENTITY_TYPE = "boxbig"
+    # Entity-gated tools -- Generateur/Forge/Boite a sons unlock near
+    # whichever placed object carries the matching "editor_tool_unlock"
+    # capability (first pass of attributing editor tools to specific
+    # in-world entities instead of leaving every tool globally available).
+    # Used to hardcode the specific card id expected to carry each role
+    # (djepeto/totem3/boxbig) -- broke the moment that exact id changed or
+    # got recreated under a new one (2026-08-20, see done.txt), since a
+    # card's id is free to change independently of what it's FOR. Reading
+    # a capability off OBJECT_TYPES instead means ANY card -- built-in,
+    # custom, or fused -- can carry this role, the same way throwable/
+    # explosive already work for any card rather than one hardcoded id.
+    # Creator itself owns no player entity (only a camera) -- see
+    # Profile.home_player_position/Explorator._check_home_zoom_switch for
+    # where the position this reads actually comes from.
+    GENERATOR_TOOL_NAME = "generator"
+    FORGE_TOOL_NAME = "forge"
+    SOUND_BOX_TOOL_NAME = "sound_box"
 
     def _entity_field_radius(self):
         """Mirrors Explorator._magnet_radius's exact 'champ de vision'
@@ -1063,19 +1070,22 @@ class Creator:
             return None
         return saved.get("x"), saved.get("y")
 
-    def _entity_in_range(self, object_type):
-        """True if the currently open room has at least one placed object of
-        `object_type` within _entity_field_radius of the saved player
-        position. No saved position, or no such object placed in this room,
-        both fail closed -- a tool tied to an entity that was never
-        approached (or isn't even placed here) stays locked."""
+    def _entity_in_range(self, tool_name):
+        """True if the currently open room has at least one placed object
+        carrying an "editor_tool_unlock" capability for `tool_name` within
+        _entity_field_radius of the saved player position. No saved
+        position, or no such object placed in this room, both fail closed --
+        a tool tied to an entity that was never approached (or isn't even
+        placed here) stays locked."""
         player_pos = self._player_position()
         if player_pos is None:
             return False
         px, py = player_pos
         radius_sq = self._entity_field_radius() ** 2
         for obj in self.dungeon.object_manager.objects:
-            if obj["type"] != object_type:
+            config = OBJECT_TYPES.get(obj["type"], {})
+            unlock = config.get("capabilities", {}).get("editor_tool_unlock")
+            if unlock is None or unlock.get("tool") != tool_name:
                 continue
             ox, oy = self.dungeon.grid_to_world(obj["x"], obj["y"])
             if (ox - px) ** 2 + (oy - py) ** 2 <= radius_sq:
@@ -1093,13 +1103,13 @@ class Creator:
         return self._active_profile is not None and self._active_profile.admingod
 
     def _generator_unlocked(self):
-        return self._entity_in_range(self.GENERATOR_ENTITY_TYPE)
+        return self._entity_in_range(self.GENERATOR_TOOL_NAME)
 
     def _forge_unlocked(self):
-        return self._entity_in_range(self.FORGE_ENTITY_TYPE)
+        return self._entity_in_range(self.FORGE_TOOL_NAME)
 
     def _sound_box_unlocked(self):
-        return self._entity_in_range(self.SOUND_BOX_ENTITY_TYPE)
+        return self._entity_in_range(self.SOUND_BOX_TOOL_NAME)
 
     def _render_delete_drop_zone(self):
         """Bottom-left drop-to-delete zone (see _resolve_dragged_card),

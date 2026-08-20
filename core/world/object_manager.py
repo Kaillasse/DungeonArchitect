@@ -82,6 +82,12 @@ _BUILTIN_OBJECT_TYPES = {
             "L": "tiles/Torch Yellow L.png",
             "R": "tiles/Torch Yellow R.png",
         },
+        # Which of this type's own "variants" get foreground treatment (see
+        # is_foreground_object) -- data on the type itself rather than a
+        # literal `obj["type"] == "torch"` string check, so the rule stays
+        # correct even if this card is ever renamed or recreated under a
+        # different id (2026-08-20).
+        "foreground_variants": ("L", "R"),
         "card_type": "tile_decor",
     },
     "vase": {
@@ -2431,8 +2437,9 @@ class ObjectManager:
         return True
 
     def is_foreground_object(self, obj):
-        """Drawn after (in front of) the player, and walkable despite sitting on a WALL cell -- currently just L/R wall-mounted torches; a straight torch stays a plain blocking wall decoration. (A pillar's decorative top half gets the same front-of-player treatment, but it isn't a real object -- see WorldRenderer._draw_pillar_tops -- so it never reaches this method. A custom type with per-cell "cell_modes" -- see cell_mode/WorldRenderer._draw_objects -- decides front/back PER CELL instead of through this whole-object check.)"""
-        return obj["type"] == "torch" and obj.get("variant") in ("L", "R")
+        """Drawn after (in front of) the player, and walkable despite sitting on a WALL cell -- currently just L/R wall-mounted torches; a straight torch stays a plain blocking wall decoration. (A pillar's decorative top half gets the same front-of-player treatment, but it isn't a real object -- see WorldRenderer._draw_pillar_tops -- so it never reaches this method. A custom type with per-cell "cell_modes" -- see cell_mode/WorldRenderer._draw_objects -- decides front/back PER CELL instead of through this whole-object check.) Reads the placed object's own type's "foreground_variants" (see torch's own OBJECT_TYPES entry) rather than hardcoding `obj["type"] == "torch"` -- any card whose variant is listed there gets this treatment, not just one specific id (2026-08-20)."""
+        config = OBJECT_TYPES.get(obj["type"], {})
+        return obj.get("variant") in config.get("foreground_variants", ())
 
     def cell_mode(self, obj, config, grid_x, grid_y):
         """The CELL_MODES value ("block"/"behind"/"front") for (grid_x,
