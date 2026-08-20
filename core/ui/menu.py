@@ -16,8 +16,12 @@ from __future__ import annotations
 import pygame
 
 from core.engine.gamestate import GameState
-from core.data.ressources import list_rooms, list_donjons, next_new_room_name
-from core.ui.widgets import BorderManager, RoomBrowser
+from core.data import account_manager
+from core.data.ressources import (
+    list_rooms, list_donjons, next_new_room_name, set_active_account, apply_starter_pack_to_account,
+)
+from core.ui.widgets import BorderManager, RoomBrowser, TextInputBox
+from core.ui.fonts import get_font
 from core.world.home import ensure_home_room
 
 
@@ -26,11 +30,12 @@ class Menu:
     MAIN_OPTIONS = (
         ("Editeur de salle", GameState.CREATOR),
         ("Explorer", GameState.EXPLORATION),
+        ("Changer de compte", "switch_account"),
         ("Quitter", "quit"),
     )
 
     NEW_ROOM_LABEL = "+ Nouvelle salle"
-    NAME_MAX_LENGTH = 20
+    PSEUDO_MAX_LENGTH = account_manager.MAX_PSEUDO_LENGTH
 
     OPTION_WIDTH = 320
     OPTION_HEIGHT = 50
@@ -42,18 +47,33 @@ class Menu:
         self.screen = game_manager.screen
 
         self.border = BorderManager()
-        self.title_font = pygame.font.SysFont("arial", 48)
-        self.option_font = pygame.font.SysFont("arial", 28)
-        self.small_font = pygame.font.SysFont("arial", 18)
+        self.title_font = get_font("title", 48)
+        self.option_font = get_font("button", 28)
+        self.small_font = get_font("text", 18)
 
         self.mode = "main"
         self.selected = 0
 
-        # Forced first mode whenever no local profile identity exists yet
-        # (see core.data.settings.Settings.local_player_name) -- checked at
+        # Forced first mode whenever no local account is logged in yet (see
+        # core.data.settings.Settings.local_player_name, now the ACTIVE
+        # ACCOUNT's pseudo rather than a freely-typed name) -- checked at
         # the top of run() rather than here, since __init__ can run before
-        # settings are fully loaded in some call sites.
-        self._name_input = ""
+        # settings are fully loaded in some call sites. Two fields (pseudo,
+        # password) sharing _option_rect(0)/_option_rect(1)'s bounding
+        # boxes, same "reuse the row layout" trick the room-picker rows
+        # already use -- see _pseudo_field_rect/_password_field_rect.
+        # mask_char on the password box only -- see TextInputBox's own
+        # field, its `.value` still always holds the real typed text.
+        self._pseudo_input = TextInputBox(
+            *self._option_rect(0).topleft, self.OPTION_WIDTH, self.OPTION_HEIGHT,
+            max_length=self.PSEUDO_MAX_LENGTH,
+        )
+        self._password_input = TextInputBox(
+            *self._option_rect(1).topleft, self.OPTION_WIDTH, self.OPTION_HEIGHT,
+            max_length=64, mask_char="*",
+        )
+        self._login_focus = "pseudo"  # or "password" -- which field TAB/typing routes into
+        self._login_status = ""  # error feedback ("mauvais mot de passe", etc.)
 
         self.room_target_state = None
         x = self.screen.get_width() / 2 - self.OPTION_WIDTH / 2
@@ -75,21 +95,47 @@ class Menu:
         confirm = self._room_confirm_rect()
         return pygame.Rect(confirm.x, confirm.y + confirm.height + 12, confirm.width, 44)
 
-    # -- "name_entry" mode: a text field row, a "Valider" row underneath --
-    # same "reuse _option_rect's bounding box" trick as the room-picker rows.
-    def _name_field_rect(self):
-        return self._option_rect(0)
+    # -- "login" mode: pseudo field, password field, a "Valider" row below
+    # both -- same "reuse _option_rect's bounding box" trick as the
+    # room-picker rows. One "Valider" does double duty as both "log in" (an
+    # already-taken pseudo, verified against its stored hash) and "create
+    # my account" (a pseudo nobody's used yet) -- see _attempt_login.
+    def _login_confirm_rect(self):
+        return self._option_rect(2)
 
-    def _name_confirm_rect(self):
-        return self._option_rect(1)
+    def _focused_login_field(self):
+        return self._pseudo_input if self._login_focus == "pseudo" else self._password_input
 
-    def _confirm_name(self):
-        """Returns True if a non-empty name was accepted (and the menu loop
-        should stop showing this mode)."""
-        name = self._name_input.strip()
-        if not name:
+    def _attempt_login(self):
+        """Returns True once a real account is active (login succeeded, or
+        a brand-new pseudo just got registered) and the menu loop should
+        stop showing this mode -- False otherwise, with self._login_status
+        set to explain why (missing fields, wrong password) so render()
+        has something to show. An unknown pseudo always creates a new
+        account rather than rejecting -- there's no separate "create
+        account" mode to switch into, see the class's own "login" section
+        docstring."""
+        pseudo = self._pseudo_input.value.strip()
+        password = self._password_input.value
+        if not pseudo or not password:
+            self._login_status = "Pseudo et mot de passe requis."
             return False
-        self.game_manager.settings.set_local_player_name(name)
+
+        if account_manager.account_exists(pseudo):
+            confirmed_pseudo = account_manager.verify_login(pseudo, password)
+            if confirmed_pseudo is None:
+                self._login_status = "Mot de passe incorrect."
+                return False
+        else:
+            try:
+                confirmed_pseudo = account_manager.create_account(pseudo, password)
+            except account_manager.AccountError as exc:
+                self._login_status = str(exc)
+                return False
+            apply_starter_pack_to_account(confirmed_pseudo)
+
+        set_active_account(confirmed_pseudo)
+        self.game_manager.settings.set_local_player_name(confirmed_pseudo)
         self.game_manager.boot_into_home = False  # consumed -- redirecting right now instead
         self._redirect_to_home()
         return True
@@ -125,9 +171,29 @@ class Menu:
             self.game_manager.running = False
             return True
 
+        if action == "switch_account":
+            self._switch_account()
+            return True
+
         # action is a GameState (CREATOR or EXPLORATION) -- pick a room first
         self._open_room_browser(action)
         return False
+
+    def _switch_account(self):
+        """Logs the current account out and drops back to the login
+        screen -- clears the persisted local_player_name (so a fresh
+        launch doesn't auto-login back into the account just left) and the
+        active account ressources.py resolves rooms/donjons against, same
+        "log out" shape any account system needs to actually support
+        `AccountManager` letting several different accounts share one
+        machine, which auto-login-forever alone wouldn't."""
+        self.game_manager.settings.set_local_player_name("")
+        set_active_account(None)
+        self.mode = "login"
+        self._pseudo_input.value = ""
+        self._password_input.value = ""
+        self._login_focus = "pseudo"
+        self._login_status = ""
 
     def _confirm_room(self):
         """Returns True if a room was picked and the menu loop should stop."""
@@ -151,13 +217,36 @@ class Menu:
 
         pygame.display.set_caption("DungeonArchitect - Menu")
 
-        if not self.game_manager.settings.local_player_name:
-            self.mode = "name_entry"
-            self._name_input = ""
-        elif self.game_manager.boot_into_home:
-            self.game_manager.boot_into_home = False
-            self._redirect_to_home()
-            return
+        # account_exists() guards against a stale local_player_name that
+        # predates the account system (a freely-typed name, never a real
+        # account -- no assets/accounts/<name>.json credentials file ever
+        # written for it): trusting it blindly skipped the login screen
+        # forever and silently activated a "ghost" account that had never
+        # gone through create_account, so it never got the starter pack
+        # either (see done.txt, 2026-08-18). Falls through to the login
+        # mode below exactly like a first-ever launch would.
+        has_real_account = bool(self.game_manager.settings.local_player_name) and account_manager.account_exists(
+            self.game_manager.settings.local_player_name
+        )
+        if not has_real_account:
+            self.game_manager.settings.set_local_player_name("")
+            self.mode = "login"
+            self._pseudo_input.value = ""
+            self._password_input.value = ""
+            self._login_focus = "pseudo"
+            self._login_status = ""
+        else:
+            # Already logged in (a saved local_player_name survives across
+            # launches, same "ask once, persist forever" convention as
+            # every other Settings field) -- (re)activates the matching
+            # account every time Menu.run() starts, not just once at
+            # process start, since this same instance is re-entered on
+            # every ESC-from-gameplay return to the menu too.
+            set_active_account(self.game_manager.settings.local_player_name)
+            if self.game_manager.boot_into_home:
+                self.game_manager.boot_into_home = False
+                self._redirect_to_home()
+                return
 
         running = True
 
@@ -174,9 +263,10 @@ class Menu:
                 elif event.type == pygame.KEYDOWN:
 
                     if event.key == pygame.K_ESCAPE:
-                        if self.mode == "name_entry":
-                            # No "back" to fall to without a name -- quitting
-                            # is the only escape hatch, same as ESC from "main".
+                        if self.mode == "login":
+                            # No "back" to fall to without a logged-in
+                            # account -- quitting is the only escape hatch,
+                            # same as ESC from "main".
                             self.game_manager.running = False
                             running = False
                         elif self.mode != "main":
@@ -186,15 +276,22 @@ class Menu:
                             self.game_manager.running = False
                             running = False
 
-                    elif self.mode == "name_entry":
-                        if event.key == pygame.K_RETURN:
-                            if self._confirm_name():
+                    elif self.mode == "login":
+                        if event.key == pygame.K_TAB:
+                            self._login_focus = "password" if self._login_focus == "pseudo" else "pseudo"
+                        elif event.key == pygame.K_RETURN:
+                            if self._login_focus == "pseudo":
+                                # Enter on the pseudo field just advances to
+                                # the password field -- only Enter on the
+                                # password field actually submits, so a
+                                # returning user typing their pseudo then
+                                # hitting Enter out of habit doesn't
+                                # prematurely attempt a passwordless login.
+                                self._login_focus = "password"
+                            elif self._attempt_login():
                                 running = False
-                        elif event.key == pygame.K_BACKSPACE:
-                            self._name_input = self._name_input[:-1]
-                        elif event.unicode and event.unicode.isprintable():
-                            if len(self._name_input) < self.NAME_MAX_LENGTH:
-                                self._name_input += event.unicode
+                        else:
+                            self._focused_login_field().handle_event(event)
 
                     elif self.mode == "main":
 
@@ -215,10 +312,14 @@ class Menu:
 
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
 
-                    if self.mode == "name_entry":
+                    if self.mode == "login":
 
-                        if self._name_confirm_rect().collidepoint(event.pos):
-                            if self._confirm_name():
+                        if self._option_rect(0).collidepoint(event.pos):
+                            self._login_focus = "pseudo"
+                        elif self._option_rect(1).collidepoint(event.pos):
+                            self._login_focus = "password"
+                        elif self._login_confirm_rect().collidepoint(event.pos):
+                            if self._attempt_login():
                                 running = False
 
                     elif self.mode == "main":
@@ -262,7 +363,7 @@ class Menu:
         self.screen.fill((20, 20, 30))
 
         TITLES = {
-            "name_entry": "Quel est ton nom ?",
+            "login": "Pseudo et mot de passe",
             "rooms": "Choisir une salle",
         }
         title_text = TITLES.get(self.mode, "Dungeon Architect")
@@ -273,16 +374,32 @@ class Menu:
             (self.screen.get_width() / 2 - title.get_width() / 2, 140),
         )
 
-        if self.mode == "name_entry":
+        if self.mode == "login":
 
-            field_rect = self._name_field_rect()
-            cursor = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
-            field_text = (self._name_input or "") + cursor
-            self.border.draw_centered_label(self.screen, field_rect, self.option_font, field_text)
+            # A thin highlight around whichever field TAB/a click last
+            # focused -- the only visual cue distinguishing the two
+            # otherwise-identical-looking fields, since neither one is
+            # ever disabled/greyed out the way the room-picker's "Valider"
+            # is.
+            focused_rect = self._option_rect(0 if self._login_focus == "pseudo" else 1)
+            pygame.draw.rect(self.screen, (255, 220, 120), focused_rect.inflate(6, 6), 2, border_radius=4)
 
-            confirm_rect = self._name_confirm_rect()
-            enabled = bool(self._name_input.strip())
+            self._pseudo_input.render(self.screen)
+            self._password_input.render(self.screen)
+
+            confirm_rect = self._login_confirm_rect()
+            enabled = bool(self._pseudo_input.value.strip()) and bool(self._password_input.value)
             self.border.draw_enabled_label(self.screen, confirm_rect, self.option_font, "Valider", enabled)
+
+            if self._login_status:
+                status = self.small_font.render(self._login_status, True, (255, 140, 140))
+                self.screen.blit(status, (confirm_rect.x, confirm_rect.bottom + 10))
+            else:
+                hint = self.small_font.render(
+                    "Pseudo connu -> connexion. Nouveau pseudo -> creation de compte.",
+                    True, (180, 180, 180),
+                )
+                self.screen.blit(hint, (confirm_rect.x, confirm_rect.bottom + 10))
 
         elif self.mode == "rooms":
 

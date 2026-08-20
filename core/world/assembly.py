@@ -17,7 +17,7 @@ import pygame
 from core.world.dungeon import Dungeon
 from core.world.entities import PlayerRef
 from core.editor.autotile import EMPTY, FLOOR, WALL
-from core.data.ressources import DONJONS_DIRECTORY
+from core.data.ressources import donjons_directory
 
 OPPOSITE_SIDE = {"north": "south", "south": "north", "east": "west", "west": "east"}
 
@@ -41,8 +41,11 @@ def _valid_entry_exits(dungeon):
         obj for obj in dungeon.object_manager.objects
         if dungeon.object_manager.is_es_type(obj["type"])
         and dungeon.object_manager.get_role(obj) == "connector"
-        # The anchor cell (bottom-center of footprint), same check placement
-        # itself uses -- so a multi-cell E/S validates identically here.
+        # The anchor cell (bottom-center of footprint) -- placement itself
+        # now validates a looser is_valid_wall_break (see object_manager.py,
+        # 2026-08-18: interior/decorative doors no longer need a void
+        # neighbor to be placeable), so this is the one place that still
+        # demands the stricter void-facing shape, to decide connectability.
         and dungeon.object_manager._valid_doorway_anchor(obj["type"], obj["x"], obj["y"])
     ]
 
@@ -447,29 +450,43 @@ class DungeonAssembly:
         rooms = self.rooms_on_floor(floor)
         hide_border_cells_by_room = self._border_cells_by_room(floor, rooms)
 
-        # Two passes: every room's floor/objects first (show_border=False),
-        # then every room's border ledge in a second, guaranteed-last loop.
-        # hide_border_cells_by_room already suppresses a ledge at a genuine
-        # border-merge seam, but this ordering is a safety net on top: even
-        # a seam it missed still gets painted OVER by the neighboring room's
-        # real floor (drawn in this same pass-1 loop) rather than risking a
-        # stray ledge on top depending on `rooms` iteration order.
-        offset_cameras = {}
+        # Two passes: every room's border ledge FIRST, then every room's
+        # floor/objects in a second, guaranteed-last loop (show_border=False
+        # there -- borders are exclusively this first pass' job). Order was
+        # previously the other way around (floor/objects, then borders) --
+        # the comment above that version claimed a missed seam
+        # (hide_border_cells_by_room already suppresses a genuine
+        # border-merge seam, but a rare exit-merge geometry can still slip
+        # past it, see _south_seam_cells) would get "painted over by the
+        # neighboring room's real floor", as a safety net on top of that
+        # suppression. That was never actually true: with border drawn
+        # AFTER every room's floor, a missed seam's stray ledge tile drew
+        # on TOP of the neighboring room's genuine floor instead of being
+        # covered by it -- exactly the "bordure par-dessus le sol de la
+        # salle du sud" bug reported by the user for a same-floor exit-
+        # merged room pair. Borders first, floors last, makes the safety
+        # net real: any ledge tile a missed seam still draws gets
+        # immediately covered by whichever room's actual floor legitimately
+        # occupies that same global cell, independent of `rooms` iteration
+        # order or of ever fully understanding every geometry
+        # _south_seam_cells can miss.
+        offset_cameras = {
+            room: _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
+            for room in rooms
+        }
         for room in rooms:
-            offset_camera = _OffsetCamera(camera, room.offset_x * tile_size, room.offset_y * tile_size)
-            offset_cameras[room] = offset_camera
+            room.dungeon.render_border(
+                screen, offset_cameras[room], hide_border_cells=hide_border_cells_by_room.get(room, ()),
+            )
+
+        for room in rooms:
             room.dungeon.render(
-                screen, offset_camera,
+                screen, offset_cameras[room],
                 hide_object_types=hide_object_types,
                 skip_foreground_objects=skip_foreground,
                 skip_mobs=skip_mobs,
                 show_grid=show_grid,
                 show_border=False,
-            )
-
-        for room in rooms:
-            room.dungeon.render_border(
-                screen, offset_cameras[room], hide_border_cells=hide_border_cells_by_room.get(room, ()),
             )
 
     def _border_cells_by_room(self, floor, rooms):
@@ -1094,7 +1111,7 @@ def _finalize_dungeon_exit(assembly, edges):
 
 
 def _donjon_path(name):
-    return DONJONS_DIRECTORY / f"{name}.json"
+    return donjons_directory() / f"{name}.json"
 
 
 def save_assembly(assembly, name):

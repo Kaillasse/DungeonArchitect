@@ -10,6 +10,7 @@ from core.engine.gamestate import GameState
 from core.data.settings import Settings
 from core.ui.widgets import BorderManager
 from core.ui.settings_panel import SettingsPanelUI
+from core.data.ressources import set_active_account
 
 class GameManager:
     def __init__(self, screen, settings=None):
@@ -19,6 +20,34 @@ class GameManager:
         # historique de Creator.run() (sauvegarde immediate + sortie) ; le menu n'a
         # pas de bypass headless, donc on saute directement l'editeur.
         headless = os.environ.get("DUNGEONARCHITECT_HEADLESS") == "1"
+        if headless:
+            # Skips Menu entirely (see below), so no login ever runs to
+            # activate an account -- rooms_directory()/donjons_directory()
+            # (core.data.ressources) raise loudly with no active account at
+            # all, by design, rather than silently falling back to some
+            # ambiguous shared location. A fixed dummy account keeps this
+            # smoke-test path exercising the exact same account-scoped
+            # save/load code every real launch goes through, isolated from
+            # any real player's own data.
+            set_active_account("headless")
+        else:
+            # Creator's own __init__ (below) eagerly loads a placeholder
+            # room into self.dungeon before Menu's login screen has ever
+            # run -- a REAL crash reported live: rooms_directory() raised
+            # "aucun compte actif" the instant Creator was constructed,
+            # since normal (non-headless) startup used to leave no account
+            # active until Menu.run() actually completed a login, which
+            # happens well after this constructor. A returning user's own
+            # account activates immediately here so that placeholder load
+            # reads their real room_001 (closest to the old pre-account
+            # behavior); a brand-new install (no saved local_player_name
+            # yet) activates a throwaway "_pending_login" account instead
+            # -- SaveManager.load tolerates a missing room file (silently
+            # leaves self.dungeon blank), and Menu.run()'s own login
+            # re-activates the REAL account and Creator.open_room() loads
+            # the real room before anything is ever actually shown, so
+            # this placeholder is never seen or written to.
+            set_active_account(self.settings.local_player_name or "_pending_login")
         self.state = GameState.CREATOR if headless else GameState.MENU
         self.running = True
         self.pending_room = None

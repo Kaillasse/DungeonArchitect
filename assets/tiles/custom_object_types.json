@@ -55,6 +55,7 @@
     ],
     "frames": 1,
     "name": "banc",
+    "card_type": "tile_decor",
     "cell_modes": [
       [
         "front",
@@ -64,7 +65,13 @@
         "block",
         "block"
       ]
-    ]
+    ],
+    "capabilities": {
+      "placable_on_floor": {}
+    },
+    "loot_cards": {
+      "banc": 1
+    }
   },
   "arbre1": {
     "asset": {
@@ -388,6 +395,7 @@
     ],
     "frames": 1,
     "name": "bordureporte",
+    "card_type": "tile_decor",
     "cell_modes": [
       [
         "block",
@@ -399,7 +407,13 @@
         "behind",
         "block"
       ]
-    ]
+    ],
+    "capabilities": {
+      "placable_on_wall": {}
+    },
+    "loot_cards": {
+      "bordureporte": 1
+    }
   },
   "portebois": {
     "asset": {
@@ -446,6 +460,7 @@
     ],
     "frames": 1,
     "name": "bigstone",
+    "card_type": "tile_decor",
     "cell_modes": [
       [
         "front",
@@ -455,7 +470,13 @@
         "block",
         "block"
       ]
-    ]
+    ],
+    "capabilities": {
+      "placable_on_floor": {}
+    },
+    "loot_cards": {
+      "bigstone": 1
+    }
   },
   "boxsmall": {
     "asset": {
@@ -474,6 +495,7 @@
     ],
     "frames": 1,
     "name": "boxsmall",
+    "card_type": "tile_decor",
     "cell_modes": [
       [
         "front"
@@ -481,7 +503,10 @@
       [
         "block"
       ]
-    ]
+    ],
+    "capabilities": {
+      "placable_on_floor": {}
+    }
   },
   "boxbig": {
     "asset": {
@@ -500,6 +525,7 @@
     ],
     "frames": 1,
     "name": "boxbig",
+    "card_type": "tile_decor",
     "cell_modes": [
       [
         "front"
@@ -507,7 +533,10 @@
       [
         "block"
       ]
-    ]
+    ],
+    "capabilities": {
+      "placable_on_floor": {}
+    }
   },
   "puit": {
     "asset": {
@@ -634,16 +663,24 @@
     ],
     "frames": 1,
     "name": "Djepeto",
+    "mob": true,
     "entity_pack": "gepeto",
     "wander_actions": {
       "idle": "marche",
       "move": "marche",
+      "sitting": "sit",
+      "laying": "lay",
       "run": "course"
     },
-    "mob": true,
-    "interactable": true
+    "card_type": "mob",
+    "capabilities": {
+      "placable_on_floor": {}
+    }
   },
   "skeleton2": {
+    "capabilities": {
+      "placable_on_floor": {}
+    },
     "stats": {
       "health": 3,
       "move_speed": 45,
@@ -653,7 +690,6 @@
         "gold": 2,
         "blue": 1
       },
-      "item_loot": {},
       "active_attack_frames": [
         11,
         12
@@ -662,6 +698,9 @@
     "sounds": {
       "attack": "skel2attack.wav",
       "damaged": "skeldamaged.wav"
+    },
+    "loot_cards": {
+      "skeleton2": 1
     },
     "__override_of_builtin__": true
   },
@@ -688,6 +727,633 @@
       "move": "move"
     },
     "mob": true,
-    "interactable": true
+    "card_type": "mob",
+    "interactable": true,
+    "capabilities": {
+      "placable_on_floor": {}
+    }
+  },
+  "skeleton1": {
+    "capabilities": {
+      "placable_on_floor": {}
+    },
+    "stats": {
+      "health": 3,
+      "move_speed": 45,
+      "aggro_range": 6.0,
+      "attack_range": 1.2,
+      "loot": {
+        "gold": 2,
+        "blue": 1
+      },
+      "active_attack_frames": [
+        6,
+        7
+      ]
+    },
+    "sounds": {
+      "attack": "skel1attack.wav",
+      "damaged": "skeldamaged.wav"
+    },
+    "loot_cards": {
+      "skeleton1": 1
+    },
+    "__override_of_builtin__": true
+  },
+  "sheep": {
+    "stats": {
+      "health": 2
+    },
+    "loot_cards": {
+      "sheep": 1
+    },
+    "__override_of_builtin__": true
+  },
+  "button": {
+    "capabilities": {
+      "placable_on_floor": {},
+      "linkable": {}
+    },
+    "sounds": {
+      "interact": "buttonpressed.wav"
+    },
+    "loot_cards": {
+      "button": 1
+    },
+    "__override_of_builtin__": true
+  },
+  "cow": {
+    "capabilities": {
+      "placable_on_floor": {}
+    },
+    "stats": {
+      "health": 2
+    },
+    "loot_cards": {
+      "cow": 1
+    },
+    "__override_of_builtin__": true
+  },
+  "big_entrance": {
+    "cell_modes": [
+      [
+        "behind",
+        "behind"
+      ]
+    ],
+    "capabilities": {
+      "placable_on_wall": {},
+      "doorway": {}
+    },
+    "__override_of_builtin__": true
+  },
+  "sheep__aggressivity_stats": {
+    "asset": "characters/Animals/Sheep.png",
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 2,
+    "frame_size": 32,
+    "mob": true,
+    "card_type": "mob",
+    "stats": {
+      "health": 3,
+      "move_speed": 45,
+      "aggro_range": 6.0,
+      "attack_range": 1.2,
+      "loot": {
+        "gold": 2,
+        "blue": 1
+      },
+      "active_attack_frames": [
+        6,
+        7
+      ]
+    },
+    "loot_cards": {
+      "sheep": 1
+    },
+    "capabilities": {
+      "placable_on_floor": {}
+    },
+    "fused_from": {
+      "base": "sheep",
+      "fragments": [
+        "aggressivity",
+        "stats"
+      ]
+    },
+    "name": "Sheep + Statistiques"
+  },
+  "pilier_de_base": {
+    "asset": {
+      "tileset": "basictileset.png",
+      "rect": [
+        0,
+        32,
+        16,
+        32
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      2
+    ],
+    "frames": 1,
+    "name": "Pilier de base",
+    "cell_modes": [
+      [
+        "front"
+      ],
+      [
+        "block"
+      ]
+    ],
+    "card_type": "tile_decor",
+    "capabilities": {
+      "placable_on_floor": {}
+    }
+  },
+  "torche": {
+    "asset": {
+      "tileset": "alltorch.png",
+      "rects": [
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ]
+      ]
+    },
+    "placement": "wall",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 8,
+    "name": "torche",
+    "card_type": "tile_decor",
+    "capabilities": {
+      "placable_on_wall": {}
+    }
+  },
+  "torch_2": {
+    "asset": {
+      "tileset": "alltorch.png",
+      "rects": [
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ],
+        [
+          0,
+          0,
+          16,
+          16
+        ]
+      ]
+    },
+    "placement": "wall",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 8,
+    "name": "torch",
+    "card_type": "tile_decor",
+    "capabilities": {
+      "placable_on_wall": {}
+    }
+  },
+  "walkfront": {
+    "asset": {
+      "tileset": "characters/Ennemies/Zomboss.png",
+      "rects": [
+        [
+          0,
+          0,
+          32,
+          32
+        ],
+        [
+          32,
+          0,
+          32,
+          32
+        ],
+        [
+          64,
+          0,
+          32,
+          32
+        ],
+        [
+          96,
+          0,
+          32,
+          32
+        ],
+        [
+          128,
+          0,
+          32,
+          32
+        ],
+        [
+          160,
+          0,
+          32,
+          32
+        ],
+        [
+          192,
+          0,
+          32,
+          32
+        ],
+        [
+          224,
+          0,
+          32,
+          32
+        ]
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 8,
+    "name": "walkfront",
+    "card_type": "tile_decor",
+    "capabilities": {
+      "placable_on_floor": {}
+    }
+  },
+  "walkfront__aggressivity": {
+    "asset": {
+      "tileset": "characters/Ennemies/Zomboss.png",
+      "rects": [
+        [
+          0,
+          0,
+          32,
+          32
+        ],
+        [
+          32,
+          0,
+          32,
+          32
+        ],
+        [
+          64,
+          0,
+          32,
+          32
+        ],
+        [
+          96,
+          0,
+          32,
+          32
+        ],
+        [
+          128,
+          0,
+          32,
+          32
+        ],
+        [
+          160,
+          0,
+          32,
+          32
+        ],
+        [
+          192,
+          0,
+          32,
+          32
+        ],
+        [
+          224,
+          0,
+          32,
+          32
+        ]
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 8,
+    "name": "walkfront + Agressivite",
+    "card_type": "tile_decor",
+    "capabilities": {
+      "placable_on_floor": {}
+    },
+    "stats": {
+      "aggro_range": 6.0,
+      "attack_range": 1.2
+    },
+    "fused_from": {
+      "base": "walkfront",
+      "fragments": [
+        "aggressivity"
+      ]
+    }
+  },
+  "walkfront__aggressivity_stats": {
+    "asset": {
+      "tileset": "characters/Ennemies/Zomboss.png",
+      "rects": [
+        [
+          0,
+          0,
+          32,
+          32
+        ],
+        [
+          32,
+          0,
+          32,
+          32
+        ],
+        [
+          64,
+          0,
+          32,
+          32
+        ],
+        [
+          96,
+          0,
+          32,
+          32
+        ],
+        [
+          128,
+          0,
+          32,
+          32
+        ],
+        [
+          160,
+          0,
+          32,
+          32
+        ],
+        [
+          192,
+          0,
+          32,
+          32
+        ],
+        [
+          224,
+          0,
+          32,
+          32
+        ]
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 8,
+    "name": "walkfront + Statistiques",
+    "card_type": "tile_decor",
+    "capabilities": {
+      "placable_on_floor": {}
+    },
+    "stats": {
+      "health": 3,
+      "move_speed": 45,
+      "aggro_range": 6.0,
+      "attack_range": 1.2,
+      "loot": {
+        "gold": 2,
+        "blue": 1
+      },
+      "active_attack_frames": [
+        11,
+        12
+      ]
+    },
+    "fused_from": {
+      "base": "walkfront",
+      "fragments": [
+        "aggressivity",
+        "stats"
+      ]
+    }
+  },
+  "walkfront__aggressivity_state_idle_stats": {
+    "asset": {
+      "tileset": "characters/Ennemies/Zomboss.png",
+      "rects": [
+        [
+          0,
+          0,
+          32,
+          32
+        ],
+        [
+          32,
+          0,
+          32,
+          32
+        ],
+        [
+          64,
+          0,
+          32,
+          32
+        ],
+        [
+          96,
+          0,
+          32,
+          32
+        ],
+        [
+          128,
+          0,
+          32,
+          32
+        ],
+        [
+          160,
+          0,
+          32,
+          32
+        ],
+        [
+          192,
+          0,
+          32,
+          32
+        ],
+        [
+          224,
+          0,
+          32,
+          32
+        ]
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 8,
+    "name": "walkfront + Etat (immobile)",
+    "card_type": "tile_decor",
+    "capabilities": {
+      "placable_on_floor": {}
+    },
+    "stats": {
+      "health": 3,
+      "move_speed": 45,
+      "aggro_range": 6.0,
+      "attack_range": 1.2,
+      "loot": {
+        "gold": 2,
+        "blue": 1
+      },
+      "active_attack_frames": [
+        11,
+        12
+      ]
+    },
+    "fused_from": {
+      "base": "walkfront",
+      "fragments": [
+        "aggressivity",
+        "state_idle",
+        "stats"
+      ]
+    },
+    "wander_actions": {
+      "idle": "idle"
+    }
+  },
+  "zomboss": {
+    "asset": {
+      "tileset": "characters/Ennemies/Zomboss.png",
+      "rect": [
+        0,
+        224,
+        32,
+        32
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 1,
+    "name": "Zomboss",
+    "card_type": "tile_decor",
+    "entity_pack": "zomboss",
+    "wander_actions": {
+      "idle": "attente",
+      "move": "walk"
+    },
+    "capabilities": {
+      "placable_on_floor": {}
+    }
   }
 }

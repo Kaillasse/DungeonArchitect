@@ -15,7 +15,8 @@ replaying real handle_event()-driven scenarios per mode.
 import pygame
 
 from core.ui.widgets import BorderManager, RoomBrowser, TextInputBox, LayoutColumn
-from core.data.ressources import PROJECT_ROOT, load_tileset_by_name, list_autotile_packs
+from core.ui.fonts import get_font
+from core.data.ressources import PROJECT_ROOT, load_tileset_by_name, list_autotile_packs, TILE_SIZE
 from core.world.object_manager import NPC_DIRECTIONS
 from core.engine.camera import Camera
 from core.editor.autotile import EMPTY
@@ -23,9 +24,10 @@ from core.editor.autotile import EMPTY
 from .decouper import DecouperMixin
 from .bitmap import BitmapMixin
 from .peindre import PeindreMixin
+from .extraire import ExtraireMixin
 
 
-class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
+class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixin):
     """Grand panneau modal (meme famille que core.exploration.inventory_ui.
     InventoryPanel -- assez de place pour afficher une image chargee a une
     echelle utilisable, contrairement aux petits panneaux dockes de coin
@@ -33,15 +35,22 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
     selection dimensionnee selon les steppers largeur/hauteur (alignee sur
     la grille source 16px, pas de redimensionnement libre au pixel pres).
 
-    Trois modes (self.mode, boutons _mode_rects) -- voir le docstring de
+    Quatre modes (self.mode, boutons _mode_rects) -- voir le docstring de
     chaque mixin pour le detail complet de ce que fait chacun :
-    - "decouper" (DecouperMixin) : recadrage/extraction -- sous-toggle
-      crop_kind "tuile" (une carte placable) / "pack" (grille de tuiles
-      extraites).
+    - "extraire" (ExtraireMixin, ajoute 2026-08-18) : recadrage generique --
+      une image, une selection, "Ajouter au pack" -- vers la bibliotheque
+      de regions d'une image (un pack sans vocation assignee au depart,
+      voir ressources.add_pack_regions). Ne cree jamais de Carte
+      directement.
+    - "decouper" (DecouperMixin) : une selection devient directement UNE
+      Carte placable (register_custom_type/update_custom_type). Avait
+      aussi un sous-toggle crop_kind "tuile"/"pack" -- retire une fois
+      "extraire" devenu le seul chemin d'extraction generique.
     - "bitmap" (BitmapMixin) : tagging bitmask/variante autotile + tagging
       action/direction/ordre NPC/entite, sur un pack deja extrait. Reste
-      independant de "decouper" pour l'instant -- sa possible repartition
-      future (avec la Forge) n'est pas encore tranchee.
+      independant de "decouper"/"extraire" pour l'instant -- sa possible
+      repartition future (avec un futur Assembleur, voir CLAUDE.md) n'est
+      pas encore tranchee.
     - "peindre" (PeindreMixin, ex-"pixel") : editeur pixel type Paint
       rudimentaire (pinceau/roue de couleur, pipette, selection, copier/
       couper/coller, annuler, sauvegarde en place).
@@ -53,32 +62,23 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
     "bitmap" (grille de tuiles scrollee, pas d'image chargee)."""
 
     PANEL_WIDTH = 1000
-    # +44 par rapport a l'original (700) -- meme delta que le nouveau toggle
-    # crop_kind ajoute en tete de la colonne de parametres du mode
-    # "decouper" (voir _layout), pour que confirm_rect/le texte de statut en
-    # dessous restent visibles au lieu de toucher tout juste le bord bas.
     PANEL_HEIGHT = 744
     OVERLAY_ALPHA = 150
     VIEWER_WIDTH = 520
     VIEWER_HEIGHT = 520
     VIEWER_MIN_SCALE = 1.0
     VIEWER_MAX_SCALE = 4.0
-    MODES = (("decouper", "Decouper"), ("peindre", "Peindre"), ("bitmap", "Bitmap"))
-
-    # Mode "decouper" -- sous-toggle entre les deux anciens comportements
-    # "tuile" (une seule carte placable) et "pack" (grille de tuiles
-    # individuelles extraites) qu'il regroupe desormais. Reprend
-    # exactement le vocabulaire des anciens ids de mode -- toute la chaine
-    # partagee tuile/pack plus bas teste self.crop_kind au lieu de
-    # self.mode, sans autre changement de comportement.
+    MODES = (
+        ("extraire", "Extraire"), ("assembler", "Assembleur"),
+    )
 
     def __init__(self, x, y):
         self.x = x
         self.y = y
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 15)
-        self.title_font = pygame.font.SysFont("arial", 20)
-        self.small_font = pygame.font.SysFont("arial", 13)
+        self.font = get_font("button", 15)
+        self.title_font = get_font("title", 20)
+        self.small_font = get_font("text", 13)
 
         self.active = False
         self.image_name = None
@@ -93,33 +93,34 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         self._panning = False
         self._pan_last_pos = None
 
-        self.mode = "decouper"
-        # Sous-toggle du mode "decouper" (voir CROP_KINDS) -- "tuile" : une
-        # seule region devient une nouvelle Carte placable (comportement
-        # d'origine). "pack" : la zone de selection devient une grille de
-        # tuiles 1x1 INDIVIDUELLES (width_tiles x height_tiles cases
-        # separees, pas un seul sprite combine) extraites et numerotees
-        # dans un nouveau pack autotile (voir _try_register_pack /
-        # ressources.save_autotile_pack) -- l'association bitmask reste une
-        # etape manuelle separee, ce sous-mode ne fait qu'automatiser le
-        # recadrage.
-        self.crop_kind = "tuile"
+        # Mode "extraire" (ExtraireMixin, added 2026-08-18) -- fully
+        # independent selection state from Decouper's own _sel_x/_sel_y/
+        # width_tiles/height_tiles, deliberately not shared: the two modes
+        # aren't sub-toggles of one another the way "tuile"/"pack" used to
+        # be, so leftover values from one shouldn't silently bleed into the
+        # other when switching between them.
+        self.extract_sel_x = 0
+        self.extract_sel_y = 0
+        self.extract_width = 1
+        self.extract_height = 1
+        self.extract_tile_size = TILE_SIZE
+        # "Peindre" toggle within "extraire" (2026-08-18: only 2 top-level
+        # modes exist now, see MODES) -- delegates ENTIRELY to PeindreMixin's
+        # existing _handle_pixel_event/_render_pixel when on, same "own
+        # screen entirely" pattern as the Carte checklist within
+        # "assembler" (see bm_carte_multitile).
+        self.extract_peindre_mode = False
+
+        # "extraire" -- the first step of the intended workflow (crop
+        # regions, then build something from them in "assembler"), and the
+        # only 2 modes that exist now (see MODES).
+        self.mode = "extraire"
         self.width_tiles = 1
         self.height_tiles = 1
-        # crop_kind "pack" only -- "autotile" (comportement d'origine, ci-dessus)
-        # ou "entite" : la feuille chargee vient d'une feuille de
-        # personnage/PNJ (assets/characters/, voir _file_browser_root) et le
-        # decoupage en grille utilise entity_tile_size (32 par defaut pour
-        # coller aux feuilles deja existantes) au lieu du TILE_SIZE de 16 du
-        # tileset interieur. Voir _try_register_pack/mode "bitmap" (l'ecran
-        # de tagging action/direction qui suit branche sur le "kind" du pack
-        # charge, pas sur cet attribut -- celui-ci ne pilote que la capture).
-        self.pack_kind = "autotile"
-        self.entity_tile_size = 32
-        # Racine sous assets/ que file_browser liste -- "tiles" (defaut,
-        # inchange) ou "characters" une fois pack_kind="entite" choisi (voir
-        # _refresh_file_list/_load_image). Toujours remis a "tiles" en
-        # quittant le mode pack ou en repassant en Autotile.
+        # Racine sous assets/ que file_browser liste -- "tiles" (defaut),
+        # "characters", ou "" (tout assets/, voir "peindre"/"extraire") --
+        # voir _refresh_file_list/_load_image. Toujours remis a "tiles" en
+        # quittant un mode qui l'a change.
         self._file_browser_root = "tiles"
         self.archetype = "sol"
         self.blocks_movement = False
@@ -157,6 +158,15 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         # dragging moves -- set by clicking a frame thumbnail (see
         # _door_frame_thumb_rects/handle_event).
         self.editing_door_frame = None
+        # Parallel to door_frame_rects (see _ensure_door_frame_rects, which
+        # keeps both in sync) -- each entry is an NPC_DIRECTIONS value or
+        # None (untagged), letting ANY multiframe card's individual frames
+        # double as direction variants (object_manager's own `directions`
+        # field, {direction: frame_index} -- see _current_directions).
+        # Right-click a thumbnail to cycle it (see _door_frame_thumb_rects'
+        # own click handling); left-click keeps selecting which frame the
+        # viewer drag-select edits.
+        self.frame_directions = []
 
         # Set once the player clicks an entry in existing_cards_browser --
         # Confirmer then calls object_manager.update_custom_type on this id
@@ -242,6 +252,38 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         # pack kind.
         self.bm_scroll_rows = 0
 
+        # "Carte" checklist (added 2026-08-18, Plan A / Phase 3, redesigned
+        # from a single toggle into 3 independently-checkable tools the
+        # same day) -- lets ANY loaded pack (regardless of its own kind --
+        # autotile, entity, or unassigned) be used to build a placable Card
+        # instead of tagging bitmasks/entities: pick one or more of its
+        # regions (order matters, see bm_carte_selection), then check
+        # whichever combination of tools the card actually needs --
+        # Multitile (footprint size + per-cell block/behind/front, reuses
+        # DecouperMixin's width_tiles/height_tiles/cell_modes_grid --
+        # harmless since Decouper's own tab is unreachable, see
+        # decouper.py's docstring), Multidirection (tag each selected
+        # region with a direction + auto/manual placement, bm_carte_
+        # directions), Animation (no extra state -- click order on
+        # bm_carte_selection already IS frame-playback order). Deliberately
+        # NO archetype/blocks_movement/interactable/lockable anywhere in
+        # this flow -- a freshly-assembled card gets no gameplay property
+        # at creation time at all (always registered under the neutral
+        # "sol" archetype, register_custom_type's other flags left at
+        # their False/None defaults); it's entirely up to the player to
+        # tear/fuse those from other cards afterward, in-game (see
+        # extract_property_payload in object_manager.py). Entirely
+        # independent of _bm_entity_selection/bm_variant_mode -- delegates
+        # away from both at the very top of _handle_bitmap_event/
+        # _render_bitmap, same "own screen entirely" precedent as the
+        # entity-kind delegation already uses.
+        self.bm_carte_multitile = False
+        self.bm_carte_multidirection = False
+        self.bm_carte_animation = False
+        self.bm_carte_selection = []  # ordered tile indices -- order IS frame order
+        self.bm_carte_directions = []  # parallel to bm_carte_selection
+        self.bm_carte_direction_mode = "manual"
+
         # Bitmap-mode state, ENTITY-kind packs only (see _bm_pack_kind) --
         # completely separate from the autotile Motif/Variante state above,
         # since tagging a region with (action, direction, ordre) has
@@ -322,7 +364,6 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         self._px_new_h = 16
 
         self._mode_rects = {}
-        self._crop_kind_rects = {}
         self._width_stepper = None
         self._height_stepper = None
         self._archetype_rects = {}
@@ -343,6 +384,8 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         self._new_card_rect = None
         self._confirm_rect = None
         self._close_rect = None
+        self._bm_carte_toggle_rect = None
+        self._extract_peindre_toggle_rect = None
         self._bm_toggle_rects = {}
         self._bm_grid_rects = {}
         self._bm_clear_rect = None
@@ -355,9 +398,7 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         return self.active
     def open(self):
         self.active = True
-        self.mode = "decouper"
-        self.crop_kind = "tuile"
-        self.pack_kind = "autotile"
+        self.mode = "extraire"
         self._file_browser_root = "tiles"
         self.status_text = ""
         self.name_box.value = ""
@@ -389,6 +430,7 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         self.door_frame_count = 1
         self.door_frame_rects = []
         self.editing_door_frame = None
+        self.frame_directions = []
 
         self.px_tool = "brush"
         self.px_selection = None
@@ -402,7 +444,7 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         self.px_dirty = False
         self._px_new_canvas_open = False
     def close(self):
-        if self.mode == "bitmap":
+        if self.mode == "assembler":
             self._bm_auto_save_current()
         self.active = False
     def _refresh_file_list(self):
@@ -438,18 +480,20 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         params_x = self.viewer_rect.right + 20
         step_w = 190
 
-        # 3 boutons (Decouper/Peindre/Bitmap, voir MODES) -- 70px chacun
-        # (3*70+2*4=218 tient dans les ~224px disponibles entre params_x
-        # et le bord droit du panneau).
+        # 4 boutons (Extraire/Decouper/Peindre/Bitmap, voir MODES) -- 52px
+        # chacun (4*52+3*4=220 tient dans les ~224px disponibles entre
+        # params_x et le bord droit du panneau). Etait 70px pour 3 boutons
+        # avant l'ajout d'Extraire (2026-08-18).
         self._mode_rects = {}
         row_x = params_x
         for mode_id, _label in self.MODES:
-            rect = pygame.Rect(row_x, self.y + 60, 70, 32)
+            rect = pygame.Rect(row_x, self.y + 60, 52, 32)
             self._mode_rects[mode_id] = rect
             row_x = rect.right + 4
 
         self._close_rect = pygame.Rect(self.x + self.PANEL_WIDTH - 90, self.y + 12, 70, 28)
 
+        self._layout_extraire(LayoutColumn(params_x, self.y + 100, step_w))
         self._layout_decouper(LayoutColumn(params_x, self.y + 100, step_w))
         self._layout_bitmap(LayoutColumn(params_x, self.y + 100, step_w))
         self._layout_peindre(LayoutColumn(params_x, self.y + 100, step_w))
@@ -515,45 +559,34 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         return candidate
 
     def _set_mode(self, mode_id):
-        """Switches self.mode, resetting "decouper"'s own crop_kind/pack_kind/
-        file-browser-root back to their defaults whenever leaving it entirely
-        -- otherwise file_browser could keep showing assets/characters/**
-        content while in "peindre"/"bitmap", which mean something else
-        entirely (see _full_image_name/_refresh_file_list). A no-op reset if
-        pack_kind was already "autotile" (see _set_crop_kind for the
-        equivalent reset when switching crop_kind WITHIN "decouper" instead
-        of leaving it).
+        """Switches self.mode between the only 2 that exist (see MODES) --
+        resets "extraire"'s file-browser-root back to "tiles" (and its own
+        Peindre sub-toggle, see extract_peindre_mode) whenever leaving it,
+        so file_browser doesn't keep showing all of assets/ while in
+        "assembler", which means something else entirely (see
+        _full_image_name/_refresh_file_list). Deliberately no autosave of
+        an in-progress Peindre edit here (unlike bitmap's
+        _bm_auto_save_current) -- a PNG write is heavier/more destructive
+        than bitmap's per-tile JSON merge, confirmed with the user as an
+        explicit "Enregistrer" button only (see _px_save).
 
-        Also refreshes pack_browser whenever entering "bitmap" -- open()
-        populates it once, so without this a pack registered moments ago
-        under crop_kind "pack" (e.g. straight after slicing blackcat.png)
-        would never show up here until the whole panel is closed and
-        reopened.
-
-        "peindre" gets the same file_browser_root treatment as "decouper"
-        above, just with its own root ("", assets/ entier -- see
-        _refresh_file_list) instead of "characters". Deliberately no
-        autosave-on-leave here (unlike bitmap's _bm_auto_save_current) -- a
-        PNG write is heavier/more destructive than bitmap's per-tile JSON
-        merge, confirmed with the user as an explicit "Enregistrer" button
-        only (see _px_save)."""
-        if self.mode == "decouper" and mode_id != "decouper" and self._file_browser_root != "tiles":
-            self.pack_kind = "autotile"
-            self._file_browser_root = "tiles"
-            self._refresh_file_list()
-        if self.mode == "peindre" and mode_id != "peindre" and self._file_browser_root != "tiles":
-            self._file_browser_root = "tiles"
-            self._px_painting = False
-            self._px_new_canvas_open = False
-            self._px_dragging_wheel = False
-            self._px_dragging_value = False
-            self._px_select_anchor = None
-            self._refresh_file_list()
-        if mode_id == "bitmap" and self.mode != "bitmap":
+        Also refreshes pack_browser whenever entering "assembler" -- open()
+        populates it once, so without this a pack extracted moments ago
+        (mode "extraire") would never show up here until the whole panel is
+        closed and reopened."""
+        if self.mode == "extraire" and mode_id != "extraire":
+            if self.extract_peindre_mode:
+                self.extract_peindre_mode = False
+                self._px_painting = False
+                self._px_new_canvas_open = False
+                self._px_dragging_wheel = False
+                self._px_dragging_value = False
+                self._px_select_anchor = None
+            if self._file_browser_root != "tiles":
+                self._file_browser_root = "tiles"
+                self._refresh_file_list()
+        if mode_id == "assembler" and self.mode != "assembler":
             self.pack_browser.set_rooms(list_autotile_packs())
-        if mode_id == "peindre" and self.mode != "peindre":
-            self._file_browser_root = ""
-            self._refresh_file_list()
         self.mode = mode_id
     def _handle_mode_switch(self, pos):
         """True (and switches self.mode) if `pos` hit a mode button --
@@ -561,7 +594,7 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         away must always be reachable no matter which mode is active."""
         for mode_id, rect in self._mode_rects.items():
             if rect.collidepoint(pos):
-                if self.mode == "bitmap" and mode_id != "bitmap":
+                if self.mode == "assembler" and mode_id != "assembler":
                     self._bm_auto_save_current()
                     self.bm_picking_variant_family = None
                 self._set_mode(mode_id)
@@ -606,7 +639,7 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
                     self._px_handle_keydown(event)
                 return None
             if (
-                self.mode == "bitmap" and self.bm_pack_name is not None
+                self.mode == "assembler" and self.bm_pack_name is not None
                 and self._bm_pack_kind() == "entity" and self._entity_bm_focus == "action"
             ):
                 # Entity-bitmap mode has TWO visible text fields at once
@@ -620,7 +653,7 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
             return None
 
         if event.type == pygame.MOUSEWHEEL:
-            if self.mode == "bitmap":
+            if self.mode == "assembler":
                 mouse_pos = pygame.mouse.get_pos()
                 if self.bm_pack_name is not None and self.viewer_rect.collidepoint(mouse_pos):
                     # Scrolling over the tile grid itself pages through it --
@@ -634,6 +667,20 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
                     tile_count = len(payload.get("tiles", []))
                     self.bm_scroll_rows += -1 if event.y > 0 else 1
                     self._bm_clamp_scroll(tile_count)
+                    return None
+                if self.bm_pack_name is not None and self._bm_carte_active():
+                    # Carte screen -- only the Multitile cell_modes grid has
+                    # anything hover+scroll-editable (same idiom as the
+                    # autotile neighbor grid below); everything else in this
+                    # screen is click-only. Positions self._blocks_rect as a
+                    # side effect (see _bm_carte_layout_rects).
+                    if self.bm_carte_multitile:
+                        self._bm_carte_layout_rects()
+                        if self.cell_modes_grid is not None:
+                            cell = self._cell_mode_at(mouse_pos)
+                            if cell is not None:
+                                row, col = cell
+                                self._cycle_cell_mode(row, col, 1 if event.y > 0 else -1)
                     return None
                 if self.bm_pack_name is not None and self._bm_pack_kind() == "entity":
                     # Same hover+scroll idiom as the autotile neighbor grid
@@ -678,7 +725,7 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
                         self._cycle_neighbor(neighbor_key, 1 if event.y > 0 else -1)
                 return None
             if (
-                self.crop_kind == "tuile"
+                self.mode == "decouper"
                 and self.archetype in self.CELL_MODES_ARCHETYPES
                 and self.cell_modes_grid is not None
                 and not (self.width_tiles == 1 and self.height_tiles == 1)
@@ -703,16 +750,14 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
         if event.type not in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
             return None
 
-        if self.mode == "bitmap":
+        if self.mode == "assembler":
             return self._handle_bitmap_event(event)
 
-        if self.mode == "peindre":
-            return self._handle_pixel_event(event)
-
-        # By elimination, everything below is mode "decouper" -- bitmap and
-        # peindre already dispatched away above, same precedent as those
-        # two's own _handle_bitmap_event/_handle_pixel_event.
-        return self._handle_decouper_event(event)
+        # By elimination, mode "extraire" -- only 2 top-level modes exist
+        # (see MODES). Peindre lives INSIDE extraire now (a toggle, see
+        # ExtraireMixin._handle_extraire_event's own delegation to
+        # _handle_pixel_event), not its own self.mode value anymore.
+        return self._handle_extraire_event(event)
     def render(self, screen):
         if not self.active:
             return
@@ -734,14 +779,9 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin):
             text = f"> {label}" if selected else label
             self.border.draw_centered_label(screen, rect, self.small_font, text, (255, 220, 120) if selected else (255, 255, 255))
 
-        if self.mode == "bitmap":
+        if self.mode == "assembler":
             self._render_bitmap(screen)
             return
 
-        if self.mode == "peindre":
-            self._render_pixel(screen)
-            return
-
-        # By elimination, everything below is mode "decouper" -- same
-        # precedent as _handle_decouper_event.
-        self._render_decouper(screen)
+        # By elimination, mode "extraire" -- see handle_event's own note.
+        self._render_extraire(screen)

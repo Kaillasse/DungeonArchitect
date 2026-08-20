@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from core.data.ressources import ROOMS_DIRECTORY
+from core.data.ressources import rooms_directory
 from core.editor.autotile import FLOOR, WALL
 
 
@@ -9,7 +9,7 @@ class SaveManager:
     """Converts a Dungeon to/from its JSON room file. Owns no world data itself."""
 
     def get_room_path(self, room_name: str) -> Path:
-        return ROOMS_DIRECTORY / f"{room_name}.json"
+        return rooms_directory() / f"{room_name}.json"
 
     def to_json(self, dungeon) -> dict:
         return {

@@ -1,11 +1,17 @@
 """DecouperMixin -- mode "Decouper" of SpriteEditorPanelUI, split out of the
 old monolithic sprite_editor.py (see core/editor/ui/sprite_editor/panel.py's
-own docstring for why). Regroups the two former top-level modes "tuile"
-(a selection becomes ONE placable Card) and "pack" (a selection becomes a
-grid of individually-extracted tiles) behind a crop_kind sub-toggle --
-they were never really separate handlers even before that regroup (see
-CROP_KINDS' own history), sharing almost this entire params column and
-event/render chain, so this single mixin covers both."""
+own docstring for why). One selection on a loaded image becomes ONE
+placable Card -- registered directly here via register_custom_type/
+update_custom_type.
+
+Used to also have a "pack" crop_kind sub-mode (a selection became a grid of
+individually-extracted, un-registered tiles) -- retired 2026-08-18 once
+mode "Extraire" (see extraire.py) fully replaced it: incremental,
+kind-less region extraction, one region library per source image, growable
+across many crop actions instead of one crop-everything-now call. See
+CLAUDE.md's editor-simplification plan for why splitting card-creation
+("Decouper") from raw region extraction ("Extraire") is the direction this
+whole package is moving in, rather than the old crop_kind toggle."""
 
 import pygame
 
@@ -13,7 +19,7 @@ from core.world.object_manager import (
     OBJECT_TYPES, ARCHETYPES, register_custom_type, update_custom_type, delete_custom_type,
     custom_types_for_tileset, CELL_MODES,
 )
-from core.data.ressources import TILE_SIZE, save_autotile_pack, list_autotile_packs, load_autotile_pack, type_references
+from core.data.ressources import TILE_SIZE, type_references
 from core.ui.widgets import Stepper
 
 
@@ -25,6 +31,15 @@ class DecouperMixin:
     MAX_DOOR_FRAMES = 12
     DOOR_FRAME_THUMB_SIZE = 26
     DOOR_FRAME_THUMB_GAP = 4
+    # Clicking a thumbnail's bottom strip cycles its direction tag through
+    # this sequence (see _door_frame_thumb_rects' click handling) -- only
+    # the 4 cardinals ObjectManager._AUTO_DIRECTION_WALL_ADJACENCY actually
+    # uses for "auto" placement, not the full 8 NPC_DIRECTIONS (a diagonal
+    # tag would never be reachable by auto mode, and "manuel" mode has no
+    # real use for one either on a grid-aligned object).
+    DIRECTION_CYCLE = (None, "front", "back", "left", "right")
+    DIRECTION_LABELS = {None: "-", "front": "F", "back": "B", "left": "G", "right": "D"}
+    DIRECTION_LABEL_STRIP = 8
 
     # Motifs de voisinage qui se produisent reellement dans une salle valide
     # -- extraits de assets/tiles/tile_categories.json (les valeurs "floor"/
@@ -33,7 +48,6 @@ class DecouperMixin:
     # peuvent jamais apparaitre. C'est la check-list que le mode bitmap
     # propose une fois un pack charge, pour assigner un motif connu d'un
     # clic plutot que de le composer a la main a chaque tuile.
-    CROP_KINDS = (("tuile", "Tuile"), ("pack", "Pack"))
 
     # Mode "peindre" (ex-"pixel") -- outils/roue de couleur.
     CELL_MODE_LABELS = {"block": "B", "behind": "D", "front": "F"}
@@ -53,54 +67,12 @@ class DecouperMixin:
     # in NEIGHBOR_KEYS so hover/scroll/click logic can just check "is this
     # key in NEIGHBOR_KEYS" to know whether a grid cell is interactive.
 
-    def _active_tile_size(self):
-        """The pixel grid the current selection snaps to and is sized in --
-        TILE_SIZE (16, the interior tileset's own grid) everywhere except
-        pack mode with pack_kind="entite", which uses entity_tile_size
-        (32 by default) instead: a character sheet's own cells are rarely
-        16px (blackcat.png's are 32x32) and vary per sheet, unlike the
-        fixed built-in tileset every other mode crops from."""
-        if self.crop_kind == "pack" and self.pack_kind == "entite":
-            return self.entity_tile_size
-        return TILE_SIZE
-    def _set_pack_kind(self, kind_id):
-        """Switches pack_kind, refreshing file_browser to the matching root
-        (assets/tiles/ for "autotile", assets/characters/ for "entite" --
-        see _refresh_file_list) and resetting the loaded image/selection,
-        since a file picked under one root is meaningless once the browser
-        no longer even lists it."""
-        if kind_id == self.pack_kind:
-            return
-        self.pack_kind = kind_id
-        self._file_browser_root = "characters" if kind_id == "entite" else "tiles"
-        self.image = None
-        self.image_name = None
-        self._sel_x = 0
-        self._sel_y = 0
-        self._refresh_file_list()
-    def _set_crop_kind(self, kind_id):
-        """Tuile <-> Pack sub-toggle within mode "decouper" (see CROP_KINDS)
-        -- mirrors _set_pack_kind's own reset, just triggered by switching
-        crop_kind INSTEAD of leaving mode "decouper" entirely (see
-        _set_mode's own equivalent reset, gated on the outer mode instead).
-        Without this, switching from crop_kind "pack"+pack_kind "entite"
-        (file_browser pointed at assets/characters/) back to "tuile" would
-        leave file_browser stuck showing character sheets instead of
-        assets/tiles/."""
-        if kind_id == self.crop_kind:
-            return
-        if self.crop_kind == "pack" and self._file_browser_root != "tiles":
-            self.pack_kind = "autotile"
-            self._file_browser_root = "tiles"
-            self._refresh_file_list()
-        self.crop_kind = kind_id
     def _clamp_selection(self):
         if self.image is None:
             return
         img_w, img_h = self.image.get_size()
-        tile_size = self._active_tile_size()
-        sel_w = self.width_tiles * tile_size
-        sel_h = self.height_tiles * tile_size
+        sel_w = self.width_tiles * TILE_SIZE
+        sel_h = self.height_tiles * TILE_SIZE
         self._sel_x = max(0, min(self._sel_x, max(0, img_w - sel_w)))
         self._sel_y = max(0, min(self._sel_y, max(0, img_h - sel_h)))
     WALKABLE_GRID_MAX_PX = 140
@@ -138,6 +110,13 @@ class DecouperMixin:
         del self.door_frame_rects[self.door_frame_count:]
         for frame_rect in self.door_frame_rects:
             frame_rect[2], frame_rect[3] = sel_w, sel_h
+
+        # frame_directions stays index-aligned with door_frame_rects, same
+        # grow/shrink shape -- a new slot starts untagged (None) rather than
+        # inheriting whatever the last slot's direction was.
+        while len(self.frame_directions) < self.door_frame_count:
+            self.frame_directions.append(None)
+        del self.frame_directions[self.door_frame_count:]
 
         if self.door_frame_count > 1:
             current = self.editing_door_frame if self.editing_door_frame is not None else 0
@@ -188,13 +167,27 @@ class DecouperMixin:
             return None
         return self.cell_modes_grid
     def _current_frame_rects(self):
-        """None unless archetype is "porte" with more than 1 opening-
-        animation frame configured -- a 1-frame (or non-"porte") selection
-        stays on the plain single "rect" path (see _build_custom_type_
-        entry), same reasoning as _current_cell_modes above."""
-        if self.archetype == "porte" and self.door_frame_count > 1:
+        """None unless more than 1 frame is configured -- a 1-frame
+        selection stays on the plain single "rect" path (see
+        _build_visual_fields), same reasoning as _current_cell_modes
+        above. Originally "porte"-only (its opening animation), now
+        available for any archetype (2026-08-18) -- nothing about
+        multiple individually-picked frames was ever specific to doors;
+        that restriction lived only in this UI, not in the data model."""
+        if self.door_frame_count > 1:
             return self.door_frame_rects
         return None
+    def _current_directions(self):
+        """{direction: frame_index} built from frame_directions (parallel
+        to door_frame_rects, see _ensure_door_frame_rects) -- None entries
+        (untagged frames) are simply omitted. Empty dict (not None) when
+        nothing's tagged, matching register_custom_type/update_custom_type's
+        own `directions` param, which treats falsy the same as absent."""
+        return {
+            direction: index
+            for index, direction in enumerate(self.frame_directions)
+            if direction
+        }
     def _cycle_cell_mode(self, row, col, step):
         """Advances (or reverses, step=-1) one cell's mode through
         CELL_MODES ("block"/"behind"/"front"), wrapping around -- shared by
@@ -228,8 +221,11 @@ class DecouperMixin:
         entries.sort(key=lambda entry: entry[0].lower())
         self.existing_cards_browser.set_rooms(entries)
     def _try_delete_card(self, type_id):
-        """on_delete callback for existing_cards_browser (see __init__) --
-        refuses with an explanation in status_text instead of deleting
+        """on_delete callback for existing_cards_browser -- shared by
+        Decouper's own (dead-tab, see this module's docstring) usage and
+        BitmapMixin's Carte screen (see _refresh_carte_existing_cards),
+        which both point the SAME browser instance's on_delete here.
+        Refuses with an explanation in status_text instead of deleting
         outright when the type is still placed somewhere (ressources.
         type_references scans every room/dungeon), same protective spirit
         as Creator._can_rename_room blocking a home room -- without this,
@@ -237,7 +233,14 @@ class DecouperMixin:
         KeyError the next time it's loaded, not a graceful degradation.
         Clears editing_type_id if the deleted card was the one being
         edited, so Confirmer doesn't try to update a type that no longer
-        exists."""
+        exists.
+
+        The post-delete refresh has to pick the right of the two
+        populating methods for whichever mode is actually driving this
+        browser right now (Assembler's is keyed off the loaded pack's
+        tileset, Decouper's off self.image_name, which is always None
+        while in Assembler) -- calling the wrong one would silently wipe
+        the browser back to empty instead of just dropping the one row."""
         used_in = type_references(type_id)
         if used_in:
             self.status_text = f"Impossible de supprimer : encore utilisee dans {', '.join(used_in)}."
@@ -250,7 +253,10 @@ class DecouperMixin:
         if self.editing_type_id == type_id:
             self._reset_to_new_card()
         self.status_text = f"'{type_id}' supprimee."
-        self._refresh_existing_cards()
+        if self.mode == "assembler":
+            self._refresh_carte_existing_cards()
+        else:
+            self._refresh_existing_cards()
     def _load_existing_card_for_edit(self, type_id):
         """Loads an existing custom card's saved parameters into the
         editing state (selection, size, archetype, flags, name) and marks
@@ -310,6 +316,13 @@ class DecouperMixin:
         self.door_frame_rects = frame_rects
         self.door_frame_count = len(frame_rects) if frame_rects else 1
         self.editing_door_frame = 0 if len(frame_rects) > 1 else None
+        # Invert the saved {direction: index} back into frame_directions'
+        # own index-aligned list shape (see _current_directions for the
+        # forward conversion) -- an index with no matching direction stays
+        # untagged (None).
+        saved_directions = config.get("directions") or {}
+        index_to_direction = {index: direction for direction, index in saved_directions.items()}
+        self.frame_directions = [index_to_direction.get(i) for i in range(self.door_frame_count)]
         self.name_box.value = config.get("name", type_id)
         self._clamp_selection()
         self.status_text = f"Edition de '{self.name_box.value}' ({type_id})."
@@ -327,12 +340,12 @@ class DecouperMixin:
         self.door_frame_count = 1
         self.door_frame_rects = []
         self.editing_door_frame = None
+        self.frame_directions = []
         self.status_text = ""
     def _move_selection_to(self, screen_pos):
         img_x, img_y = self.camera.screen_to_world(*self._local_pos(screen_pos))
-        tile_size = self._active_tile_size()
-        self._sel_x = round(img_x / tile_size) * tile_size
-        self._sel_y = round(img_y / tile_size) * tile_size
+        self._sel_x = round(img_x / TILE_SIZE) * TILE_SIZE
+        self._sel_y = round(img_y / TILE_SIZE) * TILE_SIZE
         self._clamp_selection()
         # A door frame is currently armed for editing (see
         # _door_frame_thumb_rects' click handling) -- the drag captures
@@ -385,6 +398,7 @@ class DecouperMixin:
                 interactable=self.interactable,
                 lockable=self.lockable,
                 frame_rects=self._current_frame_rects(),
+                directions=self._current_directions(),
             )
         except ValueError as exc:
             self.status_text = str(exc)
@@ -423,6 +437,7 @@ class DecouperMixin:
                 interactable=self.interactable,
                 lockable=self.lockable,
                 frame_rects=self._current_frame_rects(),
+                directions=self._current_directions(),
             )
         except ValueError as exc:
             self.status_text = str(exc)
@@ -431,51 +446,12 @@ class DecouperMixin:
         self.status_text = f"'{raw_name}' mise a jour ({self.editing_type_id})."
         self._refresh_existing_cards()
         return None
-    def _try_register_pack(self):
-        """Pack mode: the current selection is a width_tiles x height_tiles
-        GRID of separate 1x1 (or, for pack_kind="entite", tile_size x
-        tile_size -- see _active_tile_size) tiles -- each cell is cropped
-        and numbered independently. Autotile: never touches OBJECT_TYPES/
-        the Card system (raw terrain tiles aren't placeable objects) --
-        deliberately just extraction, no bitmask assignment (see
-        ressources.save_autotile_pack's own docstring). Entite: same
-        "just extraction" split -- action/direction/order tagging is mode
-        "bitmap"'s own job (see _handle_entity_bitmap_event), not this
-        one. Neither branch ever returns a value Creator would act on --
-        see handle_event's confirm dispatch."""
-        if self.image is None:
-            self.status_text = "Choisis d'abord un fichier."
-            return None
-
-        raw_name = self.name_box.value.strip()
-        if not raw_name:
-            self.status_text = "Donne un nom au pack."
-            return None
-
-        pack_name = self._sanitize_id(raw_name, set(list_autotile_packs()), fallback="pack")
-        tile_size = self._active_tile_size()
-        rects = [
-            (self._sel_x + col * tile_size, self._sel_y + row * tile_size, tile_size, tile_size)
-            for row in range(self.height_tiles)
-            for col in range(self.width_tiles)
-        ]
-
-        if self.pack_kind == "entite":
-            save_autotile_pack(pack_name, None, self.image_name, rects, kind="entity", columns=self.width_tiles)
-        else:
-            role = ARCHETYPES[self.archetype]["placement"]
-            save_autotile_pack(pack_name, role, self.image_name, rects)
-
-        self.status_text = f"Pack '{raw_name}' enregistre ({len(rects)} tuiles, {pack_name})."
-        self.name_box.value = ""
-        return None
     def _handle_decouper_event(self, event):
-        """Mode "decouper"'s own event handling (crop_kind "tuile"/"pack"
-        both live here, already merged into one shared chain before this
-        method existed -- see CROP_KINDS' own docstring). Extracted from
-        what used to be handle_event's own unconditional tail, mirroring
-        the _handle_bitmap_event/_handle_pixel_event precedent so all 3
-        modes now have a dedicated handler instead of only 2 of them."""
+        """Mode "decouper"'s own event handling -- extracted from what used
+        to be handle_event's own unconditional tail, mirroring the
+        _handle_bitmap_event/_handle_pixel_event/_handle_extraire_event
+        precedent so every mode has a dedicated handler."""
+        self.name_box.rect.topleft = self._decouper_name_box_pos
         if event.type == pygame.MOUSEBUTTONUP:
             if event.button == 2:
                 self._panning = False
@@ -517,7 +493,7 @@ class DecouperMixin:
         # (RoomBrowser.is_modal) -- route every event there
         # unconditionally while one is open, or the popup renders but
         # never actually receives input.
-        if self.crop_kind == "tuile" and self.existing_cards_browser.is_modal:
+        if self.existing_cards_browser.is_modal:
             self.existing_cards_browser.handle_event(event)
             return None
 
@@ -525,7 +501,7 @@ class DecouperMixin:
             # Right-click only ever means "open existing_cards_browser's
             # own Supprimer menu" here -- everything else only responds
             # to left-click/middle-click (pan).
-            if self.crop_kind == "tuile" and self.existing_cards_browser.contains(event.pos):
+            if self.existing_cards_browser.contains(event.pos):
                 self.existing_cards_browser.handle_event(event)
             return None
 
@@ -549,25 +525,20 @@ class DecouperMixin:
                 self._load_image(selected)
             return None
 
-        if self.crop_kind == "tuile" and self.existing_cards_browser.contains(event.pos):
+        if self.existing_cards_browser.contains(event.pos):
             self.existing_cards_browser.handle_event(event)
             selected_id = self.existing_cards_browser.selected_name
             if selected_id is not None:
                 self._load_existing_card_for_edit(selected_id)
             return None
 
-        if self.crop_kind == "tuile" and self.editing_type_id is not None and self._new_card_rect.collidepoint(event.pos):
+        if self.editing_type_id is not None and self._new_card_rect.collidepoint(event.pos):
             self._reset_to_new_card()
             return None
 
         for mode_id, rect in self._mode_rects.items():
             if rect.collidepoint(event.pos):
                 self._set_mode(mode_id)
-                return None
-
-        for kind_id, rect in self._crop_kind_rects.items():
-            if rect.collidepoint(event.pos):
-                self._set_crop_kind(kind_id)
                 return None
 
         if self.viewer_rect.collidepoint(event.pos) and self.image is not None:
@@ -591,48 +562,39 @@ class DecouperMixin:
             self._ensure_door_frame_rects()
             return None
 
-        if self.crop_kind == "pack":
-            for kind_id, rect in self._pack_kind_rects.items():
-                if rect.collidepoint(event.pos):
-                    self._set_pack_kind(kind_id)
-                    return None
-
-            if self.pack_kind == "entite":
-                new_size = self._entity_tile_size_stepper.handle_click(event.pos, self.entity_tile_size)
-                if new_size is not None:
-                    self.entity_tile_size = new_size
-                    self._clamp_selection()
-                    return None
-
-        if not (self.crop_kind == "pack" and self.pack_kind == "entite"):
-            for archetype_id, rect in self._archetype_rects.items():
-                if rect.collidepoint(event.pos):
-                    self.archetype = archetype_id
-                    return None
-
-        if self.crop_kind == "tuile" and self.archetype == "porte":
-            if self._lockable_rect.collidepoint(event.pos):
-                self.lockable = not self.lockable
+        for archetype_id, rect in self._archetype_rects.items():
+            if rect.collidepoint(event.pos):
+                self.archetype = archetype_id
                 return None
 
-            new_frames = self._door_frames_stepper.handle_click(event.pos, self.door_frame_count)
-            if new_frames is not None:
-                self.door_frame_count = new_frames
-                self._ensure_door_frame_rects()
+        if self.archetype == "porte" and self._lockable_rect.collidepoint(event.pos):
+            self.lockable = not self.lockable
+            return None
+
+        # Multiframe -- available for any archetype, not just "porte"
+        # (2026-08-18: nothing about individually-picked frames was ever
+        # actually specific to doors, see _current_frame_rects).
+        new_frames = self._door_frames_stepper.handle_click(event.pos, self.door_frame_count)
+        if new_frames is not None:
+            self.door_frame_count = new_frames
+            self._ensure_door_frame_rects()
+            return None
+
+        for index, rect in self._door_frame_thumb_rects().items():
+            if self._door_frame_direction_rect(rect).collidepoint(event.pos):
+                self._cycle_frame_direction(index)
+                return None
+            if rect.collidepoint(event.pos):
+                # Arms this frame for the next drag AND jumps the visible
+                # selection to whatever's already captured there, so the
+                # player sees (and can nudge) the existing region instead
+                # of blindly dragging from wherever it last was.
+                self.editing_door_frame = index
+                if index < len(self.door_frame_rects):
+                    self._sel_x, self._sel_y = self.door_frame_rects[index][0], self.door_frame_rects[index][1]
                 return None
 
-            for index, rect in self._door_frame_thumb_rects().items():
-                if rect.collidepoint(event.pos):
-                    # Arms this frame for the next drag AND jumps the visible
-                    # selection to whatever's already captured there, so the
-                    # player sees (and can nudge) the existing region instead
-                    # of blindly dragging from wherever it last was.
-                    self.editing_door_frame = index
-                    if index < len(self.door_frame_rects):
-                        self._sel_x, self._sel_y = self.door_frame_rects[index][0], self.door_frame_rects[index][1]
-                    return None
-
-        if self.crop_kind == "tuile" and self.archetype in self.CELL_MODES_ARCHETYPES:
+        if self.archetype in self.CELL_MODES_ARCHETYPES:
             if self.width_tiles == 1 and self.height_tiles == 1:
                 # The plain blocks_movement checkbox only ever makes sense
                 # for "sol" -- "mur" is already solid by sitting on a WALL
@@ -651,14 +613,11 @@ class DecouperMixin:
                         self._cycle_cell_mode(row, col, 1)
                         return None
 
-        if self.crop_kind == "tuile" and self._interactable_rect.collidepoint(event.pos):
+        if self._interactable_rect.collidepoint(event.pos):
             self.interactable = not self.interactable
             return None
 
         if self._confirm_rect.collidepoint(event.pos):
-            if self.crop_kind == "pack":
-                self._try_register_pack()
-                return None
             if self.editing_type_id is not None:
                 self._try_update_existing()
                 return None
@@ -666,23 +625,18 @@ class DecouperMixin:
 
         return None
     def _render_decouper(self, screen):
-        """Mode "decouper"'s own rendering (crop_kind "tuile"/"pack" both
-        live here) -- extracted from what used to be render's own
-        unconditional tail, mirroring _render_bitmap/_render_pixel."""
-        for kind_id, rect in self._crop_kind_rects.items():
-            label = dict(self.CROP_KINDS)[kind_id]
-            selected = kind_id == self.crop_kind
-            text = f"> {label}" if selected else label
-            self.border.draw_centered_label(screen, rect, self.font, text, (255, 220, 120) if selected else (255, 255, 255))
+        """Mode "decouper"'s own rendering -- extracted from what used to be
+        render's own unconditional tail, mirroring _render_bitmap/
+        _render_pixel/_render_extraire."""
+        self.name_box.rect.topleft = self._decouper_name_box_pos
 
         self.file_browser.render(screen)
-        if self.crop_kind == "tuile":
-            self.existing_cards_browser.render(screen)
-            if self.editing_type_id is not None:
-                self.border.draw_centered_label(screen, self._new_card_rect, self.small_font, "Nouvelle carte")
-            elif self.image_name is not None and not self.existing_cards_browser.rooms:
-                hint = self.small_font.render("Aucune carte sur ce fichier", True, (150, 150, 150))
-                screen.blit(hint, (self.existing_cards_browser.x, self.existing_cards_browser.y + 4))
+        self.existing_cards_browser.render(screen)
+        if self.editing_type_id is not None:
+            self.border.draw_centered_label(screen, self._new_card_rect, self.small_font, "Nouvelle carte")
+        elif self.image_name is not None and not self.existing_cards_browser.rooms:
+            hint = self.small_font.render("Aucune carte sur ce fichier", True, (150, 150, 150))
+            screen.blit(hint, (self.existing_cards_browser.x, self.existing_cards_browser.y + 4))
 
         self.border.draw(screen, self.viewer_rect)
         if self.image is not None:
@@ -694,31 +648,16 @@ class DecouperMixin:
             screen.set_clip(self.viewer_rect)
             screen.blit(scaled_image, (self.viewer_rect.x + image_screen_x, self.viewer_rect.y + image_screen_y))
 
-            if self.crop_kind == "tuile":
-                self._render_existing_card_markers(screen)
-            elif self.crop_kind == "pack":
-                self._render_pack_region_markers(screen)
+            self._render_existing_card_markers(screen)
 
-            active_tile_size = self._active_tile_size()
             sel_screen_x, sel_screen_y = self.camera.world_to_screen(self._sel_x, self._sel_y)
             sel_rect = pygame.Rect(
                 self.viewer_rect.x + sel_screen_x,
                 self.viewer_rect.y + sel_screen_y,
-                self.width_tiles * active_tile_size * zoom,
-                self.height_tiles * active_tile_size * zoom,
+                self.width_tiles * TILE_SIZE * zoom,
+                self.height_tiles * TILE_SIZE * zoom,
             )
             pygame.draw.rect(screen, (255, 220, 120), sel_rect, 2)
-            if self.crop_kind == "pack":
-                # Internal grid lines -- makes "this is N separate 1x1 (or
-                # tile_size x tile_size) tiles, not one combined sprite"
-                # visible at a glance.
-                tile_px = active_tile_size * zoom
-                for col in range(1, self.width_tiles):
-                    lx = sel_rect.x + col * tile_px
-                    pygame.draw.line(screen, (255, 220, 120), (lx, sel_rect.y), (lx, sel_rect.bottom), 1)
-                for row in range(1, self.height_tiles):
-                    ly = sel_rect.y + row * tile_px
-                    pygame.draw.line(screen, (255, 220, 120), (sel_rect.x, ly), (sel_rect.right, ly), 1)
             screen.set_clip(clip)
         else:
             hint = self.small_font.render("Choisis un fichier a gauche", True, (180, 180, 180))
@@ -732,30 +671,13 @@ class DecouperMixin:
         h_label = self.small_font.render("Hauteur (tuiles)", True, (200, 200, 200))
         screen.blit(h_label, (self._height_stepper.minus_rect.x, self._height_stepper.minus_rect.y - h_label.get_height() - 2))
 
-        if self.crop_kind == "pack":
-            for kind_id, rect in self._pack_kind_rects.items():
-                label = "Autotile" if kind_id == "autotile" else "Entite"
-                selected = kind_id == self.pack_kind
-                text = f"> {label}" if selected else label
-                self.border.draw_centered_label(
-                    screen, rect, self.small_font, text, (255, 220, 120) if selected else (255, 255, 255),
-                )
-            if self.pack_kind == "entite":
-                self._entity_tile_size_stepper.render(screen, self.border, self.font, self.entity_tile_size)
-                size_label = self.small_font.render("Taille de cellule (px)", True, (200, 200, 200))
-                screen.blit(size_label, (
-                    self._entity_tile_size_stepper.minus_rect.x,
-                    self._entity_tile_size_stepper.minus_rect.y - size_label.get_height() - 2,
-                ))
+        for archetype_id, rect in self._archetype_rects.items():
+            label = ARCHETYPES[archetype_id]["label"]
+            selected = archetype_id == self.archetype
+            text = f"> {label}" if selected else label
+            self.border.draw_centered_label(screen, rect, self.font, text, (255, 220, 120) if selected else (255, 255, 255))
 
-        if not (self.crop_kind == "pack" and self.pack_kind == "entite"):
-            for archetype_id, rect in self._archetype_rects.items():
-                label = ARCHETYPES[archetype_id]["label"]
-                selected = archetype_id == self.archetype
-                text = f"> {label}" if selected else label
-                self.border.draw_centered_label(screen, rect, self.font, text, (255, 220, 120) if selected else (255, 255, 255))
-
-        if self.crop_kind == "tuile" and self.archetype in self.CELL_MODES_ARCHETYPES:
+        if self.archetype in self.CELL_MODES_ARCHETYPES:
             if self.width_tiles == 1 and self.height_tiles == 1:
                 if self.archetype == "sol":
                     check_label = "[x] Bloque le mouvement" if self.blocks_movement else "[ ] Bloque le mouvement"
@@ -763,24 +685,26 @@ class DecouperMixin:
             else:
                 self._render_cell_modes_grid(screen)
 
-        if self.crop_kind == "tuile":
-            interact_label = "[x] Interagible" if self.interactable else "[ ] Interagible"
-            self.border.draw_centered_label(screen, self._interactable_rect, self.font, interact_label)
+        interact_label = "[x] Interagible" if self.interactable else "[ ] Interagible"
+        self.border.draw_centered_label(screen, self._interactable_rect, self.font, interact_label)
 
-        if self.crop_kind == "tuile" and self.archetype == "porte":
+        if self.archetype == "porte":
             lock_label = "[x] Porte verrouillable" if self.lockable else "[ ] Porte verrouillable"
             self.border.draw_centered_label(screen, self._lockable_rect, self.font, lock_label)
 
-            self._door_frames_stepper.render(screen, self.border, self.font, self.door_frame_count)
-            frames_label = self.small_font.render("Frames d'ouverture", True, (200, 200, 200))
-            screen.blit(frames_label, (
-                self._door_frames_stepper.minus_rect.x,
-                self._door_frames_stepper.minus_rect.y - frames_label.get_height() - 2,
-            ))
+        # Multiframe -- available for any archetype, not just "porte"
+        # (2026-08-18: any type's individually-picked frames can double as
+        # direction variants, see _render_door_frame_thumbs' own direction
+        # strip).
+        self._door_frames_stepper.render(screen, self.border, self.font, self.door_frame_count)
+        frames_label = self.small_font.render("Frames", True, (200, 200, 200))
+        screen.blit(frames_label, (
+            self._door_frames_stepper.minus_rect.x,
+            self._door_frames_stepper.minus_rect.y - frames_label.get_height() - 2,
+        ))
+        self._render_door_frame_thumbs(screen)
 
-            self._render_door_frame_thumbs(screen)
-
-        confirm_label = "Mettre a jour" if (self.crop_kind == "tuile" and self.editing_type_id is not None) else "Enregistrer"
+        confirm_label = "Mettre a jour" if self.editing_type_id is not None else "Enregistrer"
         self.border.draw_centered_label(screen, self._confirm_rect, self.font, confirm_label)
 
         if self.status_text:
@@ -805,21 +729,6 @@ class DecouperMixin:
                 sx, sy = self.camera.world_to_screen(rx, ry)
                 marker_rect = pygame.Rect(self.viewer_rect.x + sx, self.viewer_rect.y + sy, rw * zoom, rh * zoom)
                 pygame.draw.rect(screen, color, marker_rect, 2)
-    def _render_pack_region_markers(self, screen):
-        """Light outlines over every region already extracted into an
-        existing autotile pack from the currently loaded file -- read-only
-        (no click-to-edit for packs this round, see the plan's own scope
-        note), just visibility before re-selecting over the same spot."""
-        zoom = self.camera.zoom
-        for pack_name in list_autotile_packs():
-            payload = load_autotile_pack(pack_name)
-            if payload is None or payload.get("tileset") != self.image_name:
-                continue
-            for tile in payload.get("tiles", []):
-                rx, ry, rw, rh = tile["rect"]
-                sx, sy = self.camera.world_to_screen(rx, ry)
-                marker_rect = pygame.Rect(self.viewer_rect.x + sx, self.viewer_rect.y + sy, rw * zoom, rh * zoom)
-                pygame.draw.rect(screen, (150, 150, 150), marker_rect, 1)
     def _render_cell_modes_grid(self, screen):
         """The per-cell mode grid for a multi-cell "sol"/"mur"/"porte"
         selection (see _cell_mode_grid_rects/_ensure_cell_modes_grid) -- 3
@@ -850,6 +759,22 @@ class DecouperMixin:
         grid_bottom = max(r.bottom for r in rects.values())
         legend = self.small_font.render("B = Bloquant   D = Derriere   F = Devant", True, (200, 200, 200))
         screen.blit(legend, (grid_left, grid_bottom + 4))
+    def _door_frame_direction_rect(self, thumb_rect):
+        """The clickable bottom strip of one thumbnail -- cycling its
+        direction tag (see DIRECTION_CYCLE) is a separate click target from
+        the thumbnail's own body (which arms that frame for the next drag,
+        see handle_event), so both stay reachable with plain left-clicks."""
+        return pygame.Rect(
+            thumb_rect.x, thumb_rect.bottom - self.DIRECTION_LABEL_STRIP,
+            thumb_rect.width, self.DIRECTION_LABEL_STRIP,
+        )
+    def _cycle_frame_direction(self, index, step=1):
+        """Advances frame `index`'s direction tag through DIRECTION_CYCLE,
+        wrapping around -- called by clicking a thumbnail's direction
+        strip (see handle_event)."""
+        current = self.frame_directions[index]
+        cycle_index = self.DIRECTION_CYCLE.index(current) if current in self.DIRECTION_CYCLE else 0
+        self.frame_directions[index] = self.DIRECTION_CYCLE[(cycle_index + step) % len(self.DIRECTION_CYCLE)]
     def _render_door_frame_thumbs(self, screen):
         """One small thumbnail per configured door_frame_rects entry,
         cropped straight from the currently loaded image -- click arms that
@@ -857,7 +782,10 @@ class DecouperMixin:
         yellow border same as the main selection. A frame beyond
         door_frame_rects' current length (shouldn't happen outside a
         mid-frame _ensure_door_frame_rects resize) or with no image loaded
-        just shows its index on a blank tile instead of erroring."""
+        just shows its index on a blank tile instead of erroring. The
+        bottom strip additionally shows/cycles that frame's direction tag
+        (see _door_frame_direction_rect/_cycle_frame_direction) -- "-" for
+        untagged, matching DIRECTION_LABELS."""
         for index, rect in self._door_frame_thumb_rects().items():
             pygame.draw.rect(screen, (40, 40, 45), rect)
             if self.image is not None and index < len(self.door_frame_rects):
@@ -874,6 +802,15 @@ class DecouperMixin:
             label = self.small_font.render(str(index), True, (255, 255, 255))
             screen.blit(label, (rect.x + 1, rect.y + 1))
 
+            direction_rect = self._door_frame_direction_rect(rect)
+            direction = self.frame_directions[index] if index < len(self.frame_directions) else None
+            pygame.draw.rect(screen, (70, 70, 100), direction_rect)
+            direction_label = self.small_font.render(self.DIRECTION_LABELS[direction], True, (255, 255, 255))
+            screen.blit(direction_label, (
+                direction_rect.centerx - direction_label.get_width() // 2,
+                direction_rect.centery - direction_label.get_height() // 2,
+            ))
+
     def _layout_decouper(self, column):
         """Lays out mode "decouper"'s own UI -- called from
         SpriteEditorPanelUI._layout() with a LayoutColumn already
@@ -888,10 +825,19 @@ class DecouperMixin:
             200, 32,
         )
 
-        crop_kind_rects = column.row(len(self.CROP_KINDS), 32, gap=4)
-        self._crop_kind_rects = {kind_id: rect for (kind_id, _label), rect in zip(self.CROP_KINDS, crop_kind_rects)}
-        column.gap(12)
-
+        # name_box is a SHARED single TextInputBox -- Bitmap's entity view
+        # (_entity_bm_layout) and Peindre's new-canvas dialog
+        # (_handle_pixel_event) both already reposition it fresh every time
+        # THEY actually use it, rather than relying on this one-time
+        # _layout() pass, exactly because a later mode's own on-demand
+        # repositioning would otherwise leave decouper showing a stale
+        # position after a visit to either of those (surfaced 2026-08-18
+        # once mode "extraire" -- which also self-heals, see ExtraireMixin
+        # -- made this reachable via the plain mode-button row instead of
+        # only a deep sub-state). _decouper_name_box_pos + the matching
+        # re-apply in _render_decouper/_handle_decouper_event is the same
+        # fix, here.
+        self._decouper_name_box_pos = (column.x, column.y)
         self.name_box.rect.topleft = (column.x, column.y)
         column.gap(32 + 14)
 
@@ -912,20 +858,10 @@ class DecouperMixin:
         column.gap(32 + 12)
 
         # _blocks_rect doubles as the per-cell walkable grid's anchor once
-        # the tile is multi-cell -- crop_kind "pack"'s own pack_kind_rects/
-        # entity_tile_size_stepper anchor off its .y directly rather than
-        # through the shared cursor (same slot, never shown at once, same
-        # "no real overlap" precedent as bitmap's own bm_toggle_rects)
-        # since the cursor itself needs to keep moving toward
-        # _interactable_rect regardless of which (if either) renders.
+        # the tile is multi-cell (see _cell_mode_grid_rects) -- the 120px
+        # gap below clears that grid's own worst-case footprint
+        # (WALKABLE_GRID_MAX_PX) before _interactable_rect.
         self._blocks_rect = column.rect(32)
-        self._pack_kind_rects = {}
-        row_x = self._blocks_rect.x
-        for kind_id, _label in (("autotile", "Autotile"), ("entite", "Entite")):
-            rect = pygame.Rect(row_x, self._blocks_rect.y, 93, 32)
-            self._pack_kind_rects[kind_id] = rect
-            row_x = rect.right + 4
-        self._entity_tile_size_stepper = Stepper(self._blocks_rect.x, self._blocks_rect.y + 44, 28, 50, 8, 128)
 
         column.gap(120)
         self._interactable_rect = column.rect(32)

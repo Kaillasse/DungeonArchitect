@@ -1,1 +1,19 @@
-{}
+{
+  "dynamite": {
+    "capabilities": {
+      "throwable": {
+        "speed": 220
+      },
+      "explosive": {
+        "radius_tiles": 2,
+        "damage": 1
+      }
+    },
+    "sounds": {
+      "throw": "lightning_dyn.wav"
+    },
+    "loot_cards": {
+      "dynamite": 1
+    }
+  }
+}

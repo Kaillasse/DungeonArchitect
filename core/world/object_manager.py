@@ -39,14 +39,15 @@ _BUILTIN_OBJECT_TYPES = {
     "gate": {
         "asset": "tiles/gateopenclose.png",
         # Custom placement, not a plain "floor"/"wall" lookup -- see
-        # ObjectManager._resolve_placement/is_valid_doorway: a gate/wall must
-        # sit on a WALL cell that reads as a clean break in a straight wall
-        # segment (one FLOOR neighbor, the room interior, directly opposite
-        # one EMPTY neighbor, the void beyond, with WALL flanking the other
-        # two sides). This is what makes a placed entry-exit unambiguous for
-        # both the player (no ordinary floor tile doubles as a doorway) and
-        # the procedural assembler (core.world.assembly), which additionally
-        # only treats a gate/wall with this pattern as a connectable exit.
+        # ObjectManager._resolve_placement/is_valid_wall_break: a gate/wall
+        # must sit on a WALL cell that reads as a clean break in a straight,
+        # 1-cell-thick wall segment (WALL flanking the two perpendicular
+        # sides, FLOOR on at least one of the two opposite sides). Doesn't
+        # require a void neighbor -- an interior door works too. The
+        # procedural assembler (core.world.assembly) separately re-checks
+        # the STRICTER is_valid_doorway pattern (FLOOR opposite EMPTY)
+        # before treating a gate/wall as a connectable exit, so only a
+        # void-facing one is ever picked as a room-to-room connection.
         "placement": "doorway",
         "size": (1, 1),
         "frames": 8,
@@ -246,8 +247,8 @@ _BUILTIN_OBJECT_TYPES = {
         "card_type": "tile_special",
     },
     "cave_entrance": {
-        # basictileset.png frame 27. Same doorway shape/validity as
-        # gate/wall (ObjectManager.is_valid_doorway) -- see
+        # basictileset.png frame 27. Same wall-break placement shape as
+        # gate/wall (ObjectManager.is_valid_wall_break) -- see
         # _resolve_placement -- but always open: no "linkable"/
         # "blocks_until_open", just "walkable" like a button, since this is
         # meant as a level-exit marker, not a lockable door.
@@ -264,8 +265,8 @@ _BUILTIN_OBJECT_TYPES = {
         # 1 with a non-square asset is why load_object_frames gained its
         # whole-image branch. Promoted from purely-decorative wall dressing
         # to a real functional E/S (role system, see get_role/set_role
-        # below): same doorway shape/validity as gate/wall/cave_entrance
-        # (ObjectManager.is_valid_doorway, checked off its origin cell only
+        # below): same wall-break placement shape as gate/wall/cave_entrance
+        # (ObjectManager.is_valid_wall_break, checked off its origin cell only
         # -- already proven to work for a 2-wide footprint by "wall"), and
         # always open like cave_entrance (no "linkable"/"blocks_until_open"
         # -- there's no button-linking use case for a 2-wide entrance).
@@ -420,7 +421,7 @@ if _migrate_legacy_npc_flag(_custom_types):
 # keys) without ever touching its Python-sourced visual identity.
 MECHANICS_KEYS = (
     "blocks_movement", "cell_modes", "interactable", "capabilities", "stats", "effects", "sounds", "sound_pitch",
-    "loot_cards",
+    "loot_cards", "direction_mode",
 )
 DOORWAY_MECHANICS_KEYS = ("linkable", "blocks_until_open")
 OVERRIDE_MARKER = "__override_of_builtin__"
@@ -725,18 +726,60 @@ CELL_MODES = ("block", "behind", "front")
 _ARCHETYPE_FLAG_KEYS = tuple(sorted({key for preset in ARCHETYPES.values() for key in preset["flags"]}))
 
 
-def _build_visual_fields(name, tileset, rect, size, archetype, frame_rects=None):
+def _build_visual_fields(
+    name, tileset, rect, size, archetype, frame_rects=None, directions=None, entity_pack=None, wander_actions=None,
+):
     """Construction pure (aucune I/O) des champs d'identite/visuel d'une
     entree OBJECT_TYPES custom -- asset/placement/size/frames/name plus les
     flags que l'archetype impose toujours (voir ARCHETYPES). Partagee par
     register_custom_type (creer) et update_type_visual (editer).
 
-    `frame_rects` (archetype "porte" seulement), s'il est fourni, remplace
-    le `rect` unique par une liste de rects -- une frame d'animation
-    d'ouverture par entree, choisies individuellement dans l'editeur de
-    sprite plutot qu'une bande continue decoupee automatiquement (voir
-    SpriteEditorPanelUI). Sans lui (tout le reste, y compris une "porte" a
-    1 frame), comportement actuel inchange : un seul "rect", frames=1."""
+    `frame_rects`, s'il est fourni, remplace le `rect` unique par une liste
+    de rects choisis individuellement dans l'editeur de sprite plutot
+    qu'une bande continue decoupee automatiquement -- a l'origine
+    reserve a l'archetype "porte" (une frame d'animation d'ouverture par
+    entree), desormais disponible pour n'importe quel archetype (2026-08-18,
+    voir `directions` ci-dessous) : rien dans ce champ lui-meme n'a jamais
+    ete specifique a "porte", seule l'UI de l'editeur de sprite limitait qui
+    pouvait le fournir. Sans lui, comportement actuel inchange : un seul
+    "rect", frames=1.
+
+    `directions` ({direction: frame_index}, direction etant une valeur de
+    NPC_DIRECTIONS), s'il est fourni, tague CHAQUE frame de `frame_rects`
+    avec la direction qu'elle represente -- ex. une frame "front", une
+    "left", une "right" d'un meme banc/torche multiframe. Rien a voir avec
+    le pack d'entite action/direction/ordre des PNJ (build_entity_pack_
+    lookup) : pas de fichier separe, pas de concept d'action, juste un
+    dict directement sur la carte elle-meme -- deliberement plus simple,
+    voir load_object_frames/ObjectManager._auto_wall_direction qui le
+    consomment. `direction_mode` ("auto"/"manuel", voir
+    _build_mechanics_fields) decide qui choisit la direction d'une
+    instance posee ; `directions` ici decide seulement quelle FRAME
+    represente quelle direction.
+
+    `entity_pack`, s'il est fourni, attache une reference vers un pack
+    d'entite (le meme pack/action/direction/ordre que register_npc_type
+    consomme deja via load_npc_frames) -- PUREMENT structurel/visuel,
+    comme `directions`/`frame_rects` : `rect` reste l'icone statique
+    affichee tant que la carte n'est rien d'autre qu'une carte posee.
+    Deliberement AUCUN champ "mob" pose ici -- rattacher un pack ne
+    decide jamais que cette carte est vivante (2026-08-19, confirme avec
+    l'utilisateur : "Comportement" est une propriete a dechirer/coller
+    depuis un mob existant, jamais une decision prise a la creation, voir
+    extract_property_payload/_apply_property_payload's "behavior"). Cette
+    carte porte donc ses propres etats (autant qu'on veut, tagues
+    librement sur le pack, voir entities.Mob._stationary_state_options)
+    sans jamais etre vivante tant qu'aucun "Comportement" n'a ete colle
+    dessus.
+
+    `wander_actions` ({role: action_name}), s'il est fourni, ne fait que
+    NOMMER quel tag joue pour un role reconnu (idle/move/sitting/laying/
+    run) quand ce tag ne s'appelle pas litteralement comme le role --
+    purement une table de correspondance, meme nature que `directions` ci-
+    dessus, jamais une decision de gameplay : chaque role retombe deja sur
+    son propre nom litteral en son absence (voir entities.Mob.
+    _current_action_name, 2026-08-19), donc ce champ reste facultatif,
+    utile seulement pour reutiliser un tag qui porte un autre nom."""
     preset = ARCHETYPES.get(archetype)
     if preset is None:
         raise ValueError(f"Archetype inconnu : {archetype}")
@@ -755,13 +798,20 @@ def _build_visual_fields(name, tileset, rect, size, archetype, frame_rects=None)
         "frames": frames,
         "name": name,
     }
+    if directions:
+        entry["directions"] = dict(directions)
+    if entity_pack:
+        entry["entity_pack"] = entity_pack
+    if wander_actions:
+        entry["wander_actions"] = dict(wander_actions)
     entry.update(preset["flags"])
     return entry
 
 
 def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
                              interactable=False, lockable=False, capabilities=None, stats=None, effects=None,
-                             sounds=None, sound_pitch=None, loot_cards=None):
+                             sounds=None, sound_pitch=None, loot_cards=None,
+                             direction_mode=None):
     """Construction pure (aucune I/O) des champs mecaniques/gameplay d'une
     entree OBJECT_TYPES -- partagee par register_custom_type et
     update_type_mechanics (custom ET builtin, voir plus bas). `cell_modes`,
@@ -819,7 +869,24 @@ def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
     dict {} explicitement voulu par le joueur -- "cette carte ne drop
     litteralement rien" -- serait sinon indiscernable de "pas edite du
     tout" et retomberait silencieusement sur le defaut au lieu de le
-    remplacer)."""
+    remplacer).
+
+    `direction_mode` ("auto"/"manuel") decide QUI choisit la direction
+    d'une instance posee pour un type dont `directions` (voir
+    _build_visual_fields -- {direction: frame_index} sur la carte
+    elle-meme, pas un pack separe) tague au moins une frame : "auto" la
+    recalcule a chaque pose/deplacement via ObjectManager._auto_wall_
+    direction (generalisation de l'ancienne regle L/R de la torche a
+    N'IMPORTE QUELLE direction taguee), "manuel" la laisse entierement au
+    joueur (ex: pivoter avec R pendant le glisser-deposer) et ObjectManager
+    ne la touche plus jamais une fois posee (voir add_object/move_object).
+    Sans valeur, ou sans `directions` du tout, n'a aucun effet -- meme
+    philosophie que capabilities/stats/effects/sounds : un vocabulaire
+    generique, l'appelant (MechanicsPanelUI) decide seul ce qu'il propose
+    pour quel type de carte. Volontairement separe de `directions` :
+    celui-ci se decide au decoupage (quelle frame EST quelle direction),
+    celui-la a n'importe quel moment apres coup depuis la Forge (qui
+    CHOISIT la direction une fois posee)."""
     fields = {}
     if cell_modes is not None:
         fields["cell_modes"] = [list(row) for row in cell_modes]
@@ -842,6 +909,8 @@ def _build_mechanics_fields(existing, blocks_movement=False, cell_modes=None,
         fields["sound_pitch"] = {key: list(value) for key, value in sound_pitch.items()}
     if loot_cards is not None:
         fields["loot_cards"] = dict(loot_cards)
+    if direction_mode:
+        fields["direction_mode"] = direction_mode
     return fields
 
 
@@ -941,22 +1010,29 @@ def _validate_new_id(id_, registry):
 
 def register_custom_type(
     type_id, name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None,
-    interactable=False, lockable=False, frame_rects=None,
+    interactable=False, lockable=False, frame_rects=None, directions=None, entity_pack=None, wander_actions=None,
 ):
     """Valide et persiste une NOUVELLE entree OBJECT_TYPES sourcee depuis une
     region de tileset -- le point d'ecriture que SpriteEditorPanelUI appelle
     une fois la selection confirmee, en mode creation (voir update_custom_type
     pour le mode edition). Leve ValueError sur un id/archetype invalide ou
     deja pris, pour que l'appelant affiche un message plutot que de
-    corrompre le registre silencieusement."""
+    corrompre le registre silencieusement. `entity_pack`/`wander_actions`
+    (voir _build_visual_fields) ne posent jamais "mob" -- restent purement
+    visuels/structurels meme ici."""
     _validate_new_id(type_id, OBJECT_TYPES)
-    entry = _build_visual_fields(name, tileset, rect, size, archetype, frame_rects)
+    entry = _build_visual_fields(
+        name, tileset, rect, size, archetype, frame_rects, directions, entity_pack, wander_actions,
+    )
     entry.update(_build_mechanics_fields(entry, blocks_movement, cell_modes, interactable, lockable))
     _write_custom_type(type_id, entry)
     return entry
 
 
-def update_type_visual(type_id, name, tileset, rect, size, archetype, frame_rects=None):
+def update_type_visual(
+    type_id, name, tileset, rect, size, archetype, frame_rects=None, directions=None,
+    entity_pack=None, wander_actions=None,
+):
     """Edite UNIQUEMENT l'identite/visuel d'une carte custom DEJA
     enregistree (type_id doit deja exister ET etre une carte custom --
     jamais un type integre au jeu comme "vase", identifie par la forme
@@ -964,9 +1040,16 @@ def update_type_visual(type_id, name, tileset, rect, size, archetype, frame_rect
     avec un type integre ne peut jamais l'ecraser). Contrairement a
     l'ancien _build_custom_type_entry (qui reconstruisait tout depuis
     zero), les cles mecaniques deja presentes survivent intactes -- seules
-    les cles de _ARCHETYPE_FLAG_KEYS (walkable/is_es) sont effacees puis
-    reappliquees, pour qu'un changement d'archetype ne laisse pas un flag
-    de l'ancien archetype trainer."""
+    les cles de _ARCHETYPE_FLAG_KEYS (walkable/is_es), "directions" et
+    "entity_pack" sont effacees puis reappliquees : la premiere pour qu'un
+    changement d'archetype ne laisse pas un flag de l'ancien archetype
+    trainer, la seconde parce qu'un re-decoupage change frame_rects (donc
+    les index que "directions" reference), la troisieme pour qu'un
+    entity_pack non re-fourni ici ne survive pas silencieusement (un
+    re-decoupage qui abandonne le pack pour un frame_rects/rect classique
+    doit vraiment l'abandonner) -- sans ce nettoyage, une valeur non
+    re-fournie survivrait pointant potentiellement sur de mauvaises
+    donnees apres l'edition."""
     existing = OBJECT_TYPES.get(type_id)
     if existing is None:
         raise ValueError(f"'{type_id}' n'existe pas")
@@ -975,14 +1058,20 @@ def update_type_visual(type_id, name, tileset, rect, size, archetype, frame_rect
     entry = dict(existing)
     for key in _ARCHETYPE_FLAG_KEYS:
         entry.pop(key, None)
-    entry.update(_build_visual_fields(name, tileset, rect, size, archetype, frame_rects))
+    entry.pop("directions", None)
+    entry.pop("entity_pack", None)
+    entry.pop("wander_actions", None)
+    entry.update(_build_visual_fields(
+        name, tileset, rect, size, archetype, frame_rects, directions, entity_pack, wander_actions,
+    ))
     _write_custom_type(type_id, entry)
     return entry
 
 
 def update_type_mechanics(type_id, blocks_movement=False, cell_modes=None,
                            interactable=False, lockable=False, capabilities=None, stats=None, effects=None,
-                           sounds=None, sound_pitch=None, loot_cards=None):
+                           sounds=None, sound_pitch=None, loot_cards=None,
+                           direction_mode=None):
     """Edite UNIQUEMENT les mecaniques/gameplay d'un type DEJA enregistre --
     contrairement a update_type_visual, fonctionne sur N'IMPORTE QUEL type
     existant, builtin OU custom (c'est le point d'entree qui rend un
@@ -1003,7 +1092,7 @@ def update_type_mechanics(type_id, blocks_movement=False, cell_modes=None,
         raise ValueError(f"'{type_id}' n'existe pas")
     fields = _build_mechanics_fields(
         existing, blocks_movement, cell_modes, interactable, lockable, capabilities, stats, effects, sounds,
-        sound_pitch, loot_cards,
+        sound_pitch, loot_cards, direction_mode,
     )
     if _is_builtin_type(type_id):
         _write_builtin_mechanics_override(type_id, fields)
@@ -1021,7 +1110,7 @@ def update_type_mechanics(type_id, blocks_movement=False, cell_modes=None,
 
 def update_custom_type(
     type_id, name, tileset, rect, size, archetype, blocks_movement=False, cell_modes=None,
-    interactable=False, lockable=False, frame_rects=None,
+    interactable=False, lockable=False, frame_rects=None, directions=None, entity_pack=None, wander_actions=None,
 ):
     """Alias de compatibilite -- combine update_type_visual + update_type_mechanics
     en un seul appel, meme signature/comportement qu'avant leur separation
@@ -1030,7 +1119,7 @@ def update_custom_type(
     mecaniques dans le meme appel, en repassant inchange tout ce qu'il ne
     laisse pas l'utilisateur editer lui-meme (voir MechanicsPanelUI, qui
     fait le symetrique avec update_type_mechanics seul)."""
-    update_type_visual(type_id, name, tileset, rect, size, archetype, frame_rects)
+    update_type_visual(type_id, name, tileset, rect, size, archetype, frame_rects, directions, entity_pack, wander_actions)
     return update_type_mechanics(type_id, blocks_movement, cell_modes, interactable, lockable)
 
 
@@ -1360,10 +1449,11 @@ def extract_property_payload(entry, category, kind=None):
     nothing to tear or fuse.
 
     `category` in {"capability", "effect", "stats", "aggressivity", "state",
-    "loot"} -- "capability"/"effect"/"state" need `kind` (which capability/
-    effect/wander_actions role, e.g. "explosive"/"heal"/"idle" -- a card
-    can carry more than one of any of the three); "stats"/"aggressivity"/
-    "loot" are singleton blocks, `kind` is ignored for them.
+    "loot", "behavior"} -- "capability"/"effect"/"state" need `kind` (which
+    capability/effect/wander_actions role, e.g. "explosive"/"heal"/"idle"
+    -- a card can carry more than one of any of the three); "stats"/
+    "aggressivity"/"loot"/"behavior" are singleton blocks, `kind` is
+    ignored for them.
 
     "aggressivity" is a finer-grained VIEW into the same "stats" block
     "stats" already exposes whole -- just aggro_range/attack_range, never
@@ -1378,7 +1468,20 @@ def extract_property_payload(entry, category, kind=None):
     "state" reads a PNJ's own wander_actions (which tagged action of its
     entity pack plays for role `kind`, e.g. "idle"/"sitting") -- None if
     that role isn't actually configured, same "nothing to tear" signal as
-    every other category."""
+    every other category.
+
+    "behavior" (2026-08-19, confirmed with the user -- "Comportement")
+    exposes the single fact that makes a card come alive at all: `mob`.
+    Deliberately just that ONE flag, never the source's own entity_pack/
+    wander_actions -- Assembler already attaches a card's OWN pack
+    reference structurally (see register_custom_type's entity_pack param),
+    with no type/property decided there at all (mob absent); tearing
+    "Comportement" off ANY existing mob (flat-frame or entity-pack alike,
+    the source's own art is irrelevant, only the flag matters) and gluing
+    it onto that typeless card is what turns it into a living one, using
+    ITS OWN states -- never the donor's. True if `entry` is a mob, else
+    None (nothing to tear), same "nothing to tear" signal as every other
+    category -- there is no meaningful "torn mob:False"."""
     if category == "capability":
         return entry.get("capabilities", {}).get(kind)
     if category == "effect":
@@ -1396,6 +1499,8 @@ def extract_property_payload(entry, category, kind=None):
         return entry.get("wander_actions", {}).get(kind)
     if category == "loot":
         return entry.get("loot_cards")
+    if category == "behavior":
+        return True if entry.get("mob") else None
     return None
 
 
@@ -1431,6 +1536,19 @@ def _apply_property_payload(entry, category, kind, payload):
         entry["wander_actions"] = wander_actions
     elif category == "loot":
         entry["loot_cards"] = dict(payload)
+    elif category == "behavior":
+        # Just the flag -- never touches entity_pack/wander_actions, see
+        # extract_property_payload's own docstring on why (the target's
+        # OWN pack/states, already attached structurally by Assembler,
+        # must survive this untouched). card_type also needs an explicit
+        # fix here: _write_custom_type's own card_type backfill is a
+        # setdefault (only fires when the key is ABSENT), and fuse_card's
+        # new_entry starts as a copy of the base entry, which already HAD
+        # a card_type (e.g. "tile_decor") from before it became alive --
+        # without this, a freshly-animated card would keep displaying
+        # under its old, now-stale card_type.
+        entry["mob"] = True
+        entry["card_type"] = "mob"
 
 
 def _write_custom_item(item_id, entry):
@@ -1478,6 +1596,24 @@ def fuse_card(base_id, category, kind, payload):
     if base_entry is None:
         raise ValueError(f"'{base_id}' n'existe pas")
 
+    if category == "behavior" and not base_entry.get("entity_pack"):
+        # A flat-frame mob (is_mob, no entity_pack -- a builtin animal/
+        # enemy) needs a real file-path "asset" + (for "enemy" specifically)
+        # ENEMY_FOLDERS membership -- load_animal_frames/load_enemy_frames
+        # both assume that shape unconditionally and crash on anything
+        # else. A custom card's "asset" is always a tileset-region dict,
+        # never a file path, so gluing "Comportement" onto one with no
+        # entity_pack would silently produce a mob:True card the game
+        # can't actually render at all (found 2026-08-19, a real crash --
+        # TypeError in load_animal_frames). Refused here instead: only a
+        # card that already has its OWN entity_pack (see register_custom_
+        # type's own `entity_pack` param, attached structurally by
+        # Assembler) can ever become alive.
+        raise ValueError(
+            "Cette carte n'a pas de pack d'entite attache -- construis-la d'abord dans l'assembleur "
+            "(pack 'Personnage / Entite') avant de lui coller un Comportement."
+        )
+
     fused_from = base_entry.get("fused_from")
     root_id = fused_from["base"] if fused_from else base_id
     existing_fragments = set(fused_from["fragments"]) if fused_from else set()
@@ -1508,6 +1644,26 @@ def fuse_card(base_id, category, kind, payload):
 
 def is_builtin_item(item_id):
     return item_id in _BUILTIN_ITEM_DEFINITIONS
+
+
+def delete_custom_item(item_id):
+    """Supprime definitivement un item custom -- pendant de delete_custom_type
+    pour ITEM_DEFINITIONS (2026-08-19, meme garde/erreurs). N'existait pas
+    avant : aucun chemin ne permettait de supprimer un item custom, seulement
+    de le modifier (update_item). Meme absence de verification de reference
+    que delete_custom_type -- c'est a l'appelant de refuser une suppression
+    encore utilisee quelque part avant d'appeler ceci."""
+    existing = ITEM_DEFINITIONS.get(item_id)
+    if existing is None:
+        raise ValueError(f"'{item_id}' n'existe pas")
+    if is_builtin_item(item_id):
+        raise ValueError(f"'{item_id}' est un item integre au jeu, non supprimable")
+
+    custom = _load_custom_items()
+    custom.pop(item_id, None)
+    _persist_custom_items(custom)
+
+    del ITEM_DEFINITIONS[item_id]
 
 
 def register_item(item_id, name, slot, icon_path, icon_rect, capabilities=None, effects=None, sounds=None,
@@ -1698,7 +1854,7 @@ def make_item(item_id):
     return Item(item_id, definition["name"], definition["icon_path"], definition.get("icon_rect"))
 
 
-def load_object_frames(object_type, variant=None):
+def load_object_frames(object_type, variant=None, direction=None):
     """Slice an object's sprite sheet into its animation frames -- a flat
     list, "frames" cells read left-to-right then row by row. Almost every
     object type is a single row ("rows" defaults to 1, in which case this is
@@ -1707,7 +1863,18 @@ def load_object_frames(object_type, variant=None):
     rows (e.g. 8 for lilchest's 4-idle + 4-open sheet), so row 1 continues
     the flat list right where row 0 left off -- obj["frame"] can then just
     keep counting upward across the "seam" between rows without needing to
-    know rows exist at all (see OBJECT_TYPES["lilchest"])."""
+    know rows exist at all (see OBJECT_TYPES["lilchest"]).
+
+    `direction` (one of NPC_DIRECTIONS) only matters for a type whose
+    "directions" ({direction: frame_index}, see _build_visual_fields) has
+    that key -- resolves to that ONE frame_rects entry, on the card itself,
+    no separate pack/action concept at all (deliberately simpler than the
+    PNJ action/direction/order entity-pack scheme -- see _build_mechanics_
+    fields' own docstring for why decor doesn't need it). Falls through to
+    the type's ordinary `variant`/base-asset resolution below when
+    `directions` doesn't have that key (a stale obj["direction"] from
+    before a re-crop, or simply no `directions` at all) -- same fail-open
+    spirit as cell_mode's own out-of-range fallback."""
     config = OBJECT_TYPES[object_type]
     asset_path = config.get("variants", {}).get(variant, config["asset"])
 
@@ -1719,14 +1886,24 @@ def load_object_frames(object_type, variant=None):
         # "frames": 1 branch below -- a region reference is never sliced
         # into an animation.
         #
-        # {"tileset": ..., "rects": [[x, y, w, h], ...]} -- a custom "porte"
-        # with its opening animation's frames picked individually (see
-        # SpriteEditorPanelUI), each its own independent tileset region
-        # rather than consecutive cells of one sheet. One frame per rect, in
-        # order -- "frames" (see _build_visual_fields) already equals
-        # len(rects), so obj["frame"] indexes straight into this list.
+        # {"tileset": ..., "rects": [[x, y, w, h], ...]} -- multiple frames
+        # picked individually (see SpriteEditorPanelUI), each its own
+        # independent tileset region rather than consecutive cells of one
+        # sheet -- originally just a "porte" opening animation, now also
+        # used by any type with per-frame `directions`. `direction`, when
+        # given and tagged, selects exactly one of these rects instead of
+        # returning the whole list; otherwise every rect comes back in
+        # order ("frames" -- see _build_visual_fields -- already equals
+        # len(rects), so obj["frame"] indexes straight into this list for
+        # a plain, direction-less multi-frame animation).
         if "rects" in asset_path:
-            return [load_tileset_region(asset_path["tileset"], r) for r in asset_path["rects"]]
+            rects = asset_path["rects"]
+            directions = config.get("directions")
+            if directions and direction in directions:
+                index = directions[direction]
+                if 0 <= index < len(rects):
+                    return [load_tileset_region(asset_path["tileset"], rects[index])]
+            return [load_tileset_region(asset_path["tileset"], r) for r in rects]
         return [load_tileset_region(asset_path["tileset"], asset_path["rect"])]
 
     asset = PROJECT_ROOT / "assets" / asset_path
@@ -1974,21 +2151,20 @@ def _build_npc_type_entry(name, entity_pack, tileset, icon_rect, size, wander_ac
 
 
 def register_npc_type(type_id, name, entity_pack, tileset, icon_rect, size, wander_actions):
-    """Valide et persiste une NOUVELLE entree OBJECT_TYPES de PNJ -- le
-    pendant de register_custom_type pour ce cas (voir update_npc_type pour
-    l'edition). Meme garde-fou d'id que register_custom_type.
+    """Valide et persiste une NOUVELLE entree OBJECT_TYPES referencant un
+    entity_pack -- le pendant de register_custom_type pour ce cas (voir
+    update_npc_type pour l'edition). Meme garde-fou d'id que
+    register_custom_type.
 
-    `entry["interactable"] = True` est ajoute ICI (pas dans
-    _build_npc_type_entry, reutilise par update_npc_type/
-    rename_entity_pack_references, qui NE DOIVENT PAS ecraser un
-    interactable desactive depuis via la Forge -- seule la creation initiale
-    doit fixer ce defaut) : un type enregistre via cet ecran a ete cree
-    specifiquement pour etre un PNJ dialogable, donc part interactable par
-    defaut -- reste editable/desactivable ensuite comme n'importe quel
-    autre flag MECHANICS_KEYS, via update_type_mechanics."""
+    N'impose plus interactable=True a la creation (2026-08-18) -- ce chemin
+    d'enregistrement construit n'importe quelle carte animee referencant un
+    pack d'entite (PNJ dialogable, mais aussi un mob combat-only fait de
+    tags attack/damaged/death, voir entities.Mob), pas seulement un PNJ
+    dialogable ; interactable reste un simple flag optionnel, editable comme
+    n'importe quel autre MECHANICS_KEYS via update_type_mechanics, jamais
+    force par defaut."""
     _validate_new_id(type_id, OBJECT_TYPES)
     entry = _build_npc_type_entry(name, entity_pack, tileset, icon_rect, size, wander_actions)
-    entry["interactable"] = True
     _write_custom_type(type_id, entry)
     return entry
 
@@ -2051,6 +2227,17 @@ class ObjectManager:
         # index from scratch -- simpler and safe for an infrequent, already
         # O(n)-anyway operation, and it means an external assignment can
         # never silently leave the index stale.
+        #
+        # Each cell maps to a STACK (list, oldest first) of every object
+        # whose footprint covers it, not a single object -- two objects can
+        # legitimately overlap now that door/gate placement no longer
+        # requires an empty cell (is_valid_wall_break, 2026-08-18: a door is
+        # meant to be placeable directly on/under a purely decorative
+        # multi-cell wall object like "bordureporte"). get_object_at returns
+        # the LAST (most recently placed/moved) entry, so the functional
+        # object placed on top of a decoration is what collision/interact
+        # actually sees; removing it via _deindex_object naturally reveals
+        # whatever was underneath instead of leaving the cell unindexed.
         self._cell_index = {}
         self.objects_version = 0
         # id(obj) -> obj, every object currently animating (activated/open
@@ -2102,17 +2289,23 @@ class ObjectManager:
                 yield obj["x"] + dx, obj["y"] + dy
 
     def _index_object(self, obj):
-        # setdefault, not a plain assignment: if two objects' footprints ever
-        # overlapped (shouldn't happen through ordinary placement, but
-        # nothing here re-validates a hand-edited save), this preserves the
-        # exact same "first in self.objects order wins" result the old
-        # linear scan in get_object_at used to produce.
+        # Appends to each cell's stack -- see __init__'s own docstring for
+        # why a cell can hold more than one object now. get_object_at reads
+        # the last entry, so whichever object was placed/moved here most
+        # recently is the one collision/interact/erase actually see.
         for cell in self._footprint_cells_of(obj):
-            self._cell_index.setdefault(cell, obj)
+            self._cell_index.setdefault(cell, []).append(obj)
 
     def _deindex_object(self, obj):
         for cell in self._footprint_cells_of(obj):
-            if self._cell_index.get(cell) is obj:
+            stack = self._cell_index.get(cell)
+            if stack is None:
+                continue
+            try:
+                stack.remove(obj)
+            except ValueError:
+                continue
+            if not stack:
                 del self._cell_index[cell]
 
     def _rebuild_cell_index(self):
@@ -2123,11 +2316,18 @@ class ObjectManager:
     def _in_bounds(self, grid_x, grid_y):
         return 0 <= grid_x < self.dungeon.width and 0 <= grid_y < self.dungeon.height
 
-    def add_object(self, object_type, grid_x, grid_y):
+    def add_object(self, object_type, grid_x, grid_y, direction=None):
+        """`direction` (one of NPC_DIRECTIONS) is the MANUAL-mode caller's
+        own choice (e.g. Creator's R-rotate-during-drag) for a type whose
+        "direction_mode" is "manual" -- ignored (overridden) for a type
+        whose direction_mode is "auto", since _resolve_placement always
+        recomputes that one from wall adjacency regardless of what's
+        passed in here. See _build_mechanics_fields' own docstring for the
+        auto/manual distinction."""
         if not self._in_bounds(grid_x, grid_y):
             return False
 
-        valid, variant = self._resolve_placement(object_type, grid_x, grid_y)
+        valid, variant, auto_direction = self._resolve_placement(object_type, grid_x, grid_y)
         if not valid:
             return False
 
@@ -2139,6 +2339,10 @@ class ObjectManager:
 
         if variant is not None:
             placed["variant"] = variant
+
+        resolved_direction = auto_direction if auto_direction is not None else direction
+        if resolved_direction is not None:
+            placed["direction"] = resolved_direction
 
         config = OBJECT_TYPES[object_type]
         if config.get("chest"):
@@ -2160,8 +2364,12 @@ class ObjectManager:
         cell it occupies. O(1) via _cell_index rather than a linear scan --
         this is the hottest call in the collision path (is_cell_walkable, up
         to 4 corners x every entity x every frame), so an O(n) scan here
-        multiplied badly with entity count."""
-        return self._cell_index.get((grid_x, grid_y))
+        multiplied badly with entity count. If more than one object covers
+        this cell (a door placed on/under a decorative wall object, see
+        __init__), returns the most recently placed/moved one -- the stack's
+        last entry."""
+        stack = self._cell_index.get((grid_x, grid_y))
+        return stack[-1] if stack else None
 
     def is_chest(self, object_type):
         """True for a chest-like type (currently just lilchest) -- its
@@ -2378,11 +2586,18 @@ class ObjectManager:
             b_links.append(b_target)
 
     def move_object(self, obj, grid_x, grid_y):
-        """Reposition an already-placed object. Returns True if the new cell was valid."""
+        """Reposition an already-placed object. Returns True if the new cell was valid.
+
+        A "direction_mode"="auto" object's direction is recomputed here
+        just like its variant already is (torch's own L/R already worked
+        this way) -- but a "manual" one's obj["direction"] is left
+        completely untouched (auto_direction comes back None for those,
+        see _resolve_placement), so dragging an already-placed bench
+        elsewhere never spins it back to some wall-adjacency guess."""
         if not self._in_bounds(grid_x, grid_y):
             return False
 
-        valid, variant = self._resolve_placement(obj["type"], grid_x, grid_y)
+        valid, variant, auto_direction = self._resolve_placement(obj["type"], grid_x, grid_y)
         if not valid:
             return False
 
@@ -2395,6 +2610,9 @@ class ObjectManager:
             obj["variant"] = variant
         else:
             obj.pop("variant", None)
+
+        if auto_direction is not None:
+            obj["direction"] = auto_direction
 
         self._index_object(obj)
         self.objects_version += 1
@@ -2447,26 +2665,36 @@ class ObjectManager:
         return anchor_x - (size_x - 1) // 2, anchor_y - (size_y - 1)
 
     def _resolve_placement(self, object_type, grid_x, grid_y):
-        """Returns (is_valid, variant) for placing/moving object_type at this cell."""
+        """Returns (is_valid, variant, direction) for placing/moving
+        object_type at this cell. `direction` is only ever non-None for a
+        "direction_mode"="auto" type (see _build_mechanics_fields) --
+        a "manual" one's direction comes from the caller (add_object's own
+        `direction` param), never computed here."""
         if object_type == "torch":
             variant = self._torch_variant(grid_x, grid_y)
             if variant is not None:
-                return True, variant
+                return True, variant, None
             if self.dungeon.logical_grid[grid_y][grid_x] == WALL:
-                return True, None
-            return False, None
+                return True, None, None
+            return False, None, None
 
         if self.is_es_type(object_type):
-            return self._valid_doorway_anchor(object_type, grid_x, grid_y), None
+            return self._valid_wall_break_anchor(object_type, grid_x, grid_y), None, None
 
         if object_type == "stairs":
-            return self._stairs_orientation(grid_x, grid_y)
+            is_valid, variant = self._stairs_orientation(grid_x, grid_y)
+            return is_valid, variant, None
+
+        config = OBJECT_TYPES[object_type]
+        direction = None
+        if config.get("direction_mode") == "auto" and config.get("directions"):
+            direction = self._auto_wall_direction(object_type, grid_x, grid_y)
 
         anchor_x, anchor_y = self._anchor_cell(object_type, grid_x, grid_y)
         if not self._in_bounds(anchor_x, anchor_y):
-            return False, None
+            return False, None, None
         is_valid = self.dungeon.logical_grid[anchor_y][anchor_x] == self._required_cell(object_type)
-        return is_valid, None
+        return is_valid, None, direction
 
     def _stairs_orientation(self, grid_x, grid_y):
         """(is_valid, variant) for stairs: valid directly on a FLOOR cell (no
@@ -2500,6 +2728,43 @@ class ObjectManager:
             return "L"
         return None
 
+    # (NPC_DIRECTIONS key, dx, dy) for each of the 4 cardinal sides a
+    # "direction_mode"="auto" object's own `directions` (see
+    # _build_visual_fields) might have tagged -- _auto_wall_direction
+    # below. Only the 4 cardinal keys make sense for a flat wall-mounted
+    # decor (the other 4 NPC_DIRECTIONS values are diagonals, meaningless
+    # against a straight wall segment).
+    _AUTO_DIRECTION_WALL_ADJACENCY = (
+        ("right", 1, 0),
+        ("left", -1, 0),
+        ("back", 0, -1),
+        ("front", 0, 1),
+    )
+
+    def _auto_wall_direction(self, object_type, grid_x, grid_y):
+        """"direction_mode"="auto" placement (see _build_mechanics_fields):
+        a generalization of _torch_variant's original L/R-only rule to
+        every direction the type's own `directions` actually has tagged.
+        Valid on a FLOOR cell with a WALL immediately on one of its 4
+        cardinal sides -- returns whichever of "right"/"left"/"back"/
+        "front" that side maps to, but only if THIS type has that specific
+        direction tagged (skips a side it doesn't cover, checked in a
+        fixed right/left/back/front order so a corner spot with two
+        candidate walls picks deterministically). None if no adjacent-wall
+        side matches a tagged direction at all -- _resolve_placement's own
+        caller then falls back to this type's ordinary floor/wall
+        placement check with no direction resolved."""
+        if self.dungeon.logical_grid[grid_y][grid_x] != FLOOR:
+            return None
+        tagged = OBJECT_TYPES[object_type].get("directions") or {}
+        for direction, dx, dy in self._AUTO_DIRECTION_WALL_ADJACENCY:
+            if direction not in tagged:
+                continue
+            nx, ny = grid_x + dx, grid_y + dy
+            if self._in_bounds(nx, ny) and self.dungeon.logical_grid[ny][nx] == WALL:
+                return direction
+        return None
+
     def _cell_or_empty(self, grid_x, grid_y):
         if self._in_bounds(grid_x, grid_y):
             return self.dungeon.logical_grid[grid_y][grid_x]
@@ -2511,15 +2776,15 @@ class ObjectManager:
         directly opposite exactly one EMPTY neighbor (the void beyond), with
         WALL flanking the other two sides. Off-grid neighbors count as EMPTY.
 
-        This is the only shape a gate/wall entry-exit is ever allowed to
-        occupy (enforced here, at placement/move time) -- it can't end up in
-        the middle of a room, which is what made it ambiguous whether a given
-        floor tile was "just floor" or a doorway to another room. The
-        procedural assembler (core.world.assembly) also re-checks this same
-        pattern before treating a gate/wall as a connectable exit, so a
-        gate/wall lacking a void neighbor (interior-only, e.g. a locked door
-        gating a side room) is simply never picked as a room-to-room
-        connection -- it still works as an ordinary in-room obstacle.
+        This is the procedural assembler's (core.world.assembly) own
+        question -- "is this gate/wall a genuine room-to-room connector" --
+        NOT the placement-time question of "can a door go here" (that's
+        is_valid_wall_break below, deliberately a looser check). A
+        gate/wall satisfying is_valid_wall_break but not this -- an
+        interior door with floor (or another decoration) on both sides,
+        no void neighbor -- simply never gets picked as a connection by
+        the assembler; it still works as an ordinary in-room/decorative
+        door.
         """
         if not self._in_bounds(grid_x, grid_y):
             return False
@@ -2537,23 +2802,62 @@ class ObjectManager:
             return up == WALL and down == WALL
         return False
 
+    def is_valid_wall_break(self, grid_x, grid_y):
+        """True if (grid_x, grid_y) is a WALL cell sitting in a clean,
+        1-cell-thick wall segment -- WALL flanking the two perpendicular
+        sides, with FLOOR on at least one of the two opposite sides (so the
+        door actually borders a walkable room instead of floating inside
+        solid interior wall with no floor anywhere nearby). This is
+        placement's own permissive rule for "can a door/gate go here" --
+        unlike is_valid_doorway, it does NOT require a void on the other
+        side, so a door can sit on any straight wall, including an interior
+        one (e.g. framed by a purely decorative multi-cell wall object like
+        "bordureporte" -- nothing here checks for an existing object on the
+        cell, since placement never has, see add_object). Simplified from
+        is_valid_doorway on 2026-08-18 after that stricter rule turned out
+        to block exactly this case; see is_valid_doorway's own docstring
+        for why that stricter shape still exists separately, for the
+        assembler."""
+        if not self._in_bounds(grid_x, grid_y):
+            return False
+        if self.dungeon.logical_grid[grid_y][grid_x] != WALL:
+            return False
+
+        up = self._cell_or_empty(grid_x, grid_y - 1)
+        down = self._cell_or_empty(grid_x, grid_y + 1)
+        left = self._cell_or_empty(grid_x - 1, grid_y)
+        right = self._cell_or_empty(grid_x + 1, grid_y)
+
+        if FLOOR in (up, down):
+            return left == WALL and right == WALL
+        if FLOOR in (left, right):
+            return up == WALL and down == WALL
+        return False
+
     def _valid_doorway_anchor(self, object_type, grid_x, grid_y):
         """True if `object_type`'s own anchor cell (see _anchor_cell) is a
-        valid is_valid_doorway break -- the ONLY cell of a multi-cell E/S's
-        footprint that placement validates; every other cell is free to
-        overlap anything (a wall, void, ...) without blocking placement,
-        see _anchor_cell's own docstring for why. The autotiled walls this
-        game generates are only ever ONE cell thick, so a door taller/wider
-        than 1 cell in the direction perpendicular to the wall could never
-        find a second WALL cell to independently validate against there
-        (that second cell is the room's own interior FLOOR) -- checking
-        only the anchor is what makes a multi-cell custom "porte" placeable
-        at all. A 1x1 E/S (gate/wall/cave_entrance/big_entrance's own
-        origin, or a 1-cell custom "porte") has anchor == its own single
-        cell, so this is identical to a bare is_valid_doorway call for
-        every type that existed before this."""
+        valid is_valid_doorway break -- used by the procedural assembler
+        (core.world.assembly) to decide whether a placed E/S is usable as a
+        room-to-room connector, NOT by placement itself anymore (see
+        _valid_wall_break_anchor)."""
         anchor_x, anchor_y = self._anchor_cell(object_type, grid_x, grid_y)
         return self.is_valid_doorway(anchor_x, anchor_y)
+
+    def _valid_wall_break_anchor(self, object_type, grid_x, grid_y):
+        """Placement-time counterpart to _valid_doorway_anchor: True if
+        `object_type`'s own anchor cell (see _anchor_cell) is a valid
+        is_valid_wall_break -- the ONLY cell of a multi-cell E/S's
+        footprint that placement validates; every other cell is free to
+        overlap anything (a wall, void, another decoration...) without
+        blocking placement, see _anchor_cell's own docstring for why. The
+        autotiled walls this game generates are only ever ONE cell thick,
+        so a door taller/wider than 1 cell in the direction perpendicular
+        to the wall could never find a second WALL cell to independently
+        validate against there (that second cell is the room's own
+        interior FLOOR) -- checking only the anchor is what makes a
+        multi-cell custom "porte" placeable at all."""
+        anchor_x, anchor_y = self._anchor_cell(object_type, grid_x, grid_y)
+        return self.is_valid_wall_break(anchor_x, anchor_y)
 
     def prune_invalid(self):
         """Drop objects whose underlying cell no longer matches their placement rule (e.g. the floor/wall they sat on got erased), and any links left dangling by that.

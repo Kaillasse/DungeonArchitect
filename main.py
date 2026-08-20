@@ -68,6 +68,12 @@ def _apply_give_card(args):
     if not player:
         print("Aucun joueur local configure -- passe --player <nom>.")
         return
+    # Rooms are per-account now (core.data.ressources) -- CardManager's
+    # room-card enumeration needs an active account set, same as every
+    # other rooms_directory()/donjons_directory() consumer, even though
+    # this CLI path never goes through Menu's own login screen.
+    from core.data.ressources import set_active_account
+    set_active_account(player)
 
     card = CardManager().load(args.give_card)
     if card is None:
@@ -93,6 +99,12 @@ def _apply_give_all_cards(args):
     if not player:
         print("Aucun joueur local configure -- passe --player <nom>.")
         return
+    # Rooms are per-account now (core.data.ressources) -- CardManager's
+    # room-card enumeration needs an active account set, same as every
+    # other rooms_directory()/donjons_directory() consumer, even though
+    # this CLI path never goes through Menu's own login screen.
+    from core.data.ressources import set_active_account
+    set_active_account(player)
 
     manager = ProfileManager()
     profile = manager.load(player)
@@ -120,6 +132,12 @@ def _apply_admingod(args):
     if not player:
         print("Aucun joueur local configure -- passe --player <nom>.")
         return
+    # Rooms are per-account now (core.data.ressources) -- CardManager's
+    # room-card enumeration needs an active account set, same as every
+    # other rooms_directory()/donjons_directory() consumer, even though
+    # this CLI path never goes through Menu's own login screen.
+    from core.data.ressources import set_active_account
+    set_active_account(player)
 
     manager = ProfileManager()
     profile = manager.load(player)
@@ -148,6 +166,12 @@ def _apply_admingod_off(args):
     if not player:
         print("Aucun joueur local configure -- passe --player <nom>.")
         return
+    # Rooms are per-account now (core.data.ressources) -- CardManager's
+    # room-card enumeration needs an active account set, same as every
+    # other rooms_directory()/donjons_directory() consumer, even though
+    # this CLI path never goes through Menu's own login screen.
+    from core.data.ressources import set_active_account
+    set_active_account(player)
 
     manager = ProfileManager()
     profile = manager.load(player)

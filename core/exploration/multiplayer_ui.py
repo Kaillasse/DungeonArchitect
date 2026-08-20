@@ -22,6 +22,7 @@ from __future__ import annotations
 import pygame
 
 from core.ui.widgets import BorderManager, TextInputBox
+from core.ui.fonts import get_font
 from core.network.discovery import SessionBrowser
 
 
@@ -58,9 +59,9 @@ class MultiplayerPanelUI:
         self.x = x
         self.y = y
         self.border = BorderManager()
-        self.title_font = pygame.font.SysFont("arial", 20)
-        self.font = pygame.font.SysFont("arial", 16)
-        self.small_font = pygame.font.SysFont("arial", 13)
+        self.title_font = get_font("title", 20)
+        self.font = get_font("button", 16)
+        self.small_font = get_font("text", 13)
 
         self.is_open = False
         self._browser = None  # discovery.SessionBrowser, only while open and not connected

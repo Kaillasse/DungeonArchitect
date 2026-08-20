@@ -95,8 +95,19 @@ class Dungeon:
         save's already-correct `cells` is trusted as-is instead of being
         re-derived every time a room opens. Reads self.theme_grid, the
         per-cell pack each cell was actually painted with -- floor_theme/
-        wall_theme are only ever the CURRENT brush, never re-applied to already-painted cells here."""
+        wall_theme are only ever the CURRENT brush, never re-applied to already-painted cells here.
+
+        Also bumps terrain_version -- this is the one place a room LOAD
+        (SaveManager.apply_json, the only caller) replaces logical_grid
+        wholesale without going through paint_cell/destroy_area/
+        destroy_wall_cell/grow, every one of which already bumps it
+        itself. Without this, WorldRenderer._ledge_cache (keyed on
+        terrain_version, see its own docstring) kept reading as "still
+        valid" across a room switch and kept showing the PREVIOUS room's
+        south-border ledge tiles until the next in-room edit happened to
+        bump the version -- the "bordures de la room d'avant" bug."""
         self.sprite_grid = resolve_sprite_grid(self.logical_grid, self.theme_grid)
+        self.terrain_version += 1
 
     def paint_cell(self, grid_x: int, grid_y: int, erase: bool = False, cell_type: int = FLOOR, wall_gate=None) -> None:
         """Autotile (when enabled) is purely incremental -- only the clicked

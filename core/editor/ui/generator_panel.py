@@ -3,6 +3,7 @@
 import pygame
 
 from core.ui.widgets import BorderManager, RoomBrowser, Stepper
+from core.ui.fonts import get_font
 from core.data.cards import room_card_id
 from core.editor.ui.mixins import _ResizableCornerMixin
 from core.editor.ui.card_renderer import CardRenderer
@@ -40,7 +41,7 @@ class GeneratorPanelUI(_ResizableCornerMixin):
         self.y = y
 
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 16)
+        self.font = get_font("button", 16)
 
         self.room_count = 3
 

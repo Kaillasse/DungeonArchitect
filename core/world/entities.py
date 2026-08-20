@@ -375,6 +375,15 @@ class _WanderingEntity:
             return
         direction = direction.normalize()
         self.flip = (direction.x < 0) if self.FACES_RIGHT_BY_DEFAULT else (direction.x > 0)
+        if self._entity_pack is not None:
+            # An entity-pack mob's sprite direction is a real 8-way bucket
+            # (current_direction), not flip -- _enter_move already sets it
+            # once from a random wander angle, but a directed chase (see
+            # Mob._update_chase) never went through _enter_move at all, so
+            # it stayed frozen facing wherever the mob last idled. Updating
+            # it here covers wander, chase, and rest-chain movement alike
+            # in one place, every frame movement actually happens.
+            self.current_direction = _bucket_direction(direction)
         movement = direction * speed * dt
 
         candidate_x = self.position.x + movement.x
@@ -605,9 +614,11 @@ class Mob(_WanderingEntity):
     - Rest/posture chain (sit/lie): present iff wander_actions has a
       "sitting" role actually tagged in the entity pack (see _has_action)
       -- only reachable for an entity-pack-backed mob (self._entity_pack
-      is not None); the flat-frame aggro/attack path never interleaves
-      with this (a known, disclosed scope limit -- see class docstring's
-      own note below on why the two paths stay separate this pass).
+      is not None) that is NOT aggro_capable; an aggro_capable entity-pack
+      mob drops the rest chain entirely and fights instead (see update()'s
+      own comment) -- no sensible interleaving of "sits down" and "chases
+      the player" was ever asked for, so the two stay mutually exclusive
+      rather than attempting one.
     - Interaction/dialogue ("is this a PNJ"): self.interactable, read once
       from OBJECT_TYPES[type_id].get("interactable") -- purely
       informational here (a future dialogue system is what would branch on
@@ -630,13 +641,20 @@ class Mob(_WanderingEntity):
     visually keeps playing idle/move throughout until real art exists for
     it.
 
-    Known scope limit: an entity-pack-backed mob (interactable PNJ-style)
-    never enters the aggro/attack/rest-of-combat machinery even if given
-    combat stats -- its wander/rest chain takes full priority, matching
-    old Npc's total lack of combat exactly. Making a dialogue-capable mob
-    ALSO fight would need the combat state machine itself to read frames
-    through _action_frames_for instead of a flat self.frames[state] lookup
-    -- a deeper unification left for a future pass, not attempted here."""
+    An entity-pack-backed (interactable PNJ-style) mob CAN also fight, once
+    aggro_capable (aggro_range/attack_range fused onto it via Coller --
+    see mechanics_panel._tearable_fragments) -- the combat state machine
+    reads frames through _action_frames_for/_current_action_name rather
+    than a flat self.frames[state] lookup either way, so update()'s whole
+    aggro/chase/attack branch is identical for both frame sources. Its
+    "attack"/"damaged"/"death" states resolve to a literal tagged action
+    name of the same name (e.g. tag a region "attack" with the pack's own
+    free-text action box) rather than a 4th wander_actions role -- nothing
+    new to configure beyond the idle/move tagging a PNJ already needs.
+    Interaction/dialogue (self.interactable) is untouched by any of this --
+    a fighting PNJ can still be "interactable" in the data sense, a future
+    dialogue system would just need its own judgment call about talking to
+    something that's currently trying to kill the player."""
 
     FRAME_SIZE = 32
     REST_DURATION = (2.0, 4.5)  # how long "sit"/"lie" hold before the next decision (entity-pack mobs only)
@@ -684,7 +702,12 @@ class Mob(_WanderingEntity):
             self.ANIMATION_SPEED = 0.2
             self._move_speed = self.stats.get("move_speed", 30)
             self.FACES_RIGHT_BY_DEFAULT = False  # inert here -- draw() always uses flip=False, see below
-            self.LOOPING_STATES = ("idle", "move")
+            # "attack" only ever actually reached if this PNJ is ALSO
+            # aggro_capable (a stats/aggressivity fragment fused onto it,
+            # see _tearable_fragments in mechanics_panel.py) -- harmless to
+            # always include, same reasoning as the enemy-style branch
+            # below already including it unconditionally.
+            self.LOOPING_STATES = ("idle", "move", "attack")
             self.MOVE_STATE_NAME = "move"
         else:
             # Flat-frame path (formerly Animal/Enemy) -- state names must
@@ -747,11 +770,13 @@ class Mob(_WanderingEntity):
     # -- frame lookup / draw --------------------------------------------
 
     def _has_action(self, role):
-        """True if wander_actions[role] points at an action ACTUALLY tagged
-        in this pack -- a wander_actions entry can name an action never
-        actually tagged (mob registered, then pack edited since), so this
-        isn't just `role in wander_actions`. Entity-pack mobs only."""
-        action = self.wander_actions.get(role)
+        """True if wander_actions[role] (or, absent an explicit mapping,
+        `role` itself -- 2026-08-19, see _current_action_name's own
+        docstring on why) points at an action ACTUALLY tagged in this
+        pack -- a wander_actions entry can name an action never actually
+        tagged (mob registered, then pack edited since), so this isn't
+        just `role in wander_actions`. Entity-pack mobs only."""
+        action = self.wander_actions.get(role, role)
         return bool(action) and action in self.frames
 
     def _action_frames_for(self, action_name):
@@ -776,18 +801,44 @@ class Mob(_WanderingEntity):
         return []
 
     def _action_frames(self, role):
-        return self._action_frames_for(self.wander_actions.get(role))
+        return self._action_frames_for(self.wander_actions.get(role, role))
 
     def _current_action_name(self):
+        """Every reserved role (sitting/laying/move/idle) defaults to
+        USING ITS OWN NAME as the tagged action to look up (2026-08-19)
+        when wander_actions has no explicit override for it -- a card
+        built purely in Assembler (tag a region literally "move",
+        "idle", ...) works immediately with no wander_actions mapping
+        step at all needed; an EXISTING PNJ whose role points at a
+        differently-named tag (e.g. "idle" -> "walkfront") is completely
+        unaffected, since an explicit wander_actions entry always wins
+        over this fallback (dict.get's default only applies when the key
+        is truly absent)."""
         if self.state in self._TRANSITION_STATES:
-            return self.wander_actions.get(self._transition_role)
+            return self.wander_actions.get(self._transition_role, self._transition_role)
         if self.state == "sit":
-            return self.wander_actions.get("sitting")
+            return self.wander_actions.get("sitting", "sitting")
         if self.state == "lie":
-            return self.wander_actions.get("laying")
+            return self.wander_actions.get("laying", "laying")
         if self.state == "move":
-            return self.wander_actions.get(self._move_action)
-        return self.wander_actions.get("idle")
+            return self.wander_actions.get(self._move_action, self._move_action)
+        if self.state == "idle":
+            return self.wander_actions.get("idle", "idle")
+        # Combat states (attack/damaged/death, only reachable for an
+        # aggro_capable mob, see update()) AND any freely-named custom
+        # ambient state (see _stationary_state_options/_enter_custom_state,
+        # 2026-08-19) both use the LITERAL state name as the action name
+        # directly -- e.g. tag a region "attack", or "roar", with the
+        # pack's own free-text action box, same tool already used for
+        # "walkfront" -- rather than a wander_actions role needing its own
+        # dedicated Forge UI per state. No new property/registration step:
+        # ANY action already tagged on the pack (see _stationary_state_
+        # options) is automatically playable this way. _action_frames_for
+        # already falls back gracefully (eventually to idle) if nothing's
+        # tagged for a given state yet, same as a flat-frame mob given
+        # combat stats without matching ENEMY_FOLDERS art (see class
+        # docstring).
+        return self.state
 
     def _current_frames(self):
         """Overrides _WanderingEntity's default flat `self.frames[state]`
@@ -843,6 +894,65 @@ class Mob(_WanderingEntity):
         self.animation_timer = 0
         self.state_timer = random.uniform(*self.IDLE_DURATION)
 
+    def _stationary_state_options(self):
+        """Every action already tagged on this mob's own pack that can be
+        landed on as a stationary ambient pose -- "idle" (this class's own
+        built-in default, via wander_actions, unchanged) plus ANY OTHER
+        action name tagged on the pack (2026-08-19 -- confirmed with the
+        user: "il ne sert a rien de creer une nouvelle propriete, il suffit
+        d'utiliser celle qui existe deja" -- no new field on the card, no
+        registration step, this reads straight from self.frames, i.e.
+        whatever the pack already has tagged via the SAME free-text action
+        box used for "walkfront"/"attack" etc. Add a tile tagged "roar" to
+        the pack and it's playable the very next time this is read, no
+        re-registering the card at all). Excludes whatever's already
+        claimed by move/run/sitting/laying (their own dedicated roles) and
+        the reserved combat names (attack/damaged/death, entered only by
+        update()'s aggro logic, never by this wander chain)."""
+        claimed = {
+            self.wander_actions.get(role) for role in ("idle", "move", "run", "sitting", "laying")
+        }
+        claimed.discard(None)
+        return ["idle"] + [
+            action_name for action_name in self.frames
+            if action_name not in claimed and action_name not in ("attack", "damaged", "death")
+        ]
+
+    def _enter_custom_state(self, action_name):
+        """Enters a freely-named stationary ambient state (see
+        _stationary_state_options) -- no dedicated enter/leave transition
+        animation the way sitting/laying get (those need to know which
+        frame means "fully seated" to freeze on; an arbitrary custom
+        state has no such contract), just holds on frame 0 of its own
+        tagged action and loops it like idle (see _advance_loop_
+        animation)."""
+        self.direction = pygame.Vector2()
+        self.state = action_name
+        self.frame = 0
+        self.animation_timer = 0
+        self.state_timer = random.uniform(*self.IDLE_DURATION)
+
+    def _enter_next_ambient_state(self):
+        """Called when "idle" or a custom ambient state's timer expires
+        (see _advance_state) -- picks what's next: "move" (always
+        available) or, uniformly likely, any OTHER stationary option
+        (_stationary_state_options), excluding whichever one is currently
+        active so a mob never just re-picks the pose it's already leaving.
+        For a mob with no custom states tagged at all, this reduces to
+        exactly {"move"} from "idle" -- i.e. always moves next, identical
+        to the original idle->move behavior, so nothing already-placed
+        changes just because this method now exists."""
+        options = [name for name in (["move"] + self._stationary_state_options()) if name != self.state]
+        if not options:
+            options = ["move"]
+        choice = random.choice(options)
+        if choice == "move":
+            self._enter_move()
+        elif choice == "idle":
+            self._enter_idle()
+        else:
+            self._enter_custom_state(choice)
+
     def _enter_sit(self):
         self.direction = pygame.Vector2()
         self.state = "sit"
@@ -874,18 +984,20 @@ class Mob(_WanderingEntity):
 
     def _advance_state(self):
         """Called when state_timer hits 0 -- picks the next link in
-        move <-> [sitting] <-> sit <-> [laying] <-> lie. If "sitting" isn't
-        tagged at all, falls back to the original simple idle <-> move
-        alternation. Never called during a _TRANSITION_STATES state --
+        move <-> [sitting] <-> sit <-> [laying] <-> lie, unchanged. From
+        "move" with no "sitting" tagged, or from "idle"/any custom ambient
+        state (see _stationary_state_options), delegates to
+        _enter_next_ambient_state instead of a fixed idle<->move
+        alternation -- see that method's own docstring for why this is
+        behavior-identical to the old fixed alternation whenever nothing
+        custom is tagged. Never called during a _TRANSITION_STATES state --
         those end via _advance_transition reaching their last frame
         instead, not this timer (see update())."""
         if self.state == "move":
             if self._has_action("sitting"):
                 self._enter_transition("to_sit", "sitting", reverse=False)
             else:
-                self._enter_idle()
-        elif self.state == "idle":
-            self._enter_move()
+                self._enter_next_ambient_state()
         elif self.state == "sit":
             if self._has_action("laying") and random.random() < self.LIE_CHANCE:
                 self._enter_transition("to_lie", "laying", reverse=False)
@@ -893,6 +1005,10 @@ class Mob(_WanderingEntity):
                 self._enter_transition("to_move", "sitting", reverse=True)
         elif self.state == "lie":
             self._enter_transition("to_sit_from_lie", "laying", reverse=True)
+        else:
+            # "idle", or any custom ambient state -- both decide what's
+            # next the same way.
+            self._enter_next_ambient_state()
 
     def _advance_transition(self, dt):
         """Advances the active _TRANSITION_STATES state frame by frame, in
@@ -922,10 +1038,14 @@ class Mob(_WanderingEntity):
             self._enter_move()
 
     def _advance_loop_animation(self, dt):
-        """Loops the animation for "idle"/"move" (the only two states that
-        truly loop) -- "sit"/"lie" stay frozen on whatever frame their
-        entry transition left them at, no loop of their own."""
-        if self.state not in ("idle", "move"):
+        """Loops the animation for "idle"/"move"/any custom ambient state
+        (see _stationary_state_options) -- "sit"/"lie"/a _TRANSITION_
+        STATES one stay frozen on whatever frame their own entry left
+        them at instead, no loop of their own. Excluding those (rather
+        than enumerating "idle"/"move" only, the old check) is what makes
+        an open-ended, freely-named custom state loop correctly too,
+        without needing to know its name in advance."""
+        if self.state in ("sit", "lie") or self.state in self._TRANSITION_STATES:
             return
         frames = self._current_frames()
         if not frames:
@@ -994,6 +1114,19 @@ class Mob(_WanderingEntity):
         target = pygame.Vector2(target_hitbox.centerx, target_hitbox.centery)
         self._move_toward(dt, is_walkable, target - self.position, self._move_speed)
 
+    def _face_target(self, target_hitbox):
+        """Turns to face `target_hitbox` without moving -- entering
+        "attack" range on its own doesn't change position, but the mob
+        should still visibly turn toward the player. Sets self.flip (the
+        flat-frame mob's own facing) and, for an entity-pack mob,
+        current_direction too (see _bucket_direction) -- draw() only ever
+        reads whichever one actually matters for its own frame source, so
+        setting both unconditionally is harmless."""
+        direction = pygame.Vector2(target_hitbox.centerx, target_hitbox.centery) - self.position
+        self.flip = target_hitbox.centerx < self.position.x
+        if direction.length_squared() > 0 and self._entity_pack is not None:
+            self.current_direction = _bucket_direction(direction.normalize())
+
     def _nearest_player_ref(self, player_refs):
         """(ref, distance_px) for whichever player in `player_refs` is
         closest to this mob right now, or (None, None) if there are none
@@ -1047,6 +1180,49 @@ class Mob(_WanderingEntity):
             self._advance_animation(dt)
             return
 
+        # aggro_capable takes priority over the entity-pack rest/wander
+        # chain below -- an entity-pack (PNJ-style) mob given aggro_range/
+        # attack_range stats (Coller-fused from a true mob, see
+        # mechanics_panel._tearable_fragments) becomes a fighter first,
+        # same as a flat-frame one; it drops its sit/lie posture chain
+        # entirely while aggro-capable rather than trying to interleave
+        # the two (no sensible combined behavior was ever asked for).
+        # Frame source is fully abstracted behind _current_frames/
+        # _current_action_name at this point, so this whole branch is
+        # identical for a flat-frame OR an entity-pack mob -- this is the
+        # "deeper unification" the class docstring used to flag as a
+        # future pass; _move_toward/_face_target keep current_direction in
+        # sync for the entity-pack case, _current_action_name resolves
+        # "attack"/"damaged"/"death" to literal tagged action names.
+        if self.aggro_capable:
+            nearest_ref, distance_px = self._nearest_player_ref(player_refs)
+            if nearest_ref is not None and distance_px <= self.stats["attack_range"] * self.tile_size:
+                self._enter_state("attack")
+                self._face_target(nearest_ref.hitbox)
+            elif nearest_ref is not None and distance_px <= self.stats["aggro_range"] * self.tile_size:
+                self._update_chase(dt, is_walkable, nearest_ref.hitbox)
+            else:
+                self._update_wander(dt, is_walkable)
+
+            self._advance_animation(dt)
+
+            if (
+                self.state == "attack"
+                and self.frame in self.stats.get("active_attack_frames", ())
+                and not self._hit_delivered_this_swing
+            ):
+                # Mirrors the player's own attack, which already hits every
+                # overlapping mob in one swing rather than just the nearest.
+                attack_hitbox = self.get_attack_hitbox()
+                hit_landed = False
+                for ref in player_refs:
+                    if attack_hitbox.colliderect(ref.hitbox):
+                        ref.player.take_damage(1)
+                        hit_landed = True
+                if hit_landed:
+                    self._hit_delivered_this_swing = True
+            return
+
         if self._entity_pack is not None:
             if self.state in self._TRANSITION_STATES:
                 self._advance_transition(dt)
@@ -1060,35 +1236,8 @@ class Mob(_WanderingEntity):
             self._advance_loop_animation(dt)
             return
 
-        if self.aggro_capable:
-            nearest_ref, distance_px = self._nearest_player_ref(player_refs)
-            if nearest_ref is not None and distance_px <= self.stats["attack_range"] * self.tile_size:
-                self._enter_state("attack")
-                self.flip = nearest_ref.hitbox.centerx < self.position.x
-            elif nearest_ref is not None and distance_px <= self.stats["aggro_range"] * self.tile_size:
-                self._update_chase(dt, is_walkable, nearest_ref.hitbox)
-            else:
-                self._update_wander(dt, is_walkable)
-        else:
-            self._wander_tick(dt, is_walkable, self._move_speed)
-
+        self._wander_tick(dt, is_walkable, self._move_speed)
         self._advance_animation(dt)
-
-        if (
-            self.aggro_capable and self.state == "attack"
-            and self.frame in self.stats["active_attack_frames"]
-            and not self._hit_delivered_this_swing
-        ):
-            # Mirrors the player's own attack, which already hits every
-            # overlapping mob in one swing rather than just the nearest.
-            attack_hitbox = self.get_attack_hitbox()
-            hit_landed = False
-            for ref in player_refs:
-                if attack_hitbox.colliderect(ref.hitbox):
-                    ref.player.take_damage(1)
-                    hit_landed = True
-            if hit_landed:
-                self._hit_delivered_this_swing = True
 
 
 class MobManager(_EntityManager):

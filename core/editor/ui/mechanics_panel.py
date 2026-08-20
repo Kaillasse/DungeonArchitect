@@ -151,6 +151,7 @@ from core.editor.ui.card_renderer import CardRenderer
 from core.editor.ui import card_tear
 from core.editor.ui import card_burn
 from core.ui.widgets import BorderManager
+from core.ui.fonts import get_font
 from core.world.object_manager import (
     OBJECT_TYPES, ITEM_DEFINITIONS, ARCHETYPES, CELL_MODES, ENEMY_ANIMATIONS, mob_kind as _mob_kind,
     NPC_DIRECTIONS, load_npc_frames, load_enemy_frames, load_animal_frames, load_object_frames,
@@ -280,6 +281,12 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.cell_modes_grid = None
         self.interactable = False
         self.lockable = False
+        # Only ever shown/editable for a card whose `directions` (see
+        # object_manager._build_visual_fields) is non-empty -- meaningless
+        # otherwise, see self.has_directions/_render_object_info. "auto" or
+        # "manual" (never None once has_directions is True -- open() loads
+        # an unset saved value as "manual", the safer default).
+        self.direction_mode = None
 
         # The one thing that actually decides how this panel behaves --
         # "object" (plain decorative/special OBJECT_TYPES), "item"
@@ -382,12 +389,14 @@ class MechanicsPanelUI(_ResizableCornerMixin):
 
         self.status_text = ""
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 16)
-        self.small_font = pygame.font.SysFont("arial", 13)
+        self.font = get_font("button", 16)
+        self.title_font = get_font("title", 16)
+        self.small_font = get_font("text", 13)
 
         self._blocks_rect = None
         self._interactable_rect = None
         self._lockable_rect = None
+        self._direction_mode_rect = None
         # True from a MOUSEBUTTONDOWN on the shared preview sprite until
         # the matching MOUSEBUTTONUP -- see handle_event's own multi-event
         # block for what it drives (PNJ direction-drag, and "drag the
@@ -533,6 +542,8 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             self.cell_modes_grid = None
             self.interactable = False
             self.lockable = False
+            self.has_directions = False
+            self.direction_mode = None
             self.card_kind = "item"
             self.preview_state = None
             self._preview_frames = [self.icon] if self.icon else []
@@ -565,7 +576,16 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         # reasoning) -- today this is exactly the old "enemy" flag's set
         # (skeleton1/skeleton2), so existing content is unaffected.
         is_pnj = bool(config.get("entity_pack"))
-        is_mob = bool(config.get("mob")) and not is_pnj
+        # A flat-frame mob (animal/enemy) always has a real file-path
+        # "asset" (load_animal_frames/load_enemy_frames both assume that
+        # shape unconditionally) -- a custom card's asset is always a
+        # tileset-region dict instead. object_manager.fuse_card now
+        # refuses to glue "Comportement" onto a card with no entity_pack
+        # at all (2026-08-19, a real crash before that guard existed), but
+        # this still defends against opening an already-corrupted card
+        # saved before the guard existed: falls through to card_kind
+        # "object" (a safe, generic preview) instead of crashing.
+        is_mob = bool(config.get("mob")) and not is_pnj and isinstance(config.get("asset"), str)
         if is_mob:
             self.mob_kind = _mob_kind(card_id)
             # Fixed sets -- animal/enemy are always fully hand-authored
@@ -582,7 +602,15 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         else:
             self.mob_kind = None
             self.mob_states = ()
-            self.mob_stats = {}
+            # A PNJ can also carry a stats/aggressivity block (Coller-fused
+            # from a true mob) even though it doesn't enter the aggro/
+            # attack state machine in-game yet (see entities.Mob's own
+            # class docstring on that scope limit) -- it's still a real,
+            # tearable/re-fusable fragment and has to survive being loaded
+            # here, or _tearable_fragments/_build_mob_stats below would
+            # never see it (and _try_save would silently wipe it on the
+            # very next unrelated edit).
+            self.mob_stats = config.get("stats", {}) if is_pnj else {}
 
         if is_pnj:
             self.pnj_entity_pack = config.get("entity_pack")
@@ -634,6 +662,13 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.blocks_movement = config.get("blocks_movement", False)
         self.interactable = config.get("interactable", False)
         self.lockable = bool(config.get("blocks_until_open"))
+        # Whether this card even HAS direction-tagged frames at all (see
+        # object_manager._build_visual_fields' `directions` param) decides
+        # whether the auto/manuel toggle shows at all (see
+        # _render_direction_mode) -- set once at crop time, in
+        # SpriteEditorPanelUI, never here.
+        self.has_directions = bool(config.get("directions"))
+        self.direction_mode = (config.get("direction_mode") or "manual") if self.has_directions else None
         saved_cell_modes = config.get("cell_modes")
         width_tiles, height_tiles = self.size
         if saved_cell_modes is not None:
@@ -931,7 +966,9 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         if self.is_mob:  # animal
             return 320
         if self.card_kind == "object":
-            return 440  # past blocks/interactable/lockable + cell_modes grid's worst case
+            # past blocks/interactable/lockable(+direction mode, only when
+            # has_directions) + cell_modes grid's worst case
+            return 480 if self.has_directions else 440
         return 300  # pnj
 
     def _shows_properties(self):
@@ -954,11 +991,14 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         them through unchanged -- but nothing in THIS panel mutates them
         anymore, capacites/effets/stats are tear/fuse-only now, see module
         docstring's "Dechirer/Coller" section). "stats" is gated to
-        self.is_mob (not "does the entry happen to carry a stats key"
-        alone) since _build_mob_stats never writes one for a plain
-        object/item/pnj at all -- checking presence alone would be
+        self.is_mob or self.is_pnj (not "does the entry happen to carry a
+        stats key" alone) since _build_mob_stats never writes one for a
+        plain object/item at all -- checking presence alone would be
         harmless in practice, this just documents the same invariant
-        _build_mob_stats itself relies on."""
+        _build_mob_stats itself relies on. A PNJ carrying stats (Coller-
+        fused from a true mob) doesn't fight in-game yet (see entities.
+        Mob's own class docstring), but the fragment is real and has to
+        stay visible/tearable/re-savable regardless."""
         base_id = self.item_id if self.item_id is not None else self.type_id
         if base_id is None:
             return []
@@ -977,7 +1017,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         # is whatever a previous Coller already fused onto it (confirmed
         # with the user: tearing a skeleton's whole combat profile onto a
         # chicken should work, not just enemy-to-enemy).
-        if self.is_mob and entry.get("stats"):
+        if (self.is_mob or self.is_pnj) and entry.get("stats"):
             fragments.append(("stats", None, entry["stats"]))
             # A finer-grained SUBSET of the same stats block -- just
             # aggro_range/attack_range, "l'agressivite" (confirmed with the
@@ -1002,6 +1042,17 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         if self.is_pnj:
             for role, action_name in entry.get("wander_actions", {}).items():
                 fragments.append(("state", role, action_name))
+        # "Comportement" (2026-08-19, confirmed with the user) -- the
+        # single flag ("mob") that makes a card come alive at all,
+        # offered for ANY live mob (flat-frame or entity-pack alike, see
+        # object_manager.extract_property_payload's own docstring on
+        # "behavior") so it can be torn off e.g. a chicken and glued onto
+        # a typeless card Assembler already gave its own entity_pack/
+        # states to -- turning it into a living mob using ITS OWN states,
+        # never the chicken's (fuse only ever writes the "mob" flag
+        # itself, see object_manager._apply_property_payload).
+        if (self.is_mob or self.is_pnj) and entry.get("mob"):
+            fragments.append(("behavior", None, True))
         # loot_cards is explicitly-set-or-absent, never falsy-but-present
         # (see object_manager._build_mechanics_fields' own comment) -- an
         # explicit {} ("this card drops nothing") is still a real fragment
@@ -1069,6 +1120,10 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self._blocks_rect = pygame.Rect(content_x, self._cy(270), content_width, 32)
         self._interactable_rect = pygame.Rect(content_x, self._cy(310), content_width, 32)
         self._lockable_rect = pygame.Rect(content_x, self._cy(350), content_width, 32)
+        # Only ever shown for a card with `directions` tagged at crop time
+        # (see self.has_directions) -- any archetype, not just "porte"
+        # (unlike _lockable_rect just above it).
+        self._direction_mode_rect = pygame.Rect(content_x, self._cy(390), content_width, 32)
         # Proprietes (capacites/effets/stats -- see _tearable_fragments/
         # _render_properties) -- item/mob/pnj cards, right after whatever
         # kind-specific info precedes it (_properties_top_offset, dynamic
@@ -1116,11 +1171,12 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self.pitch_range = {key: list(value) for key, value in sound_pitch.items()}
 
     def _build_mob_stats(self):
-        """The stats dict to persist for the currently loaded mob, or None
-        for anything else (object/item/pnj have no stats concept) --
-        pulled out of _try_save so that method's own item-vs-object
-        dispatch doesn't have this whole computation sitting inline in the
-        middle of it.
+        """The stats dict to persist for the currently loaded mob or PNJ
+        (a PNJ can carry one too, Coller-fused from a true mob -- see
+        _tearable_fragments), or None for anything else (object/item have
+        no stats concept) -- pulled out of _try_save so that method's own
+        item-vs-object dispatch doesn't have this whole computation
+        sitting inline in the middle of it.
 
         Nothing in this panel edits a mob's stats directly anymore (see
         module docstring's "Proprietes / Dechirer / Coller") -- the whole
@@ -1133,7 +1189,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         WIPE it on every save -- including the one _try_tear itself runs
         before every tear, which would erase a freshly-transplanted
         aggro/attack behavior the very next time it's touched."""
-        if not self.is_mob:
+        if not (self.is_mob or self.is_pnj):
             return None
         return dict(self.mob_stats) if self.mob_stats else None
 
@@ -1211,6 +1267,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                     sounds=sounds,
                     sound_pitch=sound_pitch,
                     loot_cards=loot_cards,
+                    direction_mode=self.direction_mode,
                 )
         except ValueError as exc:
             self.status_text = str(exc)
@@ -1552,6 +1609,10 @@ class MechanicsPanelUI(_ResizableCornerMixin):
                 self.lockable = not self.lockable
                 return self._try_save()
 
+            if self.has_directions and self._direction_mode_rect.collidepoint(event.pos):
+                self.direction_mode = "manual" if self.direction_mode == "auto" else "auto"
+                return self._try_save()
+
         if self._shows_properties():
             section_rect = self._properties_section_rect()
             if section_rect is not None and section_rect.collidepoint(event.pos):
@@ -1854,7 +1915,7 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         self._clamp_scroll()
         self._layout()
 
-        title = self.font.render(f"Mecaniques -- {self.name}", True, self.CARD_TEXT_COLOR)
+        title = self.title_font.render(f"Mecaniques -- {self.name}", True, self.CARD_TEXT_COLOR)
         screen.blit(title, (self.x + 20, self.y + 16))
 
         self._render_preview(screen)
@@ -2006,6 +2067,10 @@ class MechanicsPanelUI(_ResizableCornerMixin):
         if self.archetype == "porte":
             lock_label = "[x] Porte verrouillable" if self.lockable else "[ ] Porte verrouillable"
             self.border.draw_centered_label(screen, self._lockable_rect, self.font, lock_label)
+
+        if self.has_directions:
+            direction_label = "Direction : Auto" if self.direction_mode == "auto" else "Direction : Manuel"
+            self.border.draw_centered_label(screen, self._direction_mode_rect, self.font, direction_label)
 
     def _render_mob_info(self, screen):
         """Type + Etats -- always informational (a mob's animation set is

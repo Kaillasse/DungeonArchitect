@@ -1,7 +1,7 @@
 import re
 
 from core.world.dungeon import Dungeon
-from core.data.ressources import ROOMS_DIRECTORY, list_rooms, next_new_room_name
+from core.data.ressources import rooms_directory, list_rooms, next_new_room_name
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
 _MAX_NAME_LENGTH = 64  # a room name doubles as a raw filename -- generous but real cap
@@ -32,7 +32,7 @@ class RoomManager:
         self.grid.save_to_json(name)
 
     def delete(self, name):
-        path = ROOMS_DIRECTORY / f"{name}.json"
+        path = rooms_directory() / f"{name}.json"
         if path.exists():
             path.unlink()
 
@@ -51,7 +51,7 @@ class RoomManager:
         something slightly different, and the caller needs the REAL
         resulting name to correctly update whatever else references the
         old one (current_room, a profile's saved generation pool)."""
-        old_path = ROOMS_DIRECTORY / f"{old_name}.json"
+        old_path = rooms_directory() / f"{old_name}.json"
         if not old_path.exists():
             return None
 
@@ -59,7 +59,7 @@ class RoomManager:
         if not safe_new_name or safe_new_name == old_name:
             return None
 
-        new_path = ROOMS_DIRECTORY / f"{safe_new_name}.json"
+        new_path = rooms_directory() / f"{safe_new_name}.json"
         if new_path.exists():
             return None
 

@@ -39,5 +39,33 @@
         7
       ]
     }
+  },
+  "prop__stats__cd0f83c160": {
+    "category": "stats",
+    "kind": null,
+    "payload": {
+      "health": 3,
+      "move_speed": 45,
+      "aggro_range": 6.0,
+      "attack_range": 1.2,
+      "loot": {
+        "gold": 2,
+        "blue": 1
+      },
+      "active_attack_frames": [
+        11,
+        12
+      ]
+    }
+  },
+  "prop__behavior__5ffe533b83": {
+    "category": "behavior",
+    "kind": null,
+    "payload": true
+  },
+  "prop__state__idle__b0ef01c47d": {
+    "category": "state",
+    "kind": "idle",
+    "payload": "idle"
   }
 }

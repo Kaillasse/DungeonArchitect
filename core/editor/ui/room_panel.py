@@ -3,6 +3,7 @@
 import pygame
 
 from core.ui.widgets import BorderManager, RoomBrowser
+from core.ui.fonts import get_font
 from core.data.ressources import list_donjons
 
 
@@ -26,7 +27,7 @@ class RoomPanelUI:
         self.y = y
 
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 16)
+        self.font = get_font("button", 16)
 
         self.mode = None
 

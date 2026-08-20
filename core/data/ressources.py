@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -27,24 +28,114 @@ DEFAULT_ANIM_SPEED = 0.12
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TILESET_PATH = PROJECT_ROOT / "assets" / "tiles" / "tileset.png"
 
-ROOMS_DIRECTORY = PROJECT_ROOT / "assets" / "rooms"
-ROOMS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+# Rooms/donjons are per-ACCOUNT (see core.data.account_manager) rather than
+# one global pool shared by everyone on the machine -- ROOMS_DIRECTORY/
+# DONJONS_DIRECTORY used to be fixed module-level constants; they're now
+# rooms_directory()/donjons_directory() functions resolved against whichever
+# account set_active_account() last activated (Menu's login screen, right
+# after a successful login/account-creation, before anything room-related
+# can run). STARTER_PACK_ROOMS_DIRECTORY is the OLD fixed rooms path --
+# nothing reads it as a live account's own rooms anymore, but it's kept (not
+# retired) as the source for apply_starter_pack_to_account below: a curated,
+# hand-polished set of rooms (home included) the user maintains directly in
+# this folder, copied into every newly-created account so nobody starts a
+# session on a genuinely blank slate. Donjons have no such pack -- they're
+# procedurally regenerated per-account on demand, nothing to seed.
+STARTER_PACK_ROOMS_DIRECTORY = PROJECT_ROOT / "assets" / "rooms"
 
-DONJONS_DIRECTORY = PROJECT_ROOT / "assets" / "donjons"
-DONJONS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+ACCOUNTS_DIRECTORY = PROJECT_ROOT / "assets" / "accounts"
+ACCOUNTS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+
+_active_account = None
+
+
+def set_active_account(pseudo):
+    """Called once, right after a successful login/account-creation (see
+    core.ui.menu.Menu), before any room/donjon access can happen -- every
+    consumer below reads this instead of a fixed global path."""
+    global _active_account
+    _active_account = pseudo
+
+
+def get_active_account():
+    return _active_account
+
+
+def account_directory(pseudo=None):
+    """The root folder for one account's own data (rooms/donjons live
+    directly under it, see rooms_directory/donjons_directory). Raises if
+    neither `pseudo` nor an active account is set -- every caller below
+    only ever reaches this after login, so this should never actually
+    trigger in practice; it's a loud failure instead of silently writing
+    into some unrelated default location if that invariant is ever
+    broken."""
+    name = pseudo or _active_account
+    if name is None:
+        raise RuntimeError("Aucun compte actif -- connecte-toi d'abord (voir core.data.account_manager).")
+    path = ACCOUNTS_DIRECTORY / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def rooms_directory():
+    path = account_directory() / "rooms"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def donjons_directory():
+    path = account_directory() / "donjons"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def apply_starter_pack_to_account(pseudo):
+    """Called by account_manager.create_account for every brand-new
+    account (not just the first one on the machine -- that "first account
+    only" rule, and the move-not-copy semantics that went with it, is what
+    silently stranded the pre-account dev rooms once a stale
+    Settings.local_player_name skipped the real account-creation path
+    entirely; see done.txt, 2026-08-18): copies (never moves --
+    STARTER_PACK_ROOMS_DIRECTORY is a durable template, not one-shot
+    migration source) every room in the shared starter pack into that
+    account's own rooms directory, so a new player gets a ready-to-explore
+    home and a few pre-built rooms instead of starting genuinely empty.
+    A no-op if the starter pack is empty or absent (e.g. a fresh clone).
+
+    A pack room named like a home (core.world.home.HOME_ROOM_PREFIX) is
+    copied under THIS account's own home name instead of verbatim, so
+    ensure_home_room finds it already on disk and never generates a blank
+    one on top of it. Uses shutil.copy2 (overwrites same-named files), so
+    it's also safe to call again to re-seed an account directory that was
+    already pre-created by some earlier bug."""
+    from core.world.home import HOME_ROOM_PREFIX, home_room_name  # local import: home.py imports rooms_directory from this module -- avoids a cycle
+
+    target_rooms = account_directory(pseudo) / "rooms"
+    target_rooms.mkdir(parents=True, exist_ok=True)
+
+    if not STARTER_PACK_ROOMS_DIRECTORY.exists():
+        return
+    for path in STARTER_PACK_ROOMS_DIRECTORY.glob("*.json"):
+        dest_name = f"{home_room_name(pseudo)}.json" if path.stem.startswith(HOME_ROOM_PREFIX) else path.name
+        shutil.copy2(path, target_rooms / dest_name)
 
 # Packs de tuiles/regions extraits via l'editeur de sprite (voir
 # core.editor.ui.SpriteEditorPanelUI, modes "Pack") -- une extraction brute,
 # numerotee sequentiellement, d'un bloc de regions individuelles depuis un
-# tileset/feuille source. Deux "kind" partagent ce meme format de fichier
-# (voir payload["kind"] ci-dessous) : "autotile" (le cas d'origine --
-# volontairement PAS branche sur core.editor.autotile.AUTOTILE_LOOKUP/
-# tile_categories.json, associer chaque tuile a son motif de voisins reste
-# une etape manuelle separee) et "entity" (regions d'une feuille de
-# personnage/PNJ, taguees action+direction+ordre au lieu d'un bitmask --
-# voir object_manager.build_entity_pack_lookup). Le format `tiles: [{"index",
-# "rect", ...metadonnees libres selon le kind...}]` est deja generique ;
-# seule la nature des metadonnees change.
+# tileset/feuille source. Le format `tiles: [{"index", "rect",
+# ...metadonnees libres...}]` a toujours ete generique -- _merge_tile_fields
+# n'a jamais impose de schema par tuile, "autotile" (bitmask/default/
+# variant_of/probability) et "entity" (action/direction/order, voir
+# object_manager.build_entity_pack_lookup) partagent deja le meme format de
+# fichier sans qu'aucun code ne les empeche de cohabiter sur une meme tuile.
+# `payload["kind"]` reste une etiquette de PACK (pas de tuile), lue par les
+# consommateurs actuels (AutotileThemePanelUI, le mode Bitmap) pour choisir
+# quelle UI proposer -- mais n'a plus a etre choisie a la creation : un pack
+# fraichement cree (voir save_autotile_pack) demarre avec kind=None ("pas
+# encore de vocation assignee"), le futur outil "Extraire" (voir CLAUDE.md,
+# refonte de l'editeur) laissant ce choix a une etape ulterieure plutot que
+# de le figer au moment du recadrage -- voir update_autotile_pack_meta pour
+# l'assigner/le changer apres coup sans perdre les tuiles deja taguees.
 AUTOTILE_PACKS_DIRECTORY = PROJECT_ROOT / "assets" / "tiles" / "autotile_packs"
 AUTOTILE_PACKS_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
@@ -61,7 +152,7 @@ def list_autotile_packs(kind=None):
     return [name for name in names if (load_autotile_pack(name) or {}).get("kind", "autotile") == kind]
 
 
-def save_autotile_pack(pack_name, role, tileset, tiles, kind="autotile", columns=None):
+def save_autotile_pack(pack_name, role, tileset, tiles, kind=None, columns=None):
     """Persiste un pack : `tiles` est une liste de rects (x, y, w, h) dans
     l'ordre de selection, numerotes 0..N-1 a l'ecriture. `role` ("floor"/
     "wall") filtre quels packs core.editor.ui.AutotileThemePanelUI propose
@@ -70,6 +161,23 @@ def save_autotile_pack(pack_name, role, tileset, tiles, kind="autotile", columns
     assignation (voir update_autotile_pack_tile/update_autotile_pack_tiles)
     -- c'est core.editor.ui.SpriteEditorPanelUI's mode "Editeur de bitmap"
     qui les remplit ensuite.
+
+    `kind` par defaut a None (pas "autotile") depuis le 2026-08-18 : un
+    pack fraichement extrait n'a plus a s'engager sur sa vocation des la
+    creation (voir ce module's own note plus haut) -- les DEUX appelants
+    existants qui en ont reellement une (le mode "Pack" de SpriteEditorPanelUI,
+    autotile ET entite) le passent desormais explicitement. Un pack kind=None
+    ne matche list_autotile_packs(kind="autotile"|"entity") ni l'un ni
+    l'autre -- exactement voulu, un pack sans vocation assignee ne doit
+    apparaitre dans aucun des pickers existants tant qu'update_autotile_
+    pack_meta ne lui en a pas donne une.
+
+    N'ecrase JAMAIS un pack existant avec de nouvelles tuiles -- voir
+    add_pack_regions pour AJOUTER des regions a un pack qui en a deja
+    (les extractions incrementales du futur outil "Extraire"). Cette
+    fonction reste "creer un pack tout neuf, remplacer un existant du
+    meme nom" (le comportement -- et les deux seuls appelants -- d'avant
+    ce changement).
 
     `columns` : le nombre de colonnes de la grille de decoupe d'origine
     (mode "pack", width_tiles au moment de l'enregistrement) -- utilise
@@ -94,6 +202,77 @@ def save_autotile_pack(pack_name, role, tileset, tiles, kind="autotile", columns
         "columns": columns,
         "tiles": [{"index": i, "rect": list(rect)} for i, rect in enumerate(tiles)],
     }
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+    return path
+
+
+def add_pack_regions(pack_name, tileset, new_rects, role=None, columns=None):
+    """Appends `new_rects` as brand-new, untagged regions to `pack_name`,
+    continuing its existing tile numbering -- creates the pack fresh
+    (kind=None, see save_autotile_pack's own note) if it doesn't exist yet,
+    otherwise preserves every already-tagged tile untouched. The primitive
+    the future "Extraire" tool needs (see this module's own top note):
+    unlike save_autotile_pack, which always creates-or-REPLACES a pack's
+    entire tiles list, this is "keep cropping into the same pack, one
+    region library per source image" -- extraction growing incrementally
+    across many separate crop actions in one editing session, not defined
+    up front in a single call.
+
+    Raises ValueError if `pack_name` already exists for a DIFFERENT
+    tileset -- a pack is scoped to exactly one source image throughout its
+    life; appending regions from another image would silently corrupt
+    that invariant every consumer (load_tileset_region calls against
+    payload["tileset"]) relies on.
+
+    Returns the list of newly-created tile indices, in the same order as
+    `new_rects` -- lets the caller immediately start tagging them (e.g.
+    jumping straight into direction/bitmask assignment for what was just
+    cropped)."""
+    payload = load_autotile_pack(pack_name)
+    if payload is None:
+        save_autotile_pack(pack_name, role, tileset, new_rects, columns=columns)
+        return list(range(len(new_rects)))
+
+    if payload.get("tileset") != tileset:
+        raise ValueError(f"'{pack_name}' est deja lie a un autre fichier source ({payload.get('tileset')}).")
+
+    tiles = payload.get("tiles", [])
+    start_index = len(tiles)
+    new_indices = []
+    for offset, rect in enumerate(new_rects):
+        index = start_index + offset
+        tiles.append({"index": index, "rect": list(rect)})
+        new_indices.append(index)
+    payload["tiles"] = tiles
+
+    path = get_autotile_pack_path(pack_name)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+    return new_indices
+
+
+def update_autotile_pack_meta(pack_name, **fields):
+    """Merges `fields` into a pack's own TOP-LEVEL metadata (kind/role/
+    columns) without touching its tiles -- the counterpart to
+    update_autotile_pack_tile(s) (which only ever touch one/several tiles'
+    own dicts). Lets a pack's vocation (kind) be assigned or changed AFTER
+    extraction, once it's clear what it's being used for, instead of only
+    ever being settable at creation time (see save_autotile_pack's own
+    note on why kind now defaults to None). Raises ValueError if the pack
+    doesn't exist. A field passed as None is stored as None (unlike
+    _merge_tile_fields' per-tile convention of POPPING on None) --
+    kind/role/columns are meaningful as an explicit null (e.g. "vocation
+    intentionally not yet decided"), there's no absent-vs-null distinction
+    worth making at the pack level the way there is for a single tile's
+    own optional tag."""
+    payload = load_autotile_pack(pack_name)
+    if payload is None:
+        raise ValueError(f"Pack inconnu : {pack_name}")
+
+    payload.update(fields)
+
+    path = get_autotile_pack_path(pack_name)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False)
     return path
@@ -188,8 +367,8 @@ def update_autotile_pack_tiles(pack_name, updates):
     return path
 
 def list_rooms():
-    """Names (no .json) of every saved room, sorted."""
-    return [path.stem for path in sorted(ROOMS_DIRECTORY.glob("*.json"))]
+    """Names (no .json) of every saved room in the active account, sorted."""
+    return [path.stem for path in sorted(rooms_directory().glob("*.json"))]
 
 
 def next_new_room_name():
@@ -202,8 +381,8 @@ def next_new_room_name():
 
 
 def list_donjons():
-    """Names (no .json) of every saved procedurally-assembled dungeon, sorted."""
-    return [path.stem for path in sorted(DONJONS_DIRECTORY.glob("*.json"))]
+    """Names (no .json) of every saved procedurally-assembled dungeon in the active account, sorted."""
+    return [path.stem for path in sorted(donjons_directory().glob("*.json"))]
 
 
 def next_new_donjon_name():
@@ -249,7 +428,7 @@ def _iter_room_payloads():
     instead of instantiating a Dungeon, since pack_references/
     type_references only ever need a couple of top-level fields."""
     for name in list_rooms():
-        path = ROOMS_DIRECTORY / f"{name}.json"
+        path = rooms_directory() / f"{name}.json"
         try:
             with path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
@@ -269,7 +448,7 @@ def _iter_donjon_room_payloads():
     room's own room_name) since that's the file a rename/delete cascade
     needs to rewrite."""
     for name in list_donjons():
-        path = DONJONS_DIRECTORY / f"{name}.json"
+        path = donjons_directory() / f"{name}.json"
         try:
             with path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
@@ -367,13 +546,13 @@ def rename_autotile_pack(old_name, new_name):
             payload["wall_theme"] = safe_new_name
             changed = True
         if changed:
-            with (ROOMS_DIRECTORY / f"{room_name}.json").open("w", encoding="utf-8") as handle:
+            with (rooms_directory() / f"{room_name}.json").open("w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, ensure_ascii=False)
 
     for donjon_name in list_donjons():
         if donjon_name not in affected_names:
             continue
-        donjon_path = DONJONS_DIRECTORY / f"{donjon_name}.json"
+        donjon_path = donjons_directory() / f"{donjon_name}.json"
         try:
             with donjon_path.open("r", encoding="utf-8") as handle:
                 donjon_payload = json.load(handle)

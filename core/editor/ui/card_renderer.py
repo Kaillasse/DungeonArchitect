@@ -6,6 +6,7 @@ import pygame
 
 from core.data.cards import CardManager, resolve_card_sprite, room_card_properties, card_completeness
 from core.world.object_manager import OBJECT_TYPES, ENEMY_ANIMATIONS, mob_kind
+from core.ui.fonts import get_font
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -136,8 +137,8 @@ class CardRenderer:
         surface = pygame.transform.scale(self._backing, (width, pixel_height)).copy()
         text_max_width = width - round(width * 0.1)
 
-        name_font = pygame.font.SysFont("arial", max(8, round(pixel_height * 0.09)), bold=True)
-        label_font = pygame.font.SysFont("arial", max(7, round(pixel_height * 0.055)))
+        name_font = get_font("title", max(8, round(pixel_height * 0.09)), bold=True)
+        label_font = get_font("text", max(7, round(pixel_height * 0.055)))
 
         name_surface = self._render_fitted(name_font, card.name, (25, 25, 25), text_max_width)
         surface.blit(name_surface, (width / 2 - name_surface.get_width() / 2, pixel_height * 0.05))

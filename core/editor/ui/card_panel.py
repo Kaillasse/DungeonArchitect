@@ -3,6 +3,7 @@
 import pygame
 
 from core.ui.widgets import BorderManager, RoomBrowser
+from core.ui.fonts import get_font
 from core.world.object_manager import OBJECT_TYPES, ITEM_DEFINITIONS, ENEMY_ANIMATIONS, mob_kind
 from core.data.cards import CardManager, room_name_from_card_id, parse_property_card_id
 from core.data.profile_manager import ADMINGOD_STOCK
@@ -47,16 +48,27 @@ class CardPanelUI(_ResizableCornerMixin):
     TABS = (("room", "Room pack"), ("carte", "Carte"), ("propriete", "Propriete"))
     TAB_HEIGHT = 28
 
-    def __init__(self, x, y, renderer):
+    def __init__(self, x, y, renderer, on_delete=None):
         self.x = x
         self.y = y
         self.width = self.STANDARD_WIDTH
 
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 16)
-        self.badge_font = pygame.font.SysFont("arial", 13, bold=True)
+        self.font = get_font("text", 16)
+        self.badge_font = get_font("button", 13, bold=True)
 
-        self.browser = RoomBrowser(x, y + 34, width=self.width)
+        # Delete is standard-mode (list) only -- right-click in enlarged/
+        # grid mode is already "hold to zoom" (see class docstring), a
+        # gesture conflict with a context menu. `on_delete` is owned by
+        # Creator (only it holds the active Profile a deletion needs to
+        # update -- see Creator._try_delete_owned_card), passed straight
+        # through to this RoomBrowser the same way every other browser's
+        # on_delete is wired throughout this project.
+        self.browser = RoomBrowser(x, y + 34, width=self.width, on_delete=on_delete)
+        # Feedback for a delete attempt (success or refusal, e.g. "still
+        # placed somewhere") -- see _render_standard. Set by whatever
+        # on_delete callback Creator wired in, cleared on next refresh().
+        self.status_text = ""
         self.detail_rect = pygame.Rect(x, self.browser.y + self.browser.height + 8, self.width, self.DETAIL_HEIGHT)
         # Standard mode's own total height, from the panel's own y down to
         # the bottom of the detail box -- also the minimum height a resize
@@ -188,7 +200,11 @@ class CardPanelUI(_ResizableCornerMixin):
         Creator to hand one back in."""
         indices = [i for i, cid in enumerate(self._all_card_ids) if self._tab_bucket(cid) == self._tab]
         self._card_ids = [self._all_card_ids[i] for i in indices]
-        self.browser.set_rooms([self._all_entries[i] for i in indices])
+        # (label, card_id) tuples, not bare label strings -- RoomBrowser's
+        # own on_delete/on_rename need the raw id (see _room_name_for_
+        # context/_value), same convention every other browser in this
+        # project already uses for exactly this reason.
+        self.browser.set_rooms([(self._all_entries[i], self._all_card_ids[i]) for i in indices])
         self._owned = [pair for pair in self._all_owned if self._tab_bucket(pair[0]) == self._tab]
         self._owned_counts = {
             cid: count for cid, count in self._all_owned_counts.items() if self._tab_bucket(cid) == self._tab
@@ -425,6 +441,18 @@ class CardPanelUI(_ResizableCornerMixin):
         else:
             hint = self.font.render("Selectionnez une carte", True, (150, 150, 150))
             screen.blit(hint, (self.detail_rect.x + 8, self.detail_rect.y + 6))
+
+        if self.status_text:
+            # Overlays the detail box's own last line -- shown regardless
+            # of whether a delete just cleared the selection (falls to the
+            # "Selectionnez une carte" branch above) or merely got refused
+            # (selection untouched, the normal card-detail lines above
+            # still render) -- a fixed position is the only one that works
+            # for both.
+            status = self.font.render(self.status_text, True, (255, 220, 120))
+            status_bg = pygame.Rect(self.detail_rect.x, self.detail_rect.bottom - 22, self.detail_rect.width, 22)
+            pygame.draw.rect(screen, (30, 30, 30), status_bg)
+            screen.blit(status, (status_bg.x + 8, status_bg.y + 3))
 
     def _render_grid(self, screen):
         area = self._grid_area_rect()

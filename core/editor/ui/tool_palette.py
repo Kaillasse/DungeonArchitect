@@ -3,6 +3,7 @@
 import pygame
 
 from core.ui.widgets import BorderManager
+from core.ui.fonts import get_font
 
 
 class ToolPaletteUI:
@@ -28,7 +29,7 @@ class ToolPaletteUI:
         self.x = 10
         self.y = 10
 
-        self.font = pygame.font.SysFont("arial", 18)
+        self.font = get_font("button", 18)
 
         self.border = BorderManager()
 

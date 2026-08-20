@@ -36,8 +36,21 @@ class WorldRenderer:
         self.tileset = load_tileset()
         self._tile_cache = {}
         self._pack_tile_cache = {}
+        # Native (unscaled, TILE_SIZE-px), zoom-independent tile caches used
+        # by the terrain composite path -- see _get_native_tile/
+        # _get_pack_tile_native and render()'s own comment on why the floor/
+        # wall grid composites at a fixed native resolution instead of
+        # scaling each tile to the current (possibly continuously changing)
+        # zoom. Never invalidated by a zoom change at all, unlike
+        # _tile_cache/_pack_tile_cache above (still used by _render_border's
+        # own, still per-tile-rounded, ledge pass).
+        self._native_tile_cache = {}
+        self._pack_tile_native_cache = {}
+        # Same native/zoom-independent idea, for the object-composite path
+        # (_draw_objects/_draw_pillar_tops) -- see _get_object_sprite_native.
+        self._object_sprite_native_cache = {}
+        self._pillar_top_native = None
         self._object_sprites = {}
-        self._object_sprite_cache = {}
         # (doorway_cells, spawn_cells, pillars), cached against the
         # objects_version they were computed from -- see
         # _get_objects_derived. A WorldRenderer is always owned 1:1 by
@@ -50,10 +63,10 @@ class WorldRenderer:
         # see _get_ledge_cells.
         self._ledge_cache = None
 
-    def _get_object_frames(self, object_type, variant=None):
-        cache_key = (object_type, variant)
+    def _get_object_frames(self, object_type, variant=None, direction=None):
+        cache_key = (object_type, variant, direction)
         if cache_key not in self._object_sprites:
-            self._object_sprites[cache_key] = load_object_frames(object_type, variant)
+            self._object_sprites[cache_key] = load_object_frames(object_type, variant, direction)
         return self._object_sprites[cache_key]
 
     def _get_scaled_tile(self, tile_index, tile_px, columns):
@@ -91,6 +104,43 @@ class WorldRenderer:
                 surface = pygame.transform.scale(region, (tile_px, tile_px))
             self._pack_tile_cache[cache_key] = surface
         return self._pack_tile_cache[cache_key]
+
+    def _get_native_tile(self, tile_index, columns):
+        """Unscaled (native TILE_SIZE-px) tile surface, cached by tile_index
+        alone -- see _composite_tile_grid for why the terrain grid composites
+        at this fixed native size instead of scaling each tile to the
+        current zoom. Zoom-independent, so unlike _get_scaled_tile this
+        cache is never invalidated by a zoom change at all."""
+        if tile_index not in self._native_tile_cache:
+            self._native_tile_cache[tile_index] = get_tile_surface(
+                self.tileset, tile_index, tile_size=TILE_SIZE, columns=columns,
+            )
+        return self._native_tile_cache[tile_index]
+
+    def _get_pack_tile_native(self, pack_name, tile_index):
+        """Native-size counterpart to _get_pack_tile_surface -- same source
+        region, scaled once to the fixed TILE_SIZE composite pitch instead
+        of to the current zoom's tile_px. See _get_native_tile's own
+        docstring; same invalidation story as _get_pack_tile_surface
+        (never invalidated by a bitmask/variant edit, only by the tileset
+        region itself changing, which core.data.ressources never does to
+        an existing pack entry)."""
+        cache_key = (pack_name, tile_index)
+        if cache_key not in self._pack_tile_native_cache:
+            payload = load_autotile_pack(pack_name)
+            tiles = payload.get("tiles", []) if payload else []
+            if payload is None or not (0 <= tile_index < len(tiles)):
+                surface = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+            else:
+                region = load_tileset_region(payload["tileset"], tiles[tile_index]["rect"])
+                surface = pygame.transform.scale(region, (TILE_SIZE, TILE_SIZE))
+            self._pack_tile_native_cache[cache_key] = surface
+        return self._pack_tile_native_cache[cache_key]
+
+    def _get_tile_surface_native(self, tile_index, pack_name, columns):
+        if pack_name is not None:
+            return self._get_pack_tile_native(pack_name, tile_index)
+        return self._get_native_tile(tile_index, columns)
 
     def _get_tile_surface(self, dungeon, tile_index, pack_name, tile_px, columns):
         """Dispatches to a themed pack tile or the default interior tileset
@@ -151,12 +201,16 @@ class WorldRenderer:
         # screen position from one shared, already-rounded origin plus an
         # integer multiple of this same tile_px guarantees adjacent tiles
         # are always exactly contiguous, no matter the zoom.
-        tile_px = round(tile_size * zoom)
+        #
+        # tile_px/origin both come from _tile_grid_origin -- see its own
+        # docstring for why origin must be derived from tile_px's rounded
+        # scale rather than camera.world_to_screen's raw one. Still used
+        # below for viewport culling and by everything BUT the terrain grid
+        # itself (_composite_tile_grid renders that with its own,
+        # non-per-tile-rounded scheme -- see its own docstring).
+        tile_px, origin_x, origin_y = self._tile_grid_origin(dungeon, camera)
         columns = self.tileset.get_width() // TILE_SIZE
         doorway_cells, spawn_cells, _pillars = self._get_objects_derived(dungeon)
-
-        origin_x, origin_y = camera.world_to_screen(0, 0)
-        origin_x, origin_y = round(origin_x), round(origin_y)
 
         # Viewport culling: only the cells that could actually land on
         # screen, instead of every cell in the room regardless of zoom/
@@ -166,46 +220,10 @@ class WorldRenderer:
         x_start, x_end = self._visible_range(origin_x, tile_px, screen.get_width(), dungeon.width)
         y_start, y_end = self._visible_range(origin_y, tile_px, screen.get_height(), dungeon.height)
 
-        for y in range(y_start, y_end):
-            row = dungeon.sprite_grid[y]
-            for x in range(x_start, x_end):
-                tile_index = row[x]
-                if tile_index < 0:
-                    continue
-
-                # A doorway override renders as FLOOR-styled art over what's
-                # normally a WALL cell (see _footprint_cells' own docstring
-                # -- cosmetic only, the logical cell underneath stays WALL)
-                # -- but only when the cell actually IS a WALL cell today.
-                # Checking the real grid value here (not assuming based on
-                # which cell is the anchor) is what keeps this correct for a
-                # multi-cell custom "porte": only its anchor cell is ever
-                # required to BE a wall (see ObjectManager._anchor_cell) --
-                # every other cell of its footprint can land on FLOOR, WALL,
-                # or anything else, so whether IT needs the override too is
-                # genuinely per-cell, not something the object's shape alone
-                # decides. A spawn cell is always FLOOR to begin with (see OBJECT_TYPES
-                # ["spawn"]'s placement) -- its own override is a cosmetic
-                # tile swap unrelated to WALL/FLOOR authenticity, so it stays
-                # unconditional. The pack used by either override is
-                # dungeon.floor_theme (the current brush) -- theme_grid has
-                # no single "the room's floor pack" to fall back on since
-                # different floor cells can carry different packs; this is a
-                # narrow cosmetic edge case, not the per-cell painting path.
-                if (x, y) in doorway_cells and dungeon.logical_grid[y][x] == WALL:
-                    tile_index = self._floor_override_index(dungeon)
-                    pack_name = dungeon.floor_theme
-                elif (x, y) in spawn_cells:
-                    if dungeon.floor_theme is not None:
-                        tile_index = self._floor_override_index(dungeon)
-                    else:
-                        tile_index = self.SPAWN_FLOOR_SPRITE
-                    pack_name = dungeon.floor_theme
-                else:
-                    pack_name = dungeon.theme_grid[y][x]
-
-                scaled = self._get_tile_surface(dungeon, tile_index, pack_name, tile_px, columns)
-                screen.blit(scaled, (origin_x + x * tile_px, origin_y + y * tile_px))
+        self._composite_tile_grid(
+            screen, dungeon, camera, columns, doorway_cells, spawn_cells,
+            x_start, x_end, y_start, y_end,
+        )
 
         self._draw_objects(
             screen, dungeon, camera,
@@ -251,6 +269,82 @@ class WorldRenderer:
         if show_link_indicators:
             self._draw_link_indicators(screen, dungeon, camera)
 
+    def _composite_tile_grid(
+        self, screen, dungeon, camera, columns, doorway_cells, spawn_cells, x_start, x_end, y_start, y_end,
+    ):
+        """Draws the floor/wall grid for [x_start, x_end) x [y_start, y_end)
+        as ONE continuously-scaled image instead of many individually
+        pixel-rounded tile blits (see render()'s own long comment on
+        tile_px for the original gap-flicker problem that rounding fixed).
+
+        Every visible tile is first composited at its fixed NATIVE size
+        (TILE_SIZE, unscaled -- always exactly contiguous with its
+        neighbors, nothing to round) onto one offscreen surface, which is
+        then scaled ONCE using the camera's raw, continuous zoom and
+        blitted at a single screen position. Rounding only happens twice
+        per frame here (the composite's overall pixel size, and its one
+        blit position) instead of once per visible tile -- so position
+        error is bounded to about half a pixel, total, rather than about
+        half a pixel PER CELL multiplied by that cell's distance from the
+        camera's corner. That distance-amplified error (a tile 20 cells
+        out could be off by ~10px) is what made the whole world visibly
+        tremble while the co-op shared camera's zoom-to-fit eased
+        continuously for about a second on every zoom change -- worse the
+        farther apart the players (and so the more zoomed out, wider-area
+        the shared view) were. Fixed 2026-08-18; see _tile_grid_origin's
+        own docstring for a smaller, earlier fix along the same lines that
+        wasn't sufficient by itself.
+
+        Placed OBJECTS (walls-as-decoration, doors, chests...) still use
+        the older per-object tile_px scheme (_draw_objects) -- terrain is
+        the dominant visual mass, so it's fixed first; objects are a
+        smaller, sparser follow-up if they turn out to still be
+        noticeable."""
+        if x_end <= x_start or y_end <= y_start:
+            return
+
+        composite_w = (x_end - x_start) * TILE_SIZE
+        composite_h = (y_end - y_start) * TILE_SIZE
+        composite = pygame.Surface((composite_w, composite_h), pygame.SRCALPHA)
+
+        for y in range(y_start, y_end):
+            row = dungeon.sprite_grid[y]
+            for x in range(x_start, x_end):
+                tile_index = row[x]
+                if tile_index < 0:
+                    continue
+
+                # See render()'s previous version of this same override
+                # logic for the full doorway/spawn-cosmetic-override
+                # reasoning -- unchanged, just now filling the composite
+                # instead of blitting straight to screen.
+                if (x, y) in doorway_cells and dungeon.logical_grid[y][x] == WALL:
+                    tile_index = self._floor_override_index(dungeon)
+                    pack_name = dungeon.floor_theme
+                elif (x, y) in spawn_cells:
+                    if dungeon.floor_theme is not None:
+                        tile_index = self._floor_override_index(dungeon)
+                    else:
+                        tile_index = self.SPAWN_FLOOR_SPRITE
+                    pack_name = dungeon.floor_theme
+                else:
+                    pack_name = dungeon.theme_grid[y][x]
+
+                tile_surface = self._get_tile_surface_native(tile_index, pack_name, columns)
+                composite.blit(tile_surface, ((x - x_start) * TILE_SIZE, (y - y_start) * TILE_SIZE))
+
+        # dungeon.tile_size / TILE_SIZE recovers WORLD_SCALE (16px source
+        # art rendered at 2x) without importing it separately -- consistent
+        # with how tile_px = round(dungeon.tile_size * zoom) already folds
+        # it in elsewhere in this file.
+        effective_scale = camera.zoom * (dungeon.tile_size / TILE_SIZE)
+        target_w = max(1, round(composite_w * effective_scale))
+        target_h = max(1, round(composite_h * effective_scale))
+        scaled = pygame.transform.scale(composite, (target_w, target_h))
+
+        dest_x, dest_y = camera.world_to_screen(x_start * dungeon.tile_size, y_start * dungeon.tile_size)
+        screen.blit(scaled, (round(dest_x), round(dest_y)))
+
     def _render_border(self, screen, dungeon, camera, hide_border_cells=None):
         """The south-edge ledge tile (see BORDER_TILE_INDEX's own docstring)
         -- player-facing now, not just an F3 debug aid, so both render()
@@ -259,21 +353,50 @@ class WorldRenderer:
         that's a SEPARATE pass rather than just calling this from inside
         render()) can call it independently of show_grid, which now only
         gates the literal debug grid LINES."""
-        zoom = camera.zoom
-        tile_size = dungeon.tile_size
-        tile_px = round(tile_size * zoom)
+        # Composited natively then scaled+blitted once -- same reasoning as
+        # _composite_tile_grid/_draw_objects/_draw_pillar_tops (2026-08-18):
+        # per-tile rounded positioning amplified into visible trembling,
+        # proportional to distance from the camera, during a continuously
+        # changing zoom. Bounding box over only the VISIBLE ledge cells
+        # (not the whole viewport, not the whole dungeon) -- a long south
+        # wall can span a wide area, but it's still capped by the screen-
+        # bounded visible range, same as every other composite pass here.
+        tile_px, origin_x, origin_y = self._tile_grid_origin(dungeon, camera)
         columns = self.tileset.get_width() // TILE_SIZE
-        origin_x, origin_y = camera.world_to_screen(0, 0)
-        origin_x, origin_y = round(origin_x), round(origin_y)
+        x_start, x_end = self._visible_range(origin_x, tile_px, screen.get_width(), dungeon.width)
+        y_start, y_end = self._visible_range(origin_y, tile_px, screen.get_height(), dungeon.height)
+        if x_end <= x_start or y_end <= y_start:
+            return
 
         hide_border_cells = hide_border_cells or ()
         ledge_source_cells = self._get_ledge_cells(dungeon)
-        scaled_ledge = self._get_scaled_tile(self.BORDER_TILE_INDEX, tile_px, columns)
-        for x, y in ledge_source_cells:
-            if (x, y) in hide_border_cells:
-                continue
-            south_y = y + 1
-            screen.blit(scaled_ledge, (origin_x + x * tile_px, origin_y + south_y * tile_px))
+
+        visible_ledges = [
+            (x, y + 1) for x, y in ledge_source_cells
+            if (x, y) not in hide_border_cells and x_start <= x < x_end and y_start <= y + 1 < y_end
+        ]
+        if not visible_ledges:
+            return
+
+        min_x = min(x for x, _ in visible_ledges)
+        max_x = max(x for x, _ in visible_ledges)
+        min_y = min(y for _, y in visible_ledges)
+        max_y = max(y for _, y in visible_ledges)
+
+        composite_w = (max_x - min_x + 1) * TILE_SIZE
+        composite_h = (max_y - min_y + 1) * TILE_SIZE
+        composite = pygame.Surface((composite_w, composite_h), pygame.SRCALPHA)
+
+        native_ledge = self._get_native_tile(self.BORDER_TILE_INDEX, columns)
+        for x, south_y in visible_ledges:
+            composite.blit(native_ledge, ((x - min_x) * TILE_SIZE, (south_y - min_y) * TILE_SIZE))
+
+        effective_scale = camera.zoom * (dungeon.tile_size / TILE_SIZE)
+        target_w = max(1, round(composite_w * effective_scale))
+        target_h = max(1, round(composite_h * effective_scale))
+        scaled = pygame.transform.scale(composite, (target_w, target_h))
+        dest_x, dest_y = camera.world_to_screen(min_x * dungeon.tile_size, min_y * dungeon.tile_size)
+        screen.blit(scaled, (round(dest_x), round(dest_y)))
 
     def render_border(self, screen, dungeon, camera, hide_border_cells=None):
         """Public entry point for a SEPARATE border-only pass -- see
@@ -396,10 +519,47 @@ class WorldRenderer:
         tile grid itself is already snapped to this same origin+tile_px
         scheme but a lone per-object call wasn't. Deriving every position
         from one shared, already-rounded origin plus an integer multiple of
-        the same tile_px keeps objects glued to the grid at any zoom."""
-        tile_px = round(dungeon.tile_size * camera.zoom)
-        origin_x, origin_y = camera.world_to_screen(0, 0)
-        return tile_px, round(origin_x), round(origin_y)
+        the same tile_px keeps objects glued to the grid at any zoom.
+
+        origin is derived from tile_px's own effective (rounded) scale --
+        tile_px / dungeon.tile_size -- NOT camera.world_to_screen's raw
+        camera.zoom (fixed 2026-08-18: it used to be). Mixing the two meant
+        a cell's actual rendered offset was origin(raw zoom) + index *
+        tile_px(rounded zoom): the gap between "raw" and "rounded" zoom is
+        at most 0.5 tile_px, but that gap gets multiplied by the cell
+        index, so a tile 20 cells from the origin could sit up to ~10px
+        off from where continuous, unrounded math would put it -- and
+        that error swings through its full range every time zoom moves by
+        one whole tile_px step. Static zoom (manual mouse-wheel, one step
+        then still) made this a single imperceptible snap; the co-op
+        shared camera's zoom-to-fit (Explorator._update_shared_camera)
+        eases zoom continuously for about a second, sweeping through that
+        error dozens of times a second -- which is what actually read as
+        the world trembling/juddering during a zoom transition (entities
+        never showed it: core.world.entities draws them from raw
+        camera.zoom throughout, with nothing else to be inconsistent
+        with). Deriving origin from the SAME rounded scale as tile_px
+        makes the two always agree, so the only motion left when tile_px
+        ticks by one is the real, single-pixel-per-cell rescale a zoom
+        step actually is -- no added wobble on top of it.
+
+        Rescales camera.world_to_screen(0, 0)'s own raw-zoom answer by
+        (effective_zoom / camera.zoom) rather than reaching into camera.x/
+        camera.y directly -- core.world.assembly's _OffsetCamera/
+        _ZoomOnlyCamera (multi-room rendering) only implement zoom/
+        world_to_screen, no x/y, and world_to_screen(0, 0) is always some
+        fixed reference point R transformed as (0 - R) * zoom for every
+        camera shape actually used here, so multiplying by the zoom ratio
+        is equivalent to redoing that same transform at effective_zoom
+        instead, for any of them."""
+        zoom = camera.zoom
+        tile_px = round(dungeon.tile_size * zoom)
+        effective_zoom = tile_px / dungeon.tile_size
+        raw_origin_x, raw_origin_y = camera.world_to_screen(0, 0)
+        scale_ratio = effective_zoom / zoom
+        origin_x = round(raw_origin_x * scale_ratio)
+        origin_y = round(raw_origin_y * scale_ratio)
+        return tile_px, origin_x, origin_y
 
     @staticmethod
     def _visible_range(origin, tile_px, screen_extent, count):
@@ -417,10 +577,59 @@ class WorldRenderer:
         end = min(count, (screen_extent - origin) // tile_px + 2)
         return start, end
 
+    def _get_object_sprite_native(self, obj_type, variant, direction, frame_index, size_cells_x, size_cells_y):
+        """Unscaled-to-zoom (TILE_SIZE-per-cell) object sprite, cached by
+        (type, variant, direction, frame, footprint size) -- the object
+        composite path's counterpart to _get_native_tile/_get_pack_tile_
+        native. See _draw_objects for why objects composite at this fixed
+        native resolution and get scaled once, continuously, instead of
+        each being individually scaled/rounded to the current zoom (that
+        was the exact same distance-amplified trembling the terrain grid
+        had, just for placed objects -- fixed 2026-08-18, same day as
+        terrain, once it turned out to be MORE noticeable once terrain
+        stopped moving relative to it). `direction` (NPC_DIRECTIONS, or
+        None) selects one frame_rects entry out of a type's own
+        `directions` mapping -- see load_object_frames -- orthogonal to
+        `variant` (torch-style alternate assets), never both at once in
+        practice."""
+        cache_key = (obj_type, variant, direction, frame_index, size_cells_x, size_cells_y)
+        if cache_key not in self._object_sprite_native_cache:
+            frames = self._get_object_frames(obj_type, variant, direction)
+            frame_index = min(frame_index, len(frames) - 1)
+            size = (size_cells_x * TILE_SIZE, size_cells_y * TILE_SIZE)
+            sprite = pygame.transform.scale(frames[frame_index], size)
+            if variant == "flip":
+                # Stairs only (Phase 6a): a single stairs.png asset,
+                # mirrored horizontally instead of shipping a second file --
+                # the cache key already varies by variant, so the flipped
+                # surface is cached separately from the unflipped one.
+                sprite = pygame.transform.flip(sprite, True, False)
+            self._object_sprite_native_cache[cache_key] = sprite
+        return self._object_sprite_native_cache[cache_key]
+
     def _draw_objects(self, screen, dungeon, camera, hide_object_types=None, foreground_only=False, skip_foreground=False):
+        """Composites every visible placed object onto one native-resolution
+        offscreen surface (same TILE_SIZE-per-cell pitch _composite_tile_grid
+        uses for terrain), then scales that whole surface once, continuously,
+        and blits it in a single call -- see _composite_tile_grid's own
+        docstring for the full reasoning (distance-from-camera-amplified
+        rounding error during a continuously-changing zoom). Objects used to
+        each be individually scaled/positioned via origin + cell_index *
+        tile_px (a per-object rounding, same shape of bug the terrain grid
+        had); doing that per object instead of once for the whole visible
+        set was strictly worse, not better, since there are usually MANY
+        objects across a room's whole visible span."""
         hide_object_types = hide_object_types or ()
         tile_px, origin_x, origin_y = self._tile_grid_origin(dungeon, camera)
-        screen_w, screen_h = screen.get_width(), screen.get_height()
+        x_start, x_end = self._visible_range(origin_x, tile_px, screen.get_width(), dungeon.width)
+        y_start, y_end = self._visible_range(origin_y, tile_px, screen.get_height(), dungeon.height)
+        if x_end <= x_start or y_end <= y_start:
+            return
+
+        composite_w = (x_end - x_start) * TILE_SIZE
+        composite_h = (y_end - y_start) * TILE_SIZE
+        composite = pygame.Surface((composite_w, composite_h), pygame.SRCALPHA)
+        drew_anything = False
 
         for obj in dungeon.object_manager.objects:
             if obj["type"] in hide_object_types:
@@ -429,20 +638,14 @@ class WorldRenderer:
             config = OBJECT_TYPES[obj["type"]]
             size_cells_x, size_cells_y = config["size"]
 
-            # Viewport culling -- an object's footprint depends only on its
-            # position/size, never its frame/variant, so this can be
-            # checked before touching the sprite cache (or loading frames
-            # from disk on a cache miss) at all. Anchored to the
-            # footprint's left/top edge, same as the blit position below
-            # (left_x, top_y = origin_x + obj["x"]*tile_px, origin_y +
-            # obj["y"]*tile_px -- scaled_sprite is always scaled to exactly
-            # size_cells*tile_px, so this is the same position the old
-            # bottom_y-then-subtract-height computation always landed on).
-            left_x = origin_x + obj["x"] * tile_px
-            top_y = origin_y + obj["y"] * tile_px
+            # Viewport culling in CELL space against the same [x_start,
+            # x_end) x [y_start, y_end) window terrain uses -- an object's
+            # footprint depends only on its position/size, never its
+            # frame/variant, so this is checked before touching the sprite
+            # cache (or loading frames from disk on a cache miss) at all.
             if (
-                left_x + size_cells_x * tile_px <= 0 or left_x >= screen_w
-                or top_y + size_cells_y * tile_px <= 0 or top_y >= screen_h
+                obj["x"] + size_cells_x <= x_start or obj["x"] >= x_end
+                or obj["y"] + size_cells_y <= y_start or obj["y"] >= y_end
             ):
                 continue
 
@@ -461,47 +664,49 @@ class WorldRenderer:
                 if skip_foreground and is_foreground:
                     continue
 
-            frames = self._get_object_frames(obj["type"], obj.get("variant"))
+            frames = self._get_object_frames(obj["type"], obj.get("variant"), obj.get("direction"))
             frame_index = min(obj.get("frame", 0), len(frames) - 1)
+            native_sprite = self._get_object_sprite_native(
+                obj["type"], obj.get("variant"), obj.get("direction"), frame_index, size_cells_x, size_cells_y,
+            )
 
-            cache_key = (obj["type"], obj.get("variant"), frame_index, tile_px)
-            scaled_sprite = self._object_sprite_cache.get(cache_key)
-            if scaled_sprite is None:
-                size = (size_cells_x * tile_px, size_cells_y * tile_px)
-                scaled_sprite = pygame.transform.scale(frames[frame_index], size)
-                if obj.get("variant") == "flip":
-                    # Stairs only (Phase 6a): a single stairs.png asset,
-                    # mirrored horizontally instead of shipping a second
-                    # file, when ObjectManager._stairs_orientation found the
-                    # floor it's facing to the west -- the cache key above
-                    # already varies by variant, so the flipped surface is
-                    # cached separately from the unflipped one for free.
-                    scaled_sprite = pygame.transform.flip(scaled_sprite, True, False)
-                self._object_sprite_cache[cache_key] = scaled_sprite
+            local_x = (obj["x"] - x_start) * TILE_SIZE
+            local_y = (obj["y"] - y_start) * TILE_SIZE
 
             if cell_modes is not None:
-                self._draw_object_cells(
-                    screen, scaled_sprite, cell_modes, size_cells_x, size_cells_y,
-                    left_x, top_y, tile_px, foreground_only, skip_foreground,
+                self._composite_object_cells(
+                    composite, native_sprite, cell_modes, size_cells_x, size_cells_y,
+                    local_x, local_y, foreground_only, skip_foreground,
                 )
-                continue
+            else:
+                composite.blit(native_sprite, (local_x, local_y))
+            drew_anything = True
 
-            screen.blit(scaled_sprite, (left_x, top_y))
+        if not drew_anything:
+            return
 
-    def _draw_object_cells(
-        self, screen, scaled_sprite, cell_modes, size_cells_x, size_cells_y,
-        left_x, top_y, tile_px, foreground_only, skip_foreground,
+        effective_scale = camera.zoom * (dungeon.tile_size / TILE_SIZE)
+        target_w = max(1, round(composite_w * effective_scale))
+        target_h = max(1, round(composite_h * effective_scale))
+        scaled = pygame.transform.scale(composite, (target_w, target_h))
+        dest_x, dest_y = camera.world_to_screen(x_start * dungeon.tile_size, y_start * dungeon.tile_size)
+        screen.blit(scaled, (round(dest_x), round(dest_y)))
+
+    def _composite_object_cells(
+        self, composite, native_sprite, cell_modes, size_cells_x, size_cells_y,
+        local_x, local_y, foreground_only, skip_foreground,
     ):
-        """Splits one already-scaled object sprite into its individual
-        size_cells_x x size_cells_y cell-sized pieces, each blitted
-        separately (Surface.blit's `area` crops the source) so DIFFERENT
-        cells of the SAME object can land in different render passes --
-        "front" cells only in the foreground pass (after the player, like
-        an L/R torch), "block"/"behind" cells only in the normal pass
-        (before the player) -- matching the per-cell walkable+draw-order
-        the sprite editor's multi-tile grid assigns (see
-        core.world.object_manager.CELL_MODES/cell_mode). Neither filter
-        active (Creator's single combined pass) draws every cell."""
+        """Native-composite counterpart to the old _draw_object_cells:
+        splits one already-native-scaled object sprite into its individual
+        TILE_SIZE-sized cell pieces onto `composite` at LOCAL (composite-
+        relative) coordinates, instead of directly onto the screen at
+        absolute (tile_px-scaled) ones. Same per-cell front/behind/block
+        filtering as before -- "front" cells only in the foreground pass
+        (after the player, like an L/R torch), "block"/"behind" cells only
+        in the normal pass (before the player), matching the sprite
+        editor's multi-tile grid (core.world.object_manager.CELL_MODES/
+        cell_mode). Neither filter active (Creator's single combined pass)
+        draws every cell."""
         for row in range(size_cells_y):
             row_modes = cell_modes[row] if row < len(cell_modes) else ()
             for col in range(size_cells_x):
@@ -511,9 +716,9 @@ class WorldRenderer:
                     continue
                 if skip_foreground and is_front:
                     continue
-                source_rect = pygame.Rect(col * tile_px, row * tile_px, tile_px, tile_px)
-                dest = (left_x + col * tile_px, top_y + row * tile_px)
-                screen.blit(scaled_sprite, dest, area=source_rect)
+                source_rect = pygame.Rect(col * TILE_SIZE, row * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+                dest = (local_x + col * TILE_SIZE, local_y + row * TILE_SIZE)
+                composite.blit(native_sprite, dest, area=source_rect)
 
     def _draw_pillar_tops(self, screen, dungeon, camera, hide_object_types=None):
         """Every pillar's decorative top half, one cell north of wherever
@@ -532,18 +737,49 @@ class WorldRenderer:
         if not pillars:
             return
 
+        # Composited natively (like _draw_objects/_composite_tile_grid) then
+        # scaled+blitted once -- tight bounding box around only the VISIBLE
+        # pillar tops (not the whole viewport, and not the whole dungeon):
+        # pillars are typically sparse, so a full-viewport composite would
+        # be wasteful, but a bounding box over every pillar in a large room
+        # regardless of visibility could span the whole room. Filtering to
+        # visible ones first keeps this both small and safe.
         tile_px, origin_x, origin_y = self._tile_grid_origin(dungeon, camera)
+        x_start, x_end = self._visible_range(origin_x, tile_px, screen.get_width(), dungeon.width)
+        y_start, y_end = self._visible_range(origin_y, tile_px, screen.get_height(), dungeon.height)
 
-        cache_key = ("pillar", "top", 0, tile_px)
-        sprite = self._object_sprite_cache.get(cache_key)
-        if sprite is None:
+        visible_tops = [
+            (obj["x"], obj["y"] - 1) for obj in pillars
+            if x_start <= obj["x"] < x_end and y_start <= obj["y"] - 1 < y_end
+        ]
+        if not visible_tops:
+            return
+
+        min_x = min(x for x, _ in visible_tops)
+        max_x = max(x for x, _ in visible_tops)
+        min_y = min(y for _, y in visible_tops)
+        max_y = max(y for _, y in visible_tops)
+
+        composite_w = (max_x - min_x + 1) * TILE_SIZE
+        composite_h = (max_y - min_y + 1) * TILE_SIZE
+        composite = pygame.Surface((composite_w, composite_h), pygame.SRCALPHA)
+
+        native_sprite = self._get_pillar_top_native()
+        for top_x, top_y in visible_tops:
+            composite.blit(native_sprite, ((top_x - min_x) * TILE_SIZE, (top_y - min_y) * TILE_SIZE))
+
+        effective_scale = camera.zoom * (dungeon.tile_size / TILE_SIZE)
+        target_w = max(1, round(composite_w * effective_scale))
+        target_h = max(1, round(composite_h * effective_scale))
+        scaled = pygame.transform.scale(composite, (target_w, target_h))
+        dest_x, dest_y = camera.world_to_screen(min_x * dungeon.tile_size, min_y * dungeon.tile_size)
+        screen.blit(scaled, (round(dest_x), round(dest_y)))
+
+    def _get_pillar_top_native(self):
+        if self._pillar_top_native is None:
             frames = self._get_object_frames("pillar", "top")
-            sprite = pygame.transform.scale(frames[0], (tile_px, tile_px))
-            self._object_sprite_cache[cache_key] = sprite
-
-        for obj in pillars:
-            top_x, top_y = obj["x"], obj["y"] - 1
-            screen.blit(sprite, (origin_x + top_x * tile_px, origin_y + top_y * tile_px))
+            self._pillar_top_native = pygame.transform.scale(frames[0], (TILE_SIZE, TILE_SIZE))
+        return self._pillar_top_native
 
     def _draw_link_indicators(self, screen, dungeon, camera):
         for obj in dungeon.object_manager.objects:

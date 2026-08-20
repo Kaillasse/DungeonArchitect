@@ -9,11 +9,12 @@ import pygame
 from core.world.dungeon import Dungeon, corner_cells
 from core.editor.autotile import FLOOR
 from core.world.assembly import load_assembly, save_assembly, generate_assembly
-from core.data.ressources import ROOMS_DIRECTORY, next_new_donjon_name
+from core.data.ressources import rooms_directory, next_new_donjon_name
 from core.world.entities import Player, PlayerRef, _bucket_direction, _spawn_loot_pickups
 from core.world.object_manager import (
     mob_types, ITEM_DEFINITIONS, make_item, OBJECT_TYPES,
 )
+from core.ui.fonts import get_font
 from core.exploration.player_session import PlayerSession
 from core.exploration.multiplayer_ui import MultiplayerPanelUI
 from core.exploration.network_session import NetworkSessionMixin
@@ -1196,7 +1197,7 @@ class Explorator(NetworkSessionMixin):
 
     def load_spawn_room(self):
 
-        rooms = sorted(ROOMS_DIRECTORY.glob("*.json"))
+        rooms = sorted(rooms_directory().glob("*.json"))
 
         if not rooms:
             print("Aucune salle trouvée.")
@@ -1941,7 +1942,7 @@ class Explorator(NetworkSessionMixin):
             return
 
         if self._chat_font is None:
-            self._chat_font = pygame.font.SysFont("arial", 16)
+            self._chat_font = get_font("text", 16)
         text = f"En attente des autres joueurs : {ready_count}/{total} prets"
         surface = self._chat_font.render(text, True, (255, 255, 255))
         x = self.screen.get_width() / 2 - surface.get_width() / 2
@@ -1962,7 +1963,7 @@ class Explorator(NetworkSessionMixin):
         if not self.chat_log and not self.chat_open:
             return
         if self._chat_font is None:
-            self._chat_font = pygame.font.SysFont("arial", 16)
+            self._chat_font = get_font("text", 16)
         font = self._chat_font
 
         x = 12
@@ -2100,14 +2101,14 @@ class Explorator(NetworkSessionMixin):
         overlay.fill((0, 0, 0, 120))
         self.screen.blit(overlay, (0, 0))
 
-        font = pygame.font.SysFont("arial", 64)
+        font = get_font("title", 64)
         text = font.render("VICTOIRE !", True, (255, 220, 90))
         rect = text.get_rect(center=(self.screen.get_width() / 2, self.screen.get_height() / 2 - 140))
         self.screen.blit(text, rect)
 
         self._draw_victory_found_cards(rect.bottom + 30)
 
-        hint_font = pygame.font.SysFont("arial", 20)
+        hint_font = get_font("text", 20)
         hint = hint_font.render(
             "Cliquez pour rentrer au home -- ces cartes rejoignent votre collection", True, (230, 230, 230),
         )
@@ -2138,7 +2139,7 @@ class Explorator(NetworkSessionMixin):
             return
 
         max_row_width = self.screen.get_width() - 80
-        badge_font = pygame.font.SysFont("arial", 15, bold=True)
+        badge_font = get_font("text", 15, bold=True)
 
         rows = []
         current_row = []

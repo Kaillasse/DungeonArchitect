@@ -6,7 +6,7 @@ Explorator._check_home_zoom_switch)."""
 from __future__ import annotations
 
 from core.data.profile_manager import _sanitize_name
-from core.data.ressources import ROOMS_DIRECTORY
+from core.data.ressources import rooms_directory
 from core.world.dungeon import Dungeon
 
 HOME_ROOM_PREFIX = "home_"
@@ -29,7 +29,7 @@ def ensure_home_room(player_name: str) -> str:
     immediately visible in list_rooms()/RoomBrowser instead of only
     materializing once the player hits Sauvegarder. Returns the room name either way."""
     name = home_room_name(player_name)
-    path = ROOMS_DIRECTORY / f"{name}.json"
+    path = rooms_directory() / f"{name}.json"
     if not path.exists():
         Dungeon().save_to_json(name)
     return name

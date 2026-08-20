@@ -3,6 +3,7 @@
 import pygame
 
 from core.ui.widgets import BorderManager
+from core.ui.fonts import get_font
 from core.data.ressources import list_autotile_packs, load_autotile_pack
 
 
@@ -26,8 +27,8 @@ class AutotileThemePanelUI:
         self.x = x
         self.y = y
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 16)
-        self.title_font = pygame.font.SysFont("arial", 18)
+        self.font = get_font("button", 16)
+        self.title_font = get_font("title", 18)
         self.role = None  # "floor"/"wall", or None while closed
         self.current_theme = None
         self._pack_names = []

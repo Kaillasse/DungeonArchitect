@@ -3,6 +3,7 @@
 import pygame
 
 from core.ui.widgets import BorderManager
+from core.ui.fonts import get_font
 
 
 class RolePanelUI:
@@ -32,8 +33,8 @@ class RolePanelUI:
         self.x = x
         self.y = y
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 16)
-        self.title_font = pygame.font.SysFont("arial", 18)
+        self.font = get_font("button", 16)
+        self.title_font = get_font("title", 18)
         self.obj = None  # the placed object dict currently being edited, or None if closed
         self.allow_dungeon_entrance = False
 

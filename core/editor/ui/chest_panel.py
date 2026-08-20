@@ -3,6 +3,7 @@
 import pygame
 
 from core.ui.widgets import BorderManager, Stepper
+from core.ui.fonts import get_font
 from core.world.object_manager import CURRENCY_FILES, ITEM_DEFINITIONS
 
 
@@ -27,8 +28,8 @@ class ChestPanelUI:
         self.x = x
         self.y = y
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 16)
-        self.title_font = pygame.font.SysFont("arial", 18)
+        self.font = get_font("button", 16)
+        self.title_font = get_font("title", 18)
         self.chest = None  # the placed object dict currently being edited, or None if closed
 
     @property

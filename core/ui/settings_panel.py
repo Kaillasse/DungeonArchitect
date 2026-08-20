@@ -22,6 +22,7 @@ import pygame
 
 from core.data.settings import ACTIONS, ACTION_KINDS
 from core.ui.widgets import BorderManager, BorderPicker
+from core.ui.fonts import get_font
 
 
 class SettingsPanelUI:
@@ -60,9 +61,9 @@ class SettingsPanelUI:
         self.awaiting_action = None
 
         self.border = BorderManager()
-        self.title_font = pygame.font.SysFont("arial", 36)
-        self.option_font = pygame.font.SysFont("arial", 28)
-        self.small_font = pygame.font.SysFont("arial", 18)
+        self.title_font = get_font("title", 36)
+        self.option_font = get_font("button", 28)
+        self.small_font = get_font("button", 18)
 
         border_manager = BorderManager()
         picker_width = max(1, border_manager.cols) * (BorderPicker.CELL_SIZE + BorderPicker.GAP) + BorderPicker.GAP

@@ -27,6 +27,7 @@ import random
 import pygame
 
 from core.ui.widgets import BorderManager
+from core.ui.fonts import get_font
 from core.world.object_manager import (
     OBJECT_TYPES, ITEM_DEFINITIONS, ENEMY_ANIMATIONS, mob_kind as _mob_kind,
     update_type_mechanics, update_item_overrides, update_item, is_builtin_item,
@@ -65,8 +66,9 @@ class SoundBoxPanelUI:
         self.height = self.STANDARD_HEIGHT
 
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 18, bold=True)
-        self.small_font = pygame.font.SysFont("arial", 13)
+        self.font = get_font("button", 18, bold=True)
+        self.title_font = get_font("title", 18, bold=True)
+        self.small_font = get_font("button", 13)
 
         self.type_id = None
         self.item_id = None
@@ -413,7 +415,7 @@ class SoundBoxPanelUI:
             return
 
         self._layout()
-        title = self.font.render(f"Sound Box -- {self.name}", True, self.CARD_TEXT_COLOR)
+        title = self.title_font.render(f"Sound Box -- {self.name}", True, self.CARD_TEXT_COLOR)
         screen.blit(title, (self.x + 20, self.y + 16))
         self.border.draw_centered_label(screen, self._clear_rect, self.small_font, "Vider")
 

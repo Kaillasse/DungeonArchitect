@@ -28,7 +28,7 @@ import pygame
 from core.world.object_manager import (
     OBJECT_TYPES, ITEM_DEFINITIONS, load_object_frames, make_item, npc_completeness,
 )
-from core.data.ressources import load_tileset, get_tile_surface, list_rooms, ROOMS_DIRECTORY
+from core.data.ressources import load_tileset, get_tile_surface, list_rooms, rooms_directory
 from core.editor.autotile import DEFAULT_FLOOR_SPRITE, DEFAULT_WALL_SPRITE, FLOOR, WALL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -122,6 +122,7 @@ _PROPERTY_LABELS = {
         "laying": "Etat (allonge)", "run": "Etat (course)",
     },
     "loot": {None: "Butin"},
+    "behavior": {None: "Comportement"},
 }
 
 
@@ -231,7 +232,7 @@ def _room_file_exists(room_name):
     using list_rooms() here would re-glob assets/rooms/ once per visible
     room-card on top of the one glob list_known_card_ids() already does to
     enumerate them in the first place (N+1 scans instead of 1)."""
-    return (ROOMS_DIRECTORY / f"{room_name}.json").exists()
+    return (rooms_directory() / f"{room_name}.json").exists()
 
 
 class Card:

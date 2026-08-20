@@ -10,6 +10,7 @@ from __future__ import annotations
 import pygame
 
 from core.ui.widgets import BorderManager
+from core.ui.fonts import get_font
 from core.world.object_manager import CURRENCY_FILES, load_currency_frames
 
 
@@ -30,8 +31,8 @@ class InventoryPanel:
     def __init__(self, inventory):
         self.inventory = inventory
         self.border = BorderManager()
-        self.label_font = pygame.font.SysFont("arial", 16)
-        self.count_font = pygame.font.SysFont("arial", 20)
+        self.label_font = get_font("text", 16)
+        self.count_font = get_font("text", 20)
 
         # Own animation timers -- deliberately never touch the real Player's
         # .frame/.animation_timer, so opening/closing the panel repeatedly

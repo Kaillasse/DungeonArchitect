@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import pygame
 
+from core.ui.fonts import get_font
+
 # ---------------------------------------------------------------------
 # Border Manager
 # ---------------------------------------------------------------------
@@ -345,7 +347,7 @@ class PanelFrame:
         self._drag_last_pos = None
 
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 15)
+        self.font = get_font("title", 15)
 
     def title_rect(self):
         return pygame.Rect(self.panel.x, self.panel.y - self.TITLE_HEIGHT, self.panel.width, self.TITLE_HEIGHT)
@@ -547,7 +549,7 @@ class ContextMenu:
         self.options = None  # list of (label, action_id), or None if closed
         self.pos = (0, 0)
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 15)
+        self.font = get_font("button", 15)
 
     @property
     def is_open(self):
@@ -597,12 +599,17 @@ class TextInputBox:
     + a length cap appends) -- extracted here so a second caller
     (RoomBrowser's rename prompt) doesn't have to duplicate it."""
 
-    def __init__(self, x, y, width, height, value="", max_length=32):
+    def __init__(self, x, y, width, height, value="", max_length=32, mask_char=None):
         self.rect = pygame.Rect(x, y, width, height)
         self.value = value
         self.max_length = max_length
+        # A password field's own actual characters, e.g. "*" -- self.value
+        # itself always holds the real typed text (handle_event/the caller
+        # reading .value need that), only render() ever substitutes this.
+        # None (every other caller) renders .value as typed, unchanged.
+        self.mask_char = mask_char
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 16)
+        self.font = get_font("text", 16)
 
     def handle_event(self, event):
         """Returns True once Enter confirms a non-empty value, False if
@@ -624,7 +631,8 @@ class TextInputBox:
 
     def render(self, screen):
         cursor = "|" if (pygame.time.get_ticks() // 500) % 2 == 0 else ""
-        self.border.draw_centered_label(screen, self.rect, self.font, self.value + cursor)
+        displayed = self.mask_char * len(self.value) if self.mask_char else self.value
+        self.border.draw_centered_label(screen, self.rect, self.font, displayed + cursor)
 
 
 # ---------------------------------------------------------------------
@@ -667,7 +675,7 @@ class RoomBrowser:
         self._delete_confirm_index = None
 
         self.border = BorderManager()
-        self.font = pygame.font.SysFont("arial", 16)
+        self.font = get_font("button", 16)
 
     @property
     def height(self):

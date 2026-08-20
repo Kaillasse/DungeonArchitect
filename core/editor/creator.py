@@ -7,14 +7,17 @@ from core.world.dungeon import DEFAULT_GRID_SAVE_PATH, Dungeon
 from core.world.assembly import generate_assembly, load_assembly, save_assembly
 from core.editor.ui import ToolPaletteUI
 from core.ui.widgets import PanelFrame, BorderManager
+from core.ui.fonts import get_font
 from core.engine.gamestate import GameState
 from core.engine.room_manager import RoomManager
 from core.engine.camera import Camera
-from core.data.ressources import FLOOR, next_new_donjon_name
+from core.data.ressources import FLOOR, next_new_donjon_name, type_references
 from core.editor.autotile import WALL, LOCAL_EDIT_SPRITE_RADIUS
 from core.data.profile_manager import ProfileManager, ADMINGOD_STOCK
 from core.data.cards import room_name_from_card_id, room_card_manifest, parse_property_card_id
-from core.world.object_manager import ITEM_DEFINITIONS, OBJECT_TYPES, is_placable
+from core.world.object_manager import (
+    ITEM_DEFINITIONS, OBJECT_TYPES, is_placable, delete_custom_type, delete_custom_item,
+)
 from core.data.sound_manager import play_card_sound
 from core.world.home import home_room_name, wants_exploration
 from core.editor.ui import (
@@ -87,7 +90,7 @@ class Creator:
             x=self.screen.get_width() / 2 - 130,
             y=180,
         )
-        self.card_panel = CardPanelUI(x=460, y=340, renderer=self.card_renderer)
+        self.card_panel = CardPanelUI(x=460, y=340, renderer=self.card_renderer, on_delete=self._try_delete_owned_card)
         # Fondation "carte"/sprite editor -- panneau modal centre (comme
         # chest_panel/role_panel), pas un panneau docke/draggable (pas
         # besoin de PanelFrame ici). Bouton d'ouverture toujours visible,
@@ -98,7 +101,7 @@ class Creator:
         )
         self.sprite_editor_button_rect = pygame.Rect(730, 10, 220, 32)
         self._sprite_editor_border = BorderManager()
-        self.sprite_editor_button_font = pygame.font.SysFont("arial", 15)
+        self.sprite_editor_button_font = get_font("button", 15)
         # Same one-off "always-visible button opening a centered modal
         # panel" shape as sprite_editor_button_rect just above -- Parametres
         # used to live only in the main Menu, which has no real purpose
@@ -118,8 +121,8 @@ class Creator:
         # a constructor-built instance attribute (see ToolPaletteUI/
         # CardPanelUI/etc in core.editor.ui); these two were the only
         # stragglers left rebuilding themselves per frame.
-        self.title_font = pygame.font.SysFont("arial", 24)
-        self.assembly_hint_font = pygame.font.SysFont("arial", 16)
+        self.title_font = get_font("title", 24)
+        self.assembly_hint_font = get_font("text", 16)
 
         # Draggable/collapsible title-bar wrappers around the docked panels
         # (not the modal chest/role popups, which open centered on demand
@@ -637,6 +640,65 @@ class Creator:
             return
         self._active_profile.card_collection[card_id] = self._active_profile.card_collection.get(card_id, 0) + 1
         self._card_stock_dirty = True
+
+    def _try_delete_owned_card(self, card_id):
+        """on_delete callback for card_panel.browser (2026-08-19) --
+        standard/list mode only, see CardPanelUI's own class docstring on
+        why (right-click is already "hold to zoom" in enlarged/grid mode).
+        Feedback goes to card_panel.status_text, not a return value --
+        RoomBrowser's on_delete contract doesn't propagate one.
+
+        Dispatches by card kind:
+        - a room card: refused, redirected to the room panel's own
+          Supprimer -- a room card's existence is 1:1 with its saved file
+          (see CardPanelUI.refresh's own comment), no separate ownership
+          record to delete here at all.
+        - a torn property card (prop__...): just dropped from
+          card_collection. The frozen snapshot in torn_properties.json is
+          deliberately left alone -- harmless if now unreferenced (never
+          surfaced, see cards.py's CardManager.list_known_card_ids), and
+          another profile (or a different fuse chain in THIS one) may
+          still resolve the exact same id from it.
+        - anything else (a custom object/mob/item card): refused if still
+          placed somewhere (ressources.type_references, same protective
+          spirit as every other card-delete in this project) or if it's a
+          builtin (delete_custom_type/delete_custom_item both refuse that
+          themselves) -- otherwise deletes the underlying OBJECT_TYPES/
+          ITEM_DEFINITIONS entry AND drops it from card_collection, so an
+          orphaned 0-stock entry doesn't linger in the profile's own save
+          file."""
+        if self._active_profile is None:
+            return
+        if room_name_from_card_id(card_id) is not None:
+            self.card_panel.status_text = "Une salle se supprime depuis le panneau Sauvegarder/Charger."
+            return
+        if parse_property_card_id(card_id) is not None:
+            self._active_profile.card_collection.pop(card_id, None)
+            self._flush_active_profile()
+            self._refresh_card_panel()
+            self.card_panel.status_text = f"'{card_id}' retiree de la collection."
+            return
+
+        used_in = type_references(card_id)
+        if used_in:
+            self.card_panel.status_text = f"Impossible de supprimer : encore utilise dans {', '.join(used_in)}."
+            return
+
+        try:
+            if card_id in OBJECT_TYPES:
+                delete_custom_type(card_id)
+            elif card_id in ITEM_DEFINITIONS:
+                delete_custom_item(card_id)
+            else:
+                return
+        except ValueError as exc:
+            self.card_panel.status_text = str(exc)
+            return
+
+        self._active_profile.card_collection.pop(card_id, None)
+        self._flush_active_profile()
+        self._refresh_card_panel()
+        self.card_panel.status_text = f"'{card_id}' supprimee."
 
     def _flush_active_profile(self):
         """Persists the cached profile's card_collection to disk -- called
