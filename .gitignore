@@ -2,6 +2,14 @@ __pycache__/
 *.pyc
 .venv/
 
-# Generator playtest output -- assets/donjons/donjon_001.json stays tracked
-# (already in the index); anything else here is disposable "Generer" output.
-assets/donjons/donjon_0*.json
+# Per-account save data (assets/accounts/<pseudo>.json + <pseudo>/rooms|donjons/,
+# see core.data.account_manager / core.data.ressources.account_directory) --
+# a fresh clone should start with zero accounts; each new account is seeded
+# from the tracked assets/rooms/ starter pack (core.data.ressources.
+# apply_starter_pack_to_account), not from anything under here.
+assets/accounts/
+
+# Donjons are procedurally regenerated per-account on demand (no starter
+# pack for them, unlike assets/rooms/ -- see apply_starter_pack_to_account's
+# own docstring) -- the old global assets/donjons/ pool is dead weight now.
+assets/donjons/
