@@ -16,7 +16,7 @@ from core.world.object_manager import (
     OBJECT_TYPES, delete_custom_type,
     NPC_DIRECTIONS, npc_types_for_pack,
     rename_entity_pack_references, action_direction_coverage,
-    register_custom_type, update_custom_type, update_type_mechanics, custom_types_for_tileset,
+    register_custom_type, update_custom_type, update_type_visual, update_type_mechanics, custom_types_for_tileset,
 )
 from core.data.ressources import (
     load_tileset_region,
@@ -557,16 +557,25 @@ class BitmapMixin:
         selection and again after a successful register/update. Empty (no
         pack, or an autotile pack) is a valid, harmless state.
 
-        Excludes a fusion-derived card same as _refresh_carte_existing_
-        cards does -- see that method's own docstring for why."""
+        UNLIKE _refresh_carte_existing_cards, a fusion-derived card is NOT
+        excluded here (reversed 2026-08-20, confirmed with the user --
+        wanted the opposite of the 2026-08-18 decision this used to match:
+        "l'assembleur [doit] reconnaitre dynamiquement les cartes qui
+        utilisent un pack"). Adding a new tagged action/frame to a pack
+        (e.g. an "attack" animation) is meaningless if the card actually
+        placed in-game -- typically already fused with "Comportement"/
+        capabilities via the Forge -- never shows up here to pick back up;
+        the old behavior forced recreating a disconnected duplicate card
+        instead of continuing to edit the real one. _try_update_npc was
+        fixed alongside this to re-pass the loaded card's existing
+        capabilities/stats/etc through unchanged (see its own docstring),
+        since without that, editing a fused card here would have silently
+        wiped whatever was fused onto it."""
         if self.bm_pack_name is None:
             self._npc_existing_browser.set_rooms([])
             return
         npcs = npc_types_for_pack(self.bm_pack_name)
-        entries = [
-            (config.get("name", type_id), type_id) for type_id, config in npcs
-            if not config.get("fused_from")
-        ]
+        entries = [(config.get("name", type_id), type_id) for type_id, config in npcs]
         entries.sort(key=lambda entry: entry[0].lower())
         self._npc_existing_browser.set_rooms(entries)
     def _try_delete_npc(self, type_id):
@@ -814,12 +823,23 @@ class BitmapMixin:
         return type_id
     def _try_update_npc(self):
         """Register button's action while self._npc_editing_type_id is set --
-        rewrites that card's definition in place via update_custom_type
-        instead of creating a new one. Never returns a value for Creator
-        to grant a card for (the type already exists, presumably already
-        owned). See _try_register_npc's own docstring for why this goes
-        through the generic, type-less registration path rather than
-        register_npc_type/update_npc_type."""
+        rewrites that card's definition in place. Never returns a value for
+        Creator to grant a card for (the type already exists, presumably
+        already owned). See _try_register_npc's own docstring for why this
+        goes through the generic, type-less registration path rather than
+        register_npc_type/update_npc_type.
+
+        Calls update_type_visual + update_type_mechanics directly (NOT the
+        update_custom_type alias _try_register_npc's sibling used to use)
+        so capabilities/stats/effects/sounds/sound_pitch/loot_cards can be
+        explicitly re-passed from the live entry -- update_type_mechanics
+        always clears every mechanics key first (see its own docstring),
+        so calling it with none of those would silently wipe e.g. a torn/
+        glued "errance" capability or a fused-on "Comportement"'s stats the
+        moment this card (now that _refresh_npc_existing shows fused cards
+        too, 2026-08-20) is ever re-saved here. Same lesson
+        _try_register_carte's own directions/cell_modes follow-up call
+        already had to learn."""
         raw_name = self.name_box.value.strip()
         if not raw_name:
             self.status_text = "Donne un nom a la carte."
@@ -835,10 +855,20 @@ class BitmapMixin:
             self.status_text = "Tague au moins une tuile d'ordre 0 pour la direction courante (icone)."
             return None
 
+        existing = OBJECT_TYPES.get(self._npc_editing_type_id, {})
         try:
-            update_custom_type(
+            update_type_visual(
                 self._npc_editing_type_id, raw_name, icon_tileset, icon_rect, (1, 1), "sol",
                 entity_pack=self.bm_pack_name, wander_actions=self._npc_wander_actions() or None,
+            )
+            update_type_mechanics(
+                self._npc_editing_type_id,
+                capabilities=existing.get("capabilities"),
+                stats=existing.get("stats"),
+                effects=existing.get("effects"),
+                sounds=existing.get("sounds"),
+                sound_pitch=existing.get("sound_pitch"),
+                loot_cards=existing.get("loot_cards"),
             )
         except ValueError as exc:
             self.status_text = str(exc)

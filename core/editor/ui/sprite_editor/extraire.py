@@ -138,24 +138,18 @@ class ExtraireMixin:
         self._extract_confirm_rect = column.rect(40)
 
     def _toggle_extract_peindre(self):
-        """Flips extract_peindre_mode -- entering switches file_browser to
-        root "" (all of assets/, same as Peindre always browsed when it was
-        its own top-level mode); leaving resets Peindre's own in-progress-
-        edit state and switches the root back to "tiles", same reset
-        _set_mode already does when leaving "extraire" entirely while this
-        was on (this is the OTHER way to leave it -- toggling off without
-        changing self.mode at all)."""
+        """Flips extract_peindre_mode. file_browser_root itself no longer
+        needs touching here either way (2026-08-20: plain "Extraire"
+        already browses all of assets/ -- root "" -- same as this
+        sub-toggle always did, so entering/leaving it is a no-op for the
+        browser now, not a root switch)."""
         self.extract_peindre_mode = not self.extract_peindre_mode
-        if self.extract_peindre_mode:
-            self._file_browser_root = ""
-        else:
+        if not self.extract_peindre_mode:
             self._px_painting = False
             self._px_new_canvas_open = False
             self._px_dragging_wheel = False
             self._px_dragging_value = False
             self._px_select_anchor = None
-            self._file_browser_root = "tiles"
-        self._refresh_file_list()
 
     def _handle_extraire_event(self, event):
         if (

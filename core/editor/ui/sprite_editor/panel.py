@@ -123,11 +123,13 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixi
         self.mode = "extraire"
         self.width_tiles = 1
         self.height_tiles = 1
-        # Racine sous assets/ que file_browser liste -- "tiles" (defaut),
-        # "characters", ou "" (tout assets/, voir "peindre"/"extraire") --
-        # voir _refresh_file_list/_load_image. Toujours remis a "tiles" en
-        # quittant un mode qui l'a change.
-        self._file_browser_root = "tiles"
+        # Racine sous assets/ que file_browser liste -- "" (tout assets/,
+        # defaut depuis 2026-08-20 -- extraire ne devrait jamais se limiter
+        # a tiles/, un pack pour une carte custom se cree tout autant depuis
+        # characters/ ou n'importe quel autre dossier) ou "characters"
+        # (rarement utilise directement, l'ancien tri par dossier). Voir
+        # _refresh_file_list/_load_image.
+        self._file_browser_root = ""
         self.archetype = "sol"
         self.blocks_movement = False
         # Per-cell walkable/front/behind grid (see
@@ -403,7 +405,7 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixi
     def open(self):
         self.active = True
         self.mode = "extraire"
-        self._file_browser_root = "tiles"
+        self._file_browser_root = ""
         self.status_text = ""
         self.name_box.value = ""
         self._refresh_file_list()
@@ -570,10 +572,11 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixi
 
     def _set_mode(self, mode_id):
         """Switches self.mode between the only 2 that exist (see MODES) --
-        resets "extraire"'s file-browser-root back to "tiles" (and its own
-        Peindre sub-toggle, see extract_peindre_mode) whenever leaving it,
-        so file_browser doesn't keep showing all of assets/ while in
-        "assembler", which means something else entirely (see
+        resets "extraire"'s own Peindre sub-toggle (see extract_peindre_
+        mode) whenever leaving it -- file_browser_root itself no longer
+        needs resetting here (2026-08-20): "" (all of assets/) is now the
+        one and only root either extraire or its Peindre sub-toggle ever
+        sets, so there's nothing left to normalize on the way out (see
         _full_image_name/_refresh_file_list). Deliberately no autosave of
         an in-progress Peindre edit here (unlike bitmap's
         _bm_auto_save_current) -- a PNG write is heavier/more destructive
@@ -592,9 +595,6 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixi
                 self._px_dragging_wheel = False
                 self._px_dragging_value = False
                 self._px_select_anchor = None
-            if self._file_browser_root != "tiles":
-                self._file_browser_root = "tiles"
-                self._refresh_file_list()
         if mode_id == "assembler" and self.mode != "assembler":
             self.pack_browser.set_rooms(list_autotile_packs())
         self.mode = mode_id
