@@ -35,6 +35,12 @@ _BUILTIN_OBJECT_TYPES = {
         # the card sound system, now the card's own default, editable from
         # the Forge like any other type's "sounds".
         "sounds": {"interact": "buttonpressed.wav"},
+        # Triggers its own animation + linked targets when a player steps
+        # on it (see ObjectManager.check_button_trigger/is_pressable) --
+        # data on the type itself rather than a literal `obj["type"] ==
+        # "button"` check, so any card (built-in or custom) can become
+        # button-like, not just this one hardcoded id (2026-08-20).
+        "capabilities": {"pressable": {}},
     },
     "gate": {
         "asset": "tiles/gateopenclose.png",
@@ -1507,6 +1513,17 @@ def extract_property_payload(entry, category, kind=None):
         return entry.get("loot_cards")
     if category == "behavior":
         return True if entry.get("mob") else None
+    if category == "ouvrable":
+        # A finer-grained view onto "blocks_until_open" (2026-08-20,
+        # confirmed with the user) -- same "expose an existing flag as a
+        # visible, tearable fragment" spirit as "behavior"/mob above,
+        # without moving where the flag actually lives: every existing
+        # reader (is_cell_walkable, _open_target, the Forge's own "porte"
+        # lockable checkbox, the sprite editor's porte-archetype creation)
+        # keeps reading "blocks_until_open" directly, untouched. Gluing
+        # this fragment onto ANY doorway-placed card makes it a lockable
+        # door/gate, not just gate/wall specifically.
+        return True if entry.get("blocks_until_open") else None
     return None
 
 
@@ -1555,6 +1572,8 @@ def _apply_property_payload(entry, category, kind, payload):
         # under its old, now-stale card_type.
         entry["mob"] = True
         entry["card_type"] = "mob"
+    elif category == "ouvrable":
+        entry["blocks_until_open"] = True
 
 
 def _write_custom_item(item_id, entry):
@@ -2441,6 +2460,15 @@ class ObjectManager:
         config = OBJECT_TYPES.get(obj["type"], {})
         return obj.get("variant") in config.get("foreground_variants", ())
 
+    @staticmethod
+    def is_pressable(type_id):
+        """True if a placed object of `type_id` triggers its own animation +
+        linked targets when a player steps on it (see check_button_trigger)
+        -- reads the "pressable" capability (see button's own OBJECT_TYPES
+        entry) rather than hardcoding `type_id == "button"`, so any card,
+        built-in or custom, can carry this role (2026-08-20)."""
+        return OBJECT_TYPES.get(type_id, {}).get("capabilities", {}).get("pressable") is not None
+
     def cell_mode(self, obj, config, grid_x, grid_y):
         """The CELL_MODES value ("block"/"behind"/"front") for (grid_x,
         grid_y) within `obj`'s footprint, or None if this type has no
@@ -2501,13 +2529,15 @@ class ObjectManager:
         return self.dungeon.logical_grid[grid_y][grid_x] != WALL
 
     def _activate_button(self, obj):
-        """Marks `obj` (a "button") pressed -- starts its own animation and
-        plays the trigger sound. Shared by check_button_trigger and
-        DungeonAssembly.check_button_trigger, which both trigger a button
-        but scope "which object is at this cell" differently (a plain
-        local lookup here vs. a room-aware global-coordinate lookup
-        there) -- factored out after a past fix to this exact activation
-        step only ever landed in one of the two copies."""
+        """Marks `obj` (any "pressable" object, see is_pressable -- named
+        after "button", the only one that exists today) pressed -- starts
+        its own animation and plays the trigger sound. Shared by
+        check_button_trigger and DungeonAssembly.check_button_trigger,
+        which both trigger a pressable object but scope "which object is
+        at this cell" differently (a plain local lookup here vs. a
+        room-aware global-coordinate lookup there) -- factored out after a
+        past fix to this exact activation step only ever landed in one of
+        the two copies."""
         obj["activated"] = True
         obj["frame"] = 0
         obj["anim_timer"] = 0.0
@@ -2532,10 +2562,10 @@ class ObjectManager:
             object_manager.begin_animation(target)
 
     def check_button_trigger(self, grid_x, grid_y):
-        """Call every frame the player occupies (grid_x, grid_y); no-ops unless a fresh button is there."""
+        """Call every frame the player occupies (grid_x, grid_y); no-ops unless a fresh pressable object is there."""
         obj = self.get_object_at(grid_x, grid_y)
 
-        if obj is None or obj["type"] != "button" or obj.get("activated"):
+        if obj is None or not self.is_pressable(obj["type"]) or obj.get("activated"):
             return
 
         self._activate_button(obj)

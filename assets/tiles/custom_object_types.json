@@ -758,7 +758,8 @@
   "button": {
     "capabilities": {
       "placable_on_floor": {},
-      "linkable": {}
+      "linkable": {},
+      "pressable": {}
     },
     "sounds": {
       "interact": "buttonpressed.wav"

@@ -275,7 +275,7 @@ class DungeonAssembly:
         object_manager = room.dungeon.object_manager
         obj = object_manager.get_object_at(local_x, local_y)
 
-        if obj is None or obj["type"] != "button" or obj.get("activated"):
+        if obj is None or not object_manager.is_pressable(obj["type"]) or obj.get("activated"):
             return
 
         object_manager._activate_button(obj)
@@ -872,7 +872,7 @@ def _attach_via_exit(rng, room_names, assembly, anchor_room, anchor_exit):
     candidate_exit["door_target_room"] = anchor_room.index
 
     for source_obj in anchor_room.dungeon.object_manager.objects:
-        if source_obj["type"] != "button":
+        if not anchor_room.dungeon.object_manager.is_pressable(source_obj["type"]):
             continue
         for link_ref in source_obj.get("links", []):
             if (link_ref["x"], link_ref["y"]) == (anchor_exit["x"], anchor_exit["y"]):
@@ -882,7 +882,7 @@ def _attach_via_exit(rng, room_names, assembly, anchor_room, anchor_exit):
                 break
 
     for source_obj in candidate_room.dungeon.object_manager.objects:
-        if source_obj["type"] != "button":
+        if not candidate_room.dungeon.object_manager.is_pressable(source_obj["type"]):
             continue
         for link_ref in source_obj.get("links", []):
             if (link_ref["x"], link_ref["y"]) == (candidate_exit["x"], candidate_exit["y"]):

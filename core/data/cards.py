@@ -114,6 +114,7 @@ _PROPERTY_LABELS = {
         "placable_on_floor": "Placable (sol)", "placable_on_wall": "Placable (mur)",
         "linkable": "Liable (bouton)", "doorway": "Entree/sortie", "lootable": "Contient du butin",
         "editor_tool_unlock": "Deverrouille un outil d'edition",
+        "pressable": "Actionnable (marcher dessus)",
     },
     "effect": {"heal": "Soin"},
     "stats": {None: "Statistiques"},
@@ -124,6 +125,7 @@ _PROPERTY_LABELS = {
     },
     "loot": {None: "Butin"},
     "behavior": {None: "Comportement"},
+    "ouvrable": {None: "Ouvrable (verrouillable)"},
 }
 
 

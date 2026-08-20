@@ -1010,6 +1010,13 @@ class MechanicsPanelUI(_ResizableCornerMixin):
             fragments.append(("capability", kind, payload))
         for effect in entry.get("effects", []):
             fragments.append(("effect", effect.get("kind"), effect))
+        # "Ouvrable" (2026-08-20, confirmed with the user) -- a view onto
+        # this object's own "blocks_until_open" flag (gate/wall today), see
+        # object_manager.extract_property_payload's own docstring on why
+        # this reads the existing flag rather than a new one. Object cards
+        # only -- an item/mob/pnj never carries blocks_until_open at all.
+        if self.card_kind == "object" and entry.get("blocks_until_open"):
+            fragments.append(("ouvrable", None, True))
         # Any mob's stats block is tearable, not just an "enemy" one --
         # entities.py's Mob is fully data-driven (aggro_capable is just
         # "aggro_range"/"attack_range" in stats, no mob_kind check at all),
