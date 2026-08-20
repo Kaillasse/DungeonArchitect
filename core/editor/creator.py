@@ -98,7 +98,14 @@ class Creator:
         self.sprite_editor_panel = SpriteEditorPanelUI(
             x=self.screen.get_width() / 2 - SpriteEditorPanelUI.PANEL_WIDTH / 2,
             y=self.screen.get_height() / 2 - SpriteEditorPanelUI.PANEL_HEIGHT / 2,
+            is_admingod=self._admingod_active,
         )
+        # Definitive-deletion drop zone (2026-08-20, admingod-only -- see
+        # _admingod_active/_try_delete_owned_card) -- bottom-left, clear of
+        # every docked panel_frame's default position (all start x<=900,
+        # y<=460, see their own construction above) and of
+        # sprite_editor_button_rect/settings_button_rect (top area).
+        self._delete_drop_rect = pygame.Rect(10, self.screen.get_height() - 100, 90, 90)
         self.sprite_editor_button_rect = pygame.Rect(730, 10, 220, 32)
         self._sprite_editor_border = BorderManager()
         self.sprite_editor_button_font = get_font("button", 15)
@@ -438,6 +445,19 @@ class Creator:
         card-panel-originated drag)."""
         card_id = self.object_tool.object_type
 
+        if self._admingod_active() and self._delete_drop_rect.collidepoint(event.pos):
+            # Checked before every other drop target, and before the
+            # property/room-card branches below that would otherwise
+            # `return` early -- a definitive delete has to work uniformly
+            # for every card kind (property/room/object/item/mob/pnj), not
+            # just the ones with a placement-style drop target of their
+            # own. See _try_delete_owned_card for the actual per-kind
+            # dispatch/guards.
+            self._try_delete_owned_card(card_id)
+            self.object_tool.dragging = False
+            self.object_tool.drag_source = "collection"
+            return
+
         if parse_property_card_id(card_id) is not None:
             # A property card (see core.data.cards.PROPERTY_CARD_PREFIX) is
             # never placeable in the world, never deposited in the
@@ -642,11 +662,19 @@ class Creator:
         self._card_stock_dirty = True
 
     def _try_delete_owned_card(self, card_id):
-        """on_delete callback for card_panel.browser (2026-08-19) --
-        standard/list mode only, see CardPanelUI's own class docstring on
-        why (right-click is already "hold to zoom" in enlarged/grid mode).
-        Feedback goes to card_panel.status_text, not a return value --
-        RoomBrowser's on_delete contract doesn't propagate one.
+        """on_delete callback for card_panel.browser (2026-08-19), also
+        the target of the Collection's drop-to-delete zone (2026-08-20,
+        see _resolve_dragged_card/_admingod_active) -- that second path is
+        what actually reaches grid mode, where right-click is already
+        "hold to zoom" (see CardPanelUI's own class docstring), so a
+        dropped-on-the-square card is the only way to delete one there.
+        Reserved for admingod (Profile.admingod) either way -- deleting a
+        card is definitive and can strand any room/save still built
+        around it, per the user's own explicit call (2026-08-20): worth
+        having as a dev/test tool, not worth exposing to a normal
+        playthrough. Feedback goes to card_panel.status_text, not a
+        return value -- RoomBrowser's on_delete contract doesn't
+        propagate one.
 
         Dispatches by card kind:
         - a room card: refused, redirected to the room panel's own
@@ -668,6 +696,9 @@ class Creator:
           orphaned 0-stock entry doesn't linger in the profile's own save
           file."""
         if self._active_profile is None:
+            return
+        if not self._active_profile.admingod:
+            self.card_panel.status_text = "Suppression reservee au mode admingod."
             return
         if room_name_from_card_id(card_id) is not None:
             self.card_panel.status_text = "Une salle se supprime depuis le panneau Sauvegarder/Charger."
@@ -1051,6 +1082,16 @@ class Creator:
                 return True
         return False
 
+    def _admingod_active(self):
+        """Gates every definitive-deletion tool (the Collection's drop-to-
+        delete zone, the sprite editor's pack Supprimer button) -- unlike
+        _forge_unlocked/_generator_unlocked's in-world proximity gate,
+        this is a flat Profile.admingod check: deleting a card/pack is
+        irreversible and can strand any room/save still built around it,
+        so it stays out of reach of a normal playthrough entirely rather
+        than merely being "locked until you walk somewhere"."""
+        return self._active_profile is not None and self._active_profile.admingod
+
     def _generator_unlocked(self):
         return self._entity_in_range(self.GENERATOR_ENTITY_TYPE)
 
@@ -1059,6 +1100,23 @@ class Creator:
 
     def _sound_box_unlocked(self):
         return self._entity_in_range(self.SOUND_BOX_ENTITY_TYPE)
+
+    def _render_delete_drop_zone(self):
+        """Bottom-left drop-to-delete zone (see _resolve_dragged_card),
+        admingod-only -- invisible entirely otherwise, not just locked, per
+        _admingod_active's own reasoning. A danger-red overlay while a card
+        is actually mid-drag makes the target discoverable, same spirit as
+        _draw_panel_drop_highlight for the Forge's property-fuse target."""
+        if not self._admingod_active():
+            return
+        self._sprite_editor_border.draw_centered_label(
+            self.screen, self._delete_drop_rect, self.sprite_editor_button_font, "Supprimer",
+            color=(255, 140, 140),
+        )
+        if self.object_tool.dragging and self._delete_drop_rect.collidepoint(pygame.mouse.get_pos()):
+            overlay = pygame.Surface(self._delete_drop_rect.size, pygame.SRCALPHA)
+            overlay.fill((220, 40, 40, 90))
+            self.screen.blit(overlay, self._delete_drop_rect.topleft)
 
     def _draw_panel_lock_overlay(self, frame, message):
         """Dims a docked panel's body and explains why it's inaccessible --
@@ -1711,6 +1769,8 @@ class Creator:
 
             if self.game_manager.settings_panel.is_open:
                 self.game_manager.settings_panel.render(self.screen)
+
+            self._render_delete_drop_zone()
 
             # Drawn dead last, after every panel above -- fixes a real bug:
             # this used to render before the panel_frames loop, so the

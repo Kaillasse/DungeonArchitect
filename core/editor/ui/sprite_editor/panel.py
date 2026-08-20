@@ -72,9 +72,15 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixi
         ("extraire", "Extraire"), ("assembler", "Assembleur"),
     )
 
-    def __init__(self, x, y):
+    def __init__(self, x, y, is_admingod=None):
         self.x = x
         self.y = y
+        # Gates the pack "Supprimer" button (bitmap mode, see BitmapMixin's
+        # _try_delete_pack/_render_bitmap) -- Creator passes its own real
+        # check (Profile.admingod), defaulting to "never" so any other
+        # caller/test constructing this panel bare doesn't accidentally
+        # expose a definitive-delete tool.
+        self.is_admingod = is_admingod or (lambda: False)
         self.border = BorderManager()
         self.font = get_font("button", 15)
         self.title_font = get_font("title", 20)
@@ -492,6 +498,12 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixi
             row_x = rect.right + 4
 
         self._close_rect = pygame.Rect(self.x + self.PANEL_WIDTH - 90, self.y + 12, 70, 28)
+
+        # Bottom-left of the panel, bitmap mode only (packs are a bitmap-
+        # mode concept, see BitmapMixin) -- deletes pack_browser.selected_
+        # name outright, admingod-gated (self.is_admingod), see
+        # _try_delete_pack/_render_bitmap/_handle_bitmap_event.
+        self._delete_pack_rect = pygame.Rect(self.x + 16, self.y + self.PANEL_HEIGHT - 46, 170, 32)
 
         self._layout_extraire(LayoutColumn(params_x, self.y + 100, step_w))
         self._layout_decouper(LayoutColumn(params_x, self.y + 100, step_w))

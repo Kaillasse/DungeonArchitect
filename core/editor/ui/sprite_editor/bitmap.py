@@ -356,13 +356,20 @@ class BitmapMixin:
         self._refresh_npc_existing()
         self._refresh_carte_existing_cards()
     def _try_delete_pack(self, pack_name):
-        """on_delete callback for pack_browser (see __init__). Refuses
-        with an explanation instead of deleting outright when the pack is
-        still used as a room/dungeon's terrain theme (ressources.
-        pack_references) or by a registered PNJ's entity_pack
-        (npc_types_for_pack) -- same protective spirit as
+        """on_delete callback for pack_browser (see __init__), also the
+        target of the dedicated "Supprimer" button (see _handle_bitmap_
+        event/RoomBrowser.arm_delete_confirm). Reserved for admingod (see
+        self.is_admingod, set by Creator from Profile.admingod) -- a
+        definitive deletion tool is deliberately not something an ordinary
+        playthrough can reach. Refuses with an explanation instead of
+        deleting outright when the pack is still used as a room/dungeon's
+        terrain theme (ressources.pack_references) or by a registered PNJ's
+        entity_pack (npc_types_for_pack) -- same protective spirit as
         _try_delete_card/_try_delete_npc, just two kinds of reference
         instead of one."""
+        if not self.is_admingod():
+            self.status_text = "Suppression de pack reservee au mode admingod."
+            return
         used_in = pack_references(pack_name)
         used_by_npcs = [type_id for type_id, _config in npc_types_for_pack(pack_name)]
         if used_in or used_by_npcs:
@@ -1282,6 +1289,14 @@ class BitmapMixin:
             self.close()
             return None
 
+        if self.is_admingod() and self._delete_pack_rect.collidepoint(event.pos):
+            selected = self.pack_browser.selected_name
+            if selected is None:
+                self.status_text = "Selectionnez un pack a supprimer."
+            else:
+                self.pack_browser.arm_delete_confirm(selected, self._delete_pack_rect.topleft)
+            return None
+
         if self._handle_mode_switch(event.pos):
             return None
 
@@ -1376,6 +1391,10 @@ class BitmapMixin:
         see _handle_bitmap_event's own docstring for why this has to be
         checked before the "entity" branch, not folded into its fallback."""
         self.pack_browser.render(screen)
+
+        if self.is_admingod():
+            label = "Supprimer pack" if self.pack_browser.selected_name else "Supprimer pack (aucun)"
+            self.border.draw_centered_label(screen, self._delete_pack_rect, self.font, label, color=(255, 150, 150))
 
         if self.bm_pack_name is not None:
             self._render_bm_carte_checklist(screen)

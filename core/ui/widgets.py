@@ -766,6 +766,23 @@ class RoomBrowser:
                 return self.scroll + slot_index
         return None
 
+    def arm_delete_confirm(self, name, pos):
+        """Opens the exact same Yes/No delete-confirmation popup the
+        right-click context menu's "Supprimer" option opens, for a caller
+        that wants to trigger it from a fixed button instead of a row's own
+        context menu (e.g. a dedicated "Supprimer" button next to the
+        list -- see SpriteEditorPanelUI's pack delete button). No-op if
+        `name` isn't a row currently in this browser or on_delete isn't
+        wired -- same silent-refusal spirit as the context menu itself
+        never offering "Supprimer" without on_delete set."""
+        if self.on_delete is None:
+            return
+        for index, room in enumerate(self.rooms):
+            if self._room_name_for_context(room) == name:
+                self._context_menu.pos = pos
+                self._delete_confirm_index = index
+                return
+
     def _slider_track_rect(self):
         return pygame.Rect(self.x + self.width - self.SLIDER_WIDTH, self.y, self.SLIDER_WIDTH, self.height)
 
