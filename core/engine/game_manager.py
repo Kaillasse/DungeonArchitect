@@ -11,6 +11,7 @@ from core.data.settings import Settings
 from core.ui.widgets import BorderManager
 from core.ui.settings_panel import SettingsPanelUI
 from core.data.ressources import set_active_account
+from core.rendering.storm import StormGenerator
 
 class GameManager:
     def __init__(self, screen, settings=None):
@@ -101,6 +102,15 @@ class GameManager:
         self._game_server = None
         self._host_announcer = None
         self.clock = pygame.time.Clock()
+        # Purely cosmetic background particle layer (see core.rendering.
+        # storm's own docstring) -- one shared instance/config for the
+        # whole session (confirmed with the user, 2026-08-22), updated and
+        # drawn by Menu/Creator/Explorator alike every frame; only
+        # Creator's own StormPanelUI (a docked/tabbed panel like any
+        # other, see Creator._panel_tab_entries) actually edits it.
+        # Constructed before Creator below, which builds that panel around
+        # this exact instance in its own __init__.
+        self.storm_generator = StormGenerator()
         self.menu = Menu(self)
         self.creator = Creator(self)
         self.explorator = Explorator(self)

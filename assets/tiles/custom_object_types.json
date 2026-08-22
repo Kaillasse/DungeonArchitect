@@ -720,8 +720,14 @@
     }
   },
   "skeleton1": {
+    "cell_modes": [
+      [
+        "behind"
+      ]
+    ],
     "capabilities": {
-      "placable_on_floor": {}
+      "placable_on_floor": {},
+      "errance": {}
     },
     "stats": {
       "health": 3,
@@ -864,7 +870,58 @@
       "placable_on_floor": {}
     }
   },
-  "zomboss": {
+  "pig": {
+    "cell_modes": [
+      [
+        "behind"
+      ]
+    ],
+    "capabilities": {
+      "placable_on_floor": {},
+      "errance": {}
+    },
+    "stats": {
+      "health": 2
+    },
+    "__override_of_builtin__": true
+  },
+  "zomboss__behavior_capability_errance": {
+    "asset": {
+      "tileset": "characters/Ennemies/Zomboss.png",
+      "rect": [
+        0,
+        128,
+        32,
+        32
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 1,
+    "name": "Zomboss + Comportement",
+    "card_type": "mob",
+    "fused_from": {
+      "base": "zomboss",
+      "fragments": [
+        "behavior",
+        "capability_errance"
+      ]
+    },
+    "mob": true,
+    "entity_pack": "zomboss",
+    "wander_actions": {
+      "idle": "attente",
+      "move": "walk"
+    },
+    "capabilities": {
+      "placable_on_floor": {},
+      "errance": {}
+    }
+  },
+  "zomboss__aggressivity_behavior_capability_errance": {
     "asset": {
       "tileset": "characters/Ennemies/Zomboss.png",
       "rect": [
@@ -880,15 +937,114 @@
       1
     ],
     "frames": 1,
-    "name": "Zomboss",
-    "card_type": "tile_decor",
+    "name": "Zomboss + Agressivite",
+    "card_type": "mob",
     "entity_pack": "zomboss",
     "wander_actions": {
       "idle": "attente",
       "move": "walk"
     },
     "capabilities": {
-      "placable_on_floor": {}
+      "placable_on_floor": {},
+      "errance": {}
+    },
+    "fused_from": {
+      "base": "zomboss",
+      "fragments": [
+        "aggressivity",
+        "behavior",
+        "capability_errance"
+      ]
+    },
+    "mob": true,
+    "stats": {
+      "aggro_range": 6.0,
+      "attack_range": 1.2
     }
+  },
+  "zomboss__aggressivity_behavior_capability_errance_stats": {
+    "asset": {
+      "tileset": "characters/Ennemies/Zomboss.png",
+      "rect": [
+        0,
+        224,
+        32,
+        32
+      ]
+    },
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 1,
+    "name": "Zomboss + Statistiques",
+    "card_type": "mob",
+    "entity_pack": "zomboss",
+    "wander_actions": {
+      "idle": "attente",
+      "move": "walk"
+    },
+    "capabilities": {
+      "placable_on_floor": {},
+      "errance": {}
+    },
+    "fused_from": {
+      "base": "zomboss",
+      "fragments": [
+        "aggressivity",
+        "behavior",
+        "capability_errance",
+        "stats"
+      ]
+    },
+    "mob": true,
+    "stats": {
+      "health": 3,
+      "move_speed": 45,
+      "aggro_range": 6.0,
+      "attack_range": 1.2,
+      "loot": {
+        "gold": 2,
+        "blue": 1
+      },
+      "active_attack_frames": [
+        6,
+        7
+      ]
+    }
+  },
+  "pig__aggressivity": {
+    "asset": "characters/Animals/Pig.png",
+    "placement": "floor",
+    "size": [
+      1,
+      1
+    ],
+    "frames": 2,
+    "frame_size": 32,
+    "mob": true,
+    "card_type": "mob",
+    "cell_modes": [
+      [
+        "behind"
+      ]
+    ],
+    "capabilities": {
+      "placable_on_floor": {},
+      "errance": {}
+    },
+    "stats": {
+      "health": 2,
+      "aggro_range": 6.0,
+      "attack_range": 1.2
+    },
+    "fused_from": {
+      "base": "pig",
+      "fragments": [
+        "aggressivity"
+      ]
+    },
+    "name": "Pig + Agressivite"
   }
 }

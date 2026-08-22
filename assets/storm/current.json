@@ -1,0 +1,49 @@
+{
+  "enabled": false,
+  "mode": "circular",
+  "background_path": "assets/storm/background/blue-back.png",
+  "assets": [
+    {
+      "path": "assets/storm/img/2.png",
+      "weight": 5,
+      "enabled": true,
+      "face_motion": true,
+      "angle_offset": 0,
+      "overrides": {}
+    },
+    {
+      "path": "assets/storm/img/3.png",
+      "weight": 5,
+      "enabled": true,
+      "face_motion": true,
+      "angle_offset": 0,
+      "overrides": {}
+    }
+  ],
+  "density": 40,
+  "speed_min": 20,
+  "speed_max": 60,
+  "size_min": 16,
+  "size_max": 48,
+  "rotation_speed_max": 0,
+  "opacity_min": 60,
+  "opacity_max": 100,
+  "lifetime_min": 4,
+  "lifetime_max": 9,
+  "intensity": 100,
+  "parallax": 40,
+  "circular": {
+    "center_x": 0.5,
+    "center_y": 0.5,
+    "radius_min": 60,
+    "radius_max": 260,
+    "angular_speed": 20,
+    "clockwise": true,
+    "radius_wobble": 15,
+    "depth": 0
+  },
+  "rectilinear": {
+    "direction_deg": 0,
+    "spread": 220
+  }
+}

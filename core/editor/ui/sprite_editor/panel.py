@@ -769,9 +769,12 @@ class SpriteEditorPanelUI(DecouperMixin, BitmapMixin, PeindreMixin, ExtraireMixi
         # _handle_pixel_event), not its own self.mode value anymore.
         return self._handle_extraire_event(event)
     def render(self, screen):
-        if not self.active:
-            return
-
+        # No self.active guard here (2026-08-22) -- Creator, the only
+        # caller, now gates whether this gets called at all through its
+        # own ModalFadeState (fade.visible), which stays True for a moment
+        # after close() so the close-fade has something real to fade OUT
+        # from instead of vanishing on the spot. Same shape as
+        # SettingsPanelUI.render, which never had this guard to begin with.
         overlay = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, self.OVERLAY_ALPHA))
         screen.blit(overlay, (0, 0))

@@ -6,7 +6,7 @@ import pygame
 from core.world.dungeon import DEFAULT_GRID_SAVE_PATH, Dungeon
 from core.world.assembly import generate_assembly, load_assembly, save_assembly
 from core.editor.ui import ToolPaletteUI
-from core.ui.widgets import PanelFrame, BorderManager
+from core.ui.widgets import PanelFrame, BorderManager, PanelTab, ModalFadeState
 from core.ui.fonts import get_font
 from core.engine.gamestate import GameState
 from core.engine.room_manager import RoomManager
@@ -22,7 +22,7 @@ from core.data.sound_manager import play_card_sound
 from core.world.home import home_room_name, wants_exploration
 from core.editor.ui import (
     GeneratorPanelUI, RoomPanelUI, ChestPanelUI, RolePanelUI, CardPanelUI, CardRenderer,
-    SpriteEditorPanelUI, AutotileThemePanelUI, MechanicsPanelUI, SoundBoxPanelUI,
+    SpriteEditorPanelUI, AutotileThemePanelUI, MechanicsPanelUI, SoundBoxPanelUI, StormPanelUI,
 )
 from core.editor.tools import ObjectTool
 
@@ -30,6 +30,11 @@ class Creator:
 
     INDICATOR_HIT_RADIUS = 10
     LINK_LINE_COLOR = (60, 220, 90)
+    # Count of entries in _panel_tab_entries (collection/tools/generator/
+    # forge/sprite editor/sound box/storm/room/parametres) -- a plain class
+    # constant since _delete_drop_rect needs it before _panel_tab_entries
+    # itself exists yet (see __init__).
+    PANEL_TAB_COUNT = 9
 
     def __init__(self, game_manager):
 
@@ -93,29 +98,38 @@ class Creator:
         self.card_panel = CardPanelUI(x=460, y=340, renderer=self.card_renderer, on_delete=self._try_delete_owned_card)
         # Fondation "carte"/sprite editor -- panneau modal centre (comme
         # chest_panel/role_panel), pas un panneau docke/draggable (pas
-        # besoin de PanelFrame ici). Bouton d'ouverture toujours visible,
-        # voir sprite_editor_button_rect ci-dessous et son check dans run().
+        # besoin de PanelFrame ici). Ouvert via son propre PanelTab
+        # ("Editeur de sprite", voir _panel_tab_entries) depuis 2026-08-22
+        # -- plus de bouton dedie.
         self.sprite_editor_panel = SpriteEditorPanelUI(
             x=self.screen.get_width() / 2 - SpriteEditorPanelUI.PANEL_WIDTH / 2,
             y=self.screen.get_height() / 2 - SpriteEditorPanelUI.PANEL_HEIGHT / 2,
             is_admingod=self._admingod_active,
         )
+        # Both full-screen modals (sprite editor, parametres) get a plain
+        # fade instead of PanelOpenAnimation's tab-travel choreography --
+        # see ModalFadeState's own docstring for why. Watches is_open each
+        # frame (_update_panel_transitions), needs no hook into either
+        # panel's own open()/close().
+        self._sprite_editor_fade = ModalFadeState()
+        self._settings_fade = ModalFadeState()
         # Definitive-deletion drop zone (2026-08-20, admingod-only -- see
-        # _admingod_active/_try_delete_owned_card) -- bottom-left, clear of
+        # _admingod_active/_try_delete_owned_card) -- bottom edge, clear of
         # every docked panel_frame's default position (all start x<=900,
-        # y<=460, see their own construction above) and of
-        # sprite_editor_button_rect/settings_button_rect (top area).
-        self._delete_drop_rect = pygame.Rect(10, self.screen.get_height() - 100, 90, 90)
-        self.sprite_editor_button_rect = pygame.Rect(730, 10, 220, 32)
+        # y<=460, see their own construction above). Shifted right of x=10
+        # (2026-08-22) to leave the bottom-left corner free
+        # for the panel tab row (see _panel_tab_entries, built further down
+        # once panel_frames exists) -- PANEL_TAB_COUNT tabs at
+        # PanelTab.WIDTH+GAP wide plus its own LEFT_MARGIN is the widest
+        # the row ever gets, so this only needs to clear that fixed max.
+        _tab_row_width = PanelTab.LEFT_MARGIN + self.PANEL_TAB_COUNT * (PanelTab.WIDTH + PanelTab.GAP)
+        self._delete_drop_rect = pygame.Rect(_tab_row_width + 20, self.screen.get_height() - 100, 90, 90)
+        # Still used by _render_delete_drop_zone's "Supprimer" label -- the
+        # sprite-editor/parametres buttons that used to share this border/
+        # font were retired in favor of their own PanelTab entries (see
+        # _panel_tab_entries) 2026-08-22.
         self._sprite_editor_border = BorderManager()
         self.sprite_editor_button_font = get_font("button", 15)
-        # Same one-off "always-visible button opening a centered modal
-        # panel" shape as sprite_editor_button_rect just above -- Parametres
-        # used to live only in the main Menu, which has no real purpose
-        # once a session is already running (see GameManager.settings_panel/
-        # Explorator's own inventory-panel button for the other entry
-        # point this same shared panel is opened from).
-        self.settings_button_rect = pygame.Rect(730, 50, 220, 32)
         # Small preview size for the sprite that follows the mouse while
         # dragging a card to place it or relocating an already-placed
         # object -- see run()'s render section.
@@ -131,22 +145,24 @@ class Creator:
         self.title_font = get_font("title", 24)
         self.assembly_hint_font = get_font("text", 16)
 
-        # Draggable/collapsible title-bar wrappers around the docked panels
-        # (not the modal chest/role popups, which open centered on demand
-        # and auto-close -- dragging them wouldn't make sense).
-        # panel_frames' order is z-order for rendering/hit-testing (last =
-        # topmost) -- a click on any frame brings it to the end of this
-        # list, see run()'s event loop.
+        # Collapsible wrappers around the docked panels (not the modal
+        # chest/role popups, which open centered on demand and auto-close).
+        # Each keeps its own minimal title bar (name + close button, no
+        # drag -- see PanelFrame's docstring) drawn while open; opening
+        # instead goes through a PanelTab (_panel_tab_entries below), both
+        # ends animated (see PanelOpenAnimation/_start_open_animation).
+        # panel_frames' order is z-order for rendering (last = topmost) --
+        # opening a tab brings its frame to the end of this list, see
+        # _start_open_animation.
         self.tools_frame = PanelFrame(self.palette, "Tuile de base", on_change=self._on_panel_frame_change)
         self.room_frame = PanelFrame(self.room_panel, "Sauvegarder / Charger", on_change=self._on_panel_frame_change)
         self.generator_frame = PanelFrame(self.generator_panel, "Generation procedurale", on_change=self._on_panel_frame_change)
         self.card_frame = PanelFrame(self.card_panel, "Collection", on_change=self._on_panel_frame_change)
         # Mechanical counterpart to sprite_editor_panel (visual/identity vs.
         # gameplay flags -- see MechanicsPanelUI's own module docstring) --
-        # docked/draggable/resizable like every other panel here, not
-        # modal. Reached only by dragging an owned card onto its own body
-        # (see the object_tool.dragging handling in run()), never a
-        # dedicated open button.
+        # docked/resizable like every other panel here, not modal. Also
+        # reached by dragging an owned card onto its own body (see the
+        # object_tool.dragging handling in run()).
         self.mechanics_panel = MechanicsPanelUI(x=460, y=460, renderer=self.card_renderer)
         self.mechanics_frame = PanelFrame(self.mechanics_panel, "Forge", on_change=self._on_panel_frame_change)
         # The sound counterpart to the Forge -- confirmed with the user:
@@ -156,10 +172,27 @@ class Creator:
         # card-to-edit-it shape.
         self.sound_box_panel = SoundBoxPanelUI(x=900, y=460)
         self.sound_box_frame = PanelFrame(self.sound_box_panel, "Sound Box", on_change=self._on_panel_frame_change)
+        # In-game config for the purely-cosmetic background particle layer
+        # (core.rendering.storm) -- edits game_manager.storm_generator's
+        # config directly/in place, same shared instance Menu/Explorator
+        # also read, see GameManager's own construction. Not entity-gated
+        # like Generateur/Forge/Sound Box -- always reachable, same as
+        # Collection/Sauvegarder/Charger.
+        self.storm_panel = StormPanelUI(self.game_manager.storm_generator, x=900, y=180)
+        self.storm_frame = PanelFrame(self.storm_panel, "Tempete", on_change=self._on_panel_frame_change)
         self.panel_frames = [
             self.tools_frame, self.room_frame, self.generator_frame, self.card_frame,
-            self.mechanics_frame, self.sound_box_frame,
+            self.mechanics_frame, self.sound_box_frame, self.storm_frame,
         ]
+        # Declutter the play space by default (confirmed with the user,
+        # 2026-08-22) -- every docked panel now starts collapsed instead of
+        # sitting open on top of the grid; the bottom-left tab row below is
+        # the intended way to reopen one. Only affects a frame with no
+        # saved Profile.panel_layout entry yet (_refresh_panel_layout, run
+        # right after construction, overrides this from whatever the local
+        # profile last had, same as it always has for position).
+        for frame in self.panel_frames:
+            frame.collapsed = True
         # name -> frame, purely for _refresh_panel_layout/_on_panel_frame_change's
         # own round-trip through Profile.panel_layout (see those methods).
         self._panel_frames_by_name = {
@@ -169,7 +202,77 @@ class Creator:
             "card": self.card_frame,
             "mechanics": self.mechanics_frame,
             "sound_box": self.sound_box_frame,
+            "storm": self.storm_frame,
         }
+
+        # Bottom-left bookmark row -- one PanelTab per docked frame plus one
+        # each for the two modal panels it replaces (sprite editor,
+        # parametres, opened via `modal_open` directly -- no animation for
+        # those two, see _handle_panel_tab_click). Fixed left-to-right
+        # order (confirmed with the user, 2026-08-22): Collection, Tuile de
+        # base, Generation, Forge, Editeur de sprite, Sound Box, Sauvegarder/
+        # Charger, Parametres -- deliberately independent of panel_frames'
+        # own z-order (which reshuffles as frames are brought to front).
+        # (frame_or_None, tab, visible_fn, modal_open_fn_or_None): a frame
+        # gated by in-world proximity (Generateur/Forge/Sound Box) hides
+        # its tab entirely rather than show one that would just re-lock
+        # itself on open, same fail-closed spirit as _entity_in_range --
+        # _layout_panel_tabs drops it from the row (no gap left behind) and
+        # its later siblings shift left to take its place, same for a
+        # still-locked tab in front of it. modal_open_fn is a lambda purely
+        # so self.game_manager.settings_panel (not constructed until AFTER
+        # Creator itself, see GameManager.__init__) is looked up lazily on
+        # click rather than here at construction time.
+        #
+        # Tab symbols (2026-08-22, user-provided asset) -- assets/UI/
+        # symbol.png is a 32px-tall strip of 32x32 icons, one per tab, in
+        # the ORIGINAL 8-tab left-to-right order (Collection/Tuile de
+        # base/Generation/Forge/Editeur de sprite/Sound Box/Sauvegarder-
+        # Charger/Parametres). Indices below stay pinned to that original
+        # order rather than to _panel_tab_entries' own position -- "Tempete"
+        # was inserted into the MIDDLE of the row later, and shifting every
+        # icon index to match would have silently reassigned each existing
+        # tab's own icon to its new neighbor. "Tempete" has no icon of its
+        # own yet (icon=None) rather than borrowing one that belongs to
+        # another tab. Missing the asset entirely still falls back to no
+        # icons anywhere (PanelTab already tolerates icon=None) rather than
+        # crashing Creator's construction.
+        _symbol_path = "assets/UI/symbol.png"
+        if os.path.exists(_symbol_path):
+            _symbol_sheet = pygame.image.load(_symbol_path).convert_alpha()
+            _symbol_count = min(8, _symbol_sheet.get_width() // 32)
+            _tab_icons = [_symbol_sheet.subsurface((i * 32, 0, 32, 32)).copy() for i in range(_symbol_count)]
+        else:
+            _tab_icons = []
+        _tab_icons += [None] * (8 - len(_tab_icons))
+
+        self._panel_tab_entries = [
+            (self.card_frame, PanelTab("Collection", self.card_renderer.card_backing(), icon=_tab_icons[0]), lambda: True, None),
+            (self.tools_frame, PanelTab("Tuile de base", self.card_renderer.card_backing(), icon=_tab_icons[1]), lambda: True, None),
+            (self.generator_frame, PanelTab("Generation procedurale", self.card_renderer.card_backing(), icon=_tab_icons[2]), self._generator_unlocked, None),
+            (self.mechanics_frame, PanelTab("Forge", self.card_renderer.card_backing(), icon=_tab_icons[3]), self._forge_unlocked, None),
+            (None, PanelTab("Editeur de sprite", self.card_renderer.card_backing(), icon=_tab_icons[4]), lambda: True, lambda: self.sprite_editor_panel),
+            (self.sound_box_frame, PanelTab("Sound Box", self.card_renderer.card_backing(), icon=_tab_icons[5]), self._sound_box_unlocked, None),
+            (self.storm_frame, PanelTab("Tempete", self.card_renderer.card_backing(), icon=None), lambda: True, None),
+            (self.room_frame, PanelTab("Sauvegarder / Charger", self.card_renderer.card_backing(), icon=_tab_icons[6]), lambda: True, None),
+            (None, PanelTab("Parametres", self.card_renderer.card_backing(), icon=_tab_icons[7]), lambda: True, lambda: self.game_manager.settings_panel),
+        ]
+        # frame -> its own tab, purely so a PanelFrame's own close button
+        # (see _handle_panel_close_click) knows which tab to animate back
+        # towards without a per-frame reverse lookup through the entries
+        # list every click.
+        self._tab_for_frame = {
+            frame: tab for frame, tab, _visible, _modal in self._panel_tab_entries if frame is not None
+        }
+        # Refreshed once per frame by _layout_panel_tabs (called at the top
+        # of run()'s loop) -- the (frame, tab, modal_open_fn) triples
+        # currently visible (idle-closed and, for the modal two, always),
+        # already laid out into this frame's row order/position. Read by
+        # the event loop's own tab-click check, _update_panel_tabs, and
+        # the render pass, so all three agree on the exact same rects for
+        # a given frame instead of drifting if each recomputed visibility/
+        # layout independently.
+        self._visible_panel_tabs = []
 
         # See _refresh_generator_panel/_refresh_panel_layout -- seeded
         # lazily from the local profile once a player identity actually
@@ -1111,6 +1214,183 @@ class Creator:
     def _sound_box_unlocked(self):
         return self._entity_in_range(self.SOUND_BOX_TOOL_NAME)
 
+    def _frame_combined_rect(self, frame):
+        """The title-bar-plus-body rect a fully-open frame occupies (title
+        bar's top edge down to the panel body's bottom edge) -- the far
+        endpoint of an opening animation and the near endpoint of a
+        closing one, always read fresh from the panel's CURRENT x/y/width/
+        height (its last known/profile-restored position, never a
+        hardcoded one -- see PanelOpenAnimation's own docstring)."""
+        title_rect = frame.title_rect()
+        body_rect = frame.body_rect()
+        return pygame.Rect(title_rect.x, title_rect.y, title_rect.width, title_rect.height + body_rect.height)
+
+    def _start_open_animation(self, frame, tab):
+        """Tab click on a currently idle-closed panel -- kicks off
+        PanelOpenAnimation.start_open from the tab's own current rect
+        (wherever it visually is right now) to this frame's own current
+        title/body rects. `collapsed` stays True for the whole sequence
+        (see _update_panel_transitions, which flips it once the animation
+        actually finishes) so nothing tries to interact with a panel that
+        isn't really on screen yet."""
+        if not frame.collapsed or frame.transition.is_animating:
+            return
+        frame.transition.start_open(tab.rect, frame.title_rect(), self._frame_combined_rect(frame))
+        if frame in self.panel_frames:
+            self.panel_frames.remove(frame)
+            self.panel_frames.append(frame)
+
+    def _start_close_animation(self, frame):
+        """The frame's own close button -- plays the reverse animation
+        back to its tab's last known spot (self._tab_for_frame). Flips
+        `collapsed` True immediately (not once the animation finishes,
+        unlike opening) so interaction with the panel stops the instant
+        the player asks to close it, even though it's still visibly
+        shrinking away for another moment."""
+        if frame.collapsed or frame.transition.is_animating:
+            return
+        tab = self._tab_for_frame.get(frame)
+        if tab is None:
+            return
+        frame.collapsed = True
+        frame.transition.start_close(tab.rect, frame.title_rect(), self._frame_combined_rect(frame))
+
+    def _update_panel_transitions(self, dt):
+        """Advances every frame's PanelOpenAnimation and reacts the one
+        tick a sequence actually finishes -- opening flips `collapsed`
+        False only now (see _start_open_animation); closing already
+        flipped it True up front, so this just persists the settled
+        state either way, same immediate-persist principle as every other
+        panel_layout change."""
+        for frame in self.panel_frames:
+            result = frame.transition.update(dt)
+            if result == "opened":
+                frame.collapsed = False
+                self._on_panel_frame_change(frame)
+            elif result == "closed":
+                self._on_panel_frame_change(frame)
+
+    def _layout_panel_tabs(self):
+        """Rebuilds self._visible_panel_tabs (frame_or_None, tab,
+        modal_open_fn_or_None) -- called once at the very top of run()'s
+        loop, before events are even read, so the event loop's own
+        tab-click check and this same frame's render/update all agree on
+        identical rects. A docked-panel tab only rejoins the row once its
+        frame is genuinely idle-closed (collapsed AND not mid-animation)
+        -- while open or transitioning it's "become" the traveling square
+        instead, see PanelOpenAnimation. Gated entries (generator/
+        mechanics/sound_box) drop out entirely the instant they're out of
+        range rather than leaving a gap -- later tabs shift left to take
+        their place (_entity_in_range's own fail-closed spirit)."""
+        screen_size = self.screen.get_size()
+        self._visible_panel_tabs = [
+            (frame, tab, modal) for frame, tab, visible, modal in self._panel_tab_entries
+            if visible() and (frame is None or (frame.collapsed and frame.transition.is_idle))
+        ]
+        for index, (_frame, tab, _modal) in enumerate(self._visible_panel_tabs):
+            tab.layout(index, screen_size)
+
+    def _update_panel_tabs(self, dt):
+        mouse_pos = pygame.mouse.get_pos()
+        for _frame, tab, _modal in self._visible_panel_tabs:
+            tab.update(dt, mouse_pos)
+
+    def _handle_panel_tab_click(self, event):
+        """Returns True if `event` is a left click landing on one of this
+        frame's currently-laid-out tabs -- opens a docked panel through its
+        animation, or opens a modal panel directly (no animation for those
+        two, see _panel_tab_entries)."""
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return False
+        for frame, tab, modal in self._visible_panel_tabs:
+            if tab.rect.collidepoint(event.pos):
+                if frame is not None:
+                    self._start_open_animation(frame, tab)
+                else:
+                    modal().open()
+                return True
+        return False
+
+    def _handle_panel_close_click(self, event):
+        """Returns True if `event` is a left click on the close button of
+        some currently fully-open docked panel -- topmost (panel_frames'
+        own z-order) first, in case two happen to overlap."""
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return False
+        for frame in reversed(self.panel_frames):
+            if frame.collapsed or frame.transition.is_animating:
+                continue
+            if frame.close_button_rect().collidepoint(event.pos):
+                self._start_close_animation(frame)
+                return True
+        return False
+
+    def _handle_panel_drag_event(self, event):
+        """Title-bar drag-to-reposition (see PanelFrame.handle_title_drag)
+        -- topmost fully-open, non-animating frame first (panel_frames'
+        own z-order), brought further to the front on the press that
+        starts a drag. A dragged panel's new position is picked up
+        automatically by its NEXT open/close animation (title_rect/
+        body_rect always read self.panel.x/y live, see PanelOpenAnimation),
+        so there's nothing extra to update here beyond the move itself."""
+        if event.type not in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
+            return False
+        for frame in reversed(self.panel_frames):
+            if frame.collapsed or frame.transition.is_animating:
+                continue
+            if frame.handle_title_drag(event):
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    self.panel_frames.remove(frame)
+                    self.panel_frames.append(frame)
+                return True
+        return False
+
+    def _render_panel_tabs(self):
+        for _frame, tab, _modal in self._visible_panel_tabs:
+            tab.render(self.screen)
+
+    def _render_faded(self, modal_panel, fade):
+        """Draws `modal_panel` (sprite editor / parametres) onto an
+        offscreen layer and blits that layer at fade.alpha -- see
+        ModalFadeState's own docstring for why these two get a plain fade
+        instead of PanelOpenAnimation. A no-op while fully faded out, so
+        this is safe to call unconditionally every frame regardless of
+        is_open."""
+        if not fade.visible:
+            return
+        layer = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+        modal_panel.render(layer)
+        layer.set_alpha(round(fade.alpha))
+        self.screen.blit(layer, (0, 0))
+
+    def _render_panel_transition(self, frame, panel_kwargs):
+        """Draws whatever this frame's animation is mid-way through this
+        frame, in place of its normal render() -- a plain bordered square/
+        bar for the shrink/travel/expand_title (and reverse) phases, or
+        the panel's REAL title bar + body clipped to the animated rect for
+        expand_body/shrink_body, so the content itself visibly "wipes" in/
+        out rather than just popping in once the box reaches full size."""
+        phase = frame.transition.current_phase
+        rect = frame.transition.current_rect()
+        if rect is None or rect.width <= 0 or rect.height <= 0:
+            return
+        if phase in ("expand_body", "shrink_body"):
+            previous_clip = self.screen.get_clip()
+            self.screen.set_clip(rect)
+            frame.render_chrome(self.screen)
+            frame.panel.render(self.screen, **panel_kwargs)
+            self.screen.set_clip(previous_clip)
+        elif phase in ("expand_title", "shrink_title"):
+            frame.border.draw(self.screen, rect)
+            if rect.width >= 40:
+                label = frame.font.render(frame.title, True, (255, 255, 255))
+                previous_clip = self.screen.get_clip()
+                self.screen.set_clip(rect)
+                self.screen.blit(label, (rect.x + 8, rect.centery - label.get_height() / 2))
+                self.screen.set_clip(previous_clip)
+        else:
+            frame.border.draw(self.screen, rect)
+
     def _render_delete_drop_zone(self):
         """Bottom-left drop-to-delete zone (see _resolve_dragged_card),
         admingod-only -- invisible entirely otherwise, not just locked, per
@@ -1130,10 +1410,12 @@ class Creator:
 
     def _draw_panel_lock_overlay(self, frame, message):
         """Dims a docked panel's body and explains why it's inaccessible --
-        the title bar stays undimmed/draggable (PanelFrame.handle_title_event
-        never checks lock state), so a locked panel can still be repositioned
-        or collapsed, it just refuses interaction until the matching entity
-        is back in range."""
+        only reached while `frame` is actually open, which for a gated
+        panel (Generateur/Forge/Sound Box) only happens via its own
+        PanelTab, and that tab is itself hidden whenever _entity_in_range
+        is false (see _panel_tab_entries) -- so in practice this overlay
+        only ever appears for the brief window between opening the panel
+        and then walking back out of the unlocking entity's range."""
         if frame.collapsed:
             return
         body_rect = pygame.Rect(frame.panel.x, frame.panel.y, frame.panel.width, frame.panel.height)
@@ -1196,6 +1478,11 @@ class Creator:
         running = True
 
         while running:
+
+            # Recomputed before events are even read so this same frame's
+            # click-handling and rendering agree on identical tab rects
+            # (see _layout_panel_tabs' own docstring).
+            self._layout_panel_tabs()
 
             # -------------------------------------------------
             # Events
@@ -1275,26 +1562,18 @@ class Creator:
                     self.game_manager.settings_panel.handle_event(event)
                     continue
 
-                # Draggable/collapsible panel title bars -- topmost frame
-                # first (see panel_frames' own z-order docstring), checked
-                # and fully consumed (continue) before anything else here
-                # gets a look at the event, so a title-bar click/drag can
-                # never also start painting, an object-palette drag, etc.
-                # underneath it. handle_title_event only ever returns True
-                # for an in-progress drag's own MOUSEMOTION/MOUSEBUTTONUP
-                # (at most one frame is ever mid-drag at once), so iteration
-                # order only actually matters for MOUSEBUTTONDOWN.
-                if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
-                    frame_claimed = False
-                    for frame in reversed(self.panel_frames):
-                        if frame.handle_title_event(event):
-                            if event.type == pygame.MOUSEBUTTONDOWN:
-                                self.panel_frames.remove(frame)
-                                self.panel_frames.append(frame)
-                            frame_claimed = True
-                            break
-                    if frame_claimed:
-                        continue
+                # Bottom-left panel tab row, then each open panel's own
+                # close button, then its title bar drag -- all checked and
+                # fully consumed (continue) before anything else here gets
+                # a look at the event, so a click on any of them can never
+                # also start painting, an object-palette drag, etc.
+                # underneath it.
+                if self._handle_panel_tab_click(event):
+                    continue
+                if self._handle_panel_close_click(event):
+                    continue
+                if self._handle_panel_drag_event(event):
+                    continue
 
                 self.object_tool.handle_event(event)
 
@@ -1312,6 +1591,7 @@ class Creator:
                             or self.card_frame.contains(event.pos)
                             or self.mechanics_frame.contains(event.pos)
                             or self.sound_box_frame.contains(event.pos)
+                            or self.storm_frame.contains(event.pos)
                         )
                     panel_click = self._panel_owns_drag
                     if event.type == pygame.MOUSEBUTTONUP:
@@ -1380,6 +1660,15 @@ class Creator:
                         if self.sound_box_panel.handle_event(event) is not None:
                             self._refresh_card_panel()
 
+                    if not self.storm_frame.collapsed:
+                        # Not entity-gated (see _panel_tab_entries) -- no
+                        # unlock check needed here either, unlike Forge/
+                        # Sound Box above. Return value is never used
+                        # (StormPanelUI mutates game_manager.storm_generator.
+                        # config in place, nothing to apply/refresh
+                        # afterward).
+                        self.storm_panel.handle_event(event)
+
                     # Resolves an in-progress card drag BEFORE the
                     # panel_click gate below -- a card drag always STARTS
                     # with a press inside card_frame's bounds (that's where
@@ -1439,14 +1728,6 @@ class Creator:
                 elif event.type == pygame.MOUSEBUTTONDOWN:
 
                     if event.button == 1:
-
-                        if self.sprite_editor_button_rect.collidepoint(event.pos):
-                            self.sprite_editor_panel.open()
-                            continue
-
-                        if self.settings_button_rect.collidepoint(event.pos):
-                            self.game_manager.settings_panel.open()
-                            continue
 
                         if not self.tools_frame.collapsed and self.palette.hit_floor_toggle(event.pos):
                             self.floor_tool_active = not self.floor_tool_active
@@ -1622,6 +1903,18 @@ class Creator:
 
                 elif event.type == pygame.KEYDOWN:
 
+                    # The storm panel's preset-name field is the only text
+                    # input anywhere in Creator's own docked panels --
+                    # while it's focused, typing (including TAB/ESC, which
+                    # would otherwise switch state/quit) goes to it
+                    # instead. MOUSEBUTTONDOWN/MOUSEMOTION/MOUSEBUTTONUP
+                    # already always reach storm_panel while it's open
+                    # (see the block above); only KEYDOWN needed this
+                    # extra gate.
+                    if not self.storm_frame.collapsed and self.storm_panel.wants_keyboard:
+                        self.storm_panel.handle_event(event)
+                        continue
+
                     if event.key == pygame.K_TAB:
                         self.game_manager.state = GameState.EXPLORATION
                         running = False
@@ -1651,6 +1944,11 @@ class Creator:
             # update() docstring). A no-op call for every other card kind/
             # when nothing is loaded, so unconditional here is simplest.
             self.mechanics_panel.update(dt)
+            self._update_panel_tabs(dt)
+            self._update_panel_transitions(dt)
+            self._sprite_editor_fade.update(dt, self.sprite_editor_panel.is_open)
+            self._settings_fade.update(dt, self.game_manager.settings_panel.is_open)
+            self.game_manager.storm_generator.update(dt, self.screen.get_size())
             if self.object_tool.dragging:
 
                 grid_x, grid_y = self._mouse_to_grid(
@@ -1679,6 +1977,7 @@ class Creator:
                 self.spawn_preview = None
 
             self.screen.fill((20, 20, 20))
+            self.game_manager.storm_generator.render(self.screen, self.camera)
 
             self.screen.blit(
                 self.title_font.render(
@@ -1738,13 +2037,12 @@ class Creator:
                     self.screen.blit(sprite, rect)
 
             # Rendered in panel_frames' own z-order (last = topmost, see its
-            # docstring) rather than a fixed sequence, so a frame dragged on
+            # docstring) rather than a fixed sequence, so a frame opened on
             # top of another actually draws on top of it.
             for frame in self.panel_frames:
                 if frame is self.tools_frame:
                     stock = self._active_profile.card_collection if self._active_profile is not None else {}
-                    frame.render(
-                        self.screen,
+                    panel_kwargs = dict(
                         floor_active=self.floor_tool_active,
                         wall_active=self.wall_tool_active,
                         floor_stock=stock.get("tile_floor", 0),
@@ -1757,7 +2055,11 @@ class Creator:
                         ),
                     )
                 else:
-                    frame.render(self.screen)
+                    panel_kwargs = {}
+                if frame.transition.is_animating:
+                    self._render_panel_transition(frame, panel_kwargs)
+                else:
+                    frame.render(self.screen, **panel_kwargs)
                 if frame is self.generator_frame and not self._generator_unlocked():
                     self._draw_panel_lock_overlay(frame, "Approchez-vous de Djepeto")
                 elif frame is self.mechanics_frame and not self._forge_unlocked():
@@ -1769,18 +2071,11 @@ class Creator:
             self.chest_panel.render(self.screen)
             self.role_panel.render(self.screen)
             self.autotile_theme_panel.render(self.screen)
-            self._sprite_editor_border.draw_centered_label(
-                self.screen, self.sprite_editor_button_rect, self.sprite_editor_button_font, "Editeur de sprite",
-            )
-            self._sprite_editor_border.draw_centered_label(
-                self.screen, self.settings_button_rect, self.sprite_editor_button_font, "Parametres",
-            )
-            self.sprite_editor_panel.render(self.screen)
-
-            if self.game_manager.settings_panel.is_open:
-                self.game_manager.settings_panel.render(self.screen)
+            self._render_faded(self.sprite_editor_panel, self._sprite_editor_fade)
+            self._render_faded(self.game_manager.settings_panel, self._settings_fade)
 
             self._render_delete_drop_zone()
+            self._render_panel_tabs()
 
             # Drawn dead last, after every panel above -- fixes a real bug:
             # this used to render before the panel_frames loop, so the

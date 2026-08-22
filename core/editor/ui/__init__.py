@@ -19,6 +19,7 @@ from core.editor.ui.autotile_theme_panel import AutotileThemePanelUI
 from core.editor.ui.sprite_editor import SpriteEditorPanelUI
 from core.editor.ui.mechanics_panel import MechanicsPanelUI
 from core.editor.ui.sound_box_panel import SoundBoxPanelUI
+from core.editor.ui.storm_panel import StormPanelUI
 
 __all__ = [
     "ToolPaletteUI",
@@ -32,4 +33,5 @@ __all__ = [
     "SpriteEditorPanelUI",
     "MechanicsPanelUI",
     "SoundBoxPanelUI",
+    "StormPanelUI",
 ]

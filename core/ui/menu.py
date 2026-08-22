@@ -23,6 +23,7 @@ from core.data.ressources import (
 from core.ui.widgets import BorderManager, RoomBrowser, TextInputBox
 from core.ui.fonts import get_font
 from core.world.home import ensure_home_room
+from core.engine.camera import Camera
 
 
 class Menu:
@@ -80,6 +81,16 @@ class Menu:
         self.room_browser = RoomBrowser(x, self.OPTIONS_TOP, width=self.OPTION_WIDTH)
 
         self.clock = pygame.time.Clock()
+        # Never moved -- Menu has no real camera of its own (see this
+        # class's own docstring), this exists purely so
+        # game_manager.storm_generator.render() has *something* to read
+        # .x/.y off for its parallax offset. A static (0, 0) camera just
+        # means the background particle layer never parallax-shifts here,
+        # which is the correct/expected degradation: it still animates
+        # (circular/rectilinear motion is independent of any camera), just
+        # without a pan-driven depth cue there's no player-driven pan to
+        # react to in the first place.
+        self._storm_camera = Camera()
 
     def _option_rect(self, index):
         x = self.screen.get_width() / 2 - self.OPTION_WIDTH / 2
@@ -252,7 +263,8 @@ class Menu:
 
         while running:
 
-            self.clock.tick(60)
+            dt = self.clock.tick(60) / 1000
+            self.game_manager.storm_generator.update(dt, self.screen.get_size())
 
             for event in pygame.event.get():
 
@@ -361,6 +373,7 @@ class Menu:
     def _render(self):
 
         self.screen.fill((20, 20, 30))
+        self.game_manager.storm_generator.render(self.screen, self._storm_camera)
 
         TITLES = {
             "login": "Pseudo et mot de passe",

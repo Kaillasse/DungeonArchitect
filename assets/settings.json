@@ -46,8 +46,8 @@
     ]
   },
   "border_cell": [
-    0,
-    1
+    2,
+    4
   ],
   "volume": 1.0,
   "local_player_name": "thib"

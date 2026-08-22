@@ -1810,6 +1810,12 @@ class Explorator(NetworkSessionMixin):
 
     def update(self, dt):
 
+        # Purely cosmetic background layer (core.rendering.storm) -- one
+        # shared instance for the whole session (see GameManager's own
+        # construction), updated here unconditionally (even during
+        # self.victory's early return below) so it never visibly freezes.
+        self.game_manager.storm_generator.update(dt, self.screen.get_size())
+
         self._read_input()
 
         if self.victory:
@@ -1893,6 +1899,14 @@ class Explorator(NetworkSessionMixin):
     def render(self):
 
         self.screen.fill((20, 20, 20))
+        # Drawn once, full-screen, using the merged/shared camera (self.
+        # camera) even in real split-screen -- a per-viewport-correct
+        # parallax would need each session's own camera, which reads as
+        # unnecessary complexity for a purely cosmetic layer both players
+        # seeing the same shared "weather" already looks reasonable
+        # (see core.rendering.storm's own docstring for the no-gameplay-
+        # coupling contract this keeps either way).
+        self.game_manager.storm_generator.render(self.screen, self.camera)
 
         local_sessions = self._local_sessions()
         merged = self._merged_view()

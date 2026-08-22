@@ -249,6 +249,82 @@ class Stepper:
 
 
 # ---------------------------------------------------------------------
+# Slider (horizontal track + handle numeric input)
+# ---------------------------------------------------------------------
+
+
+class Slider:
+    """A horizontal "track + handle" numeric input over an integer
+    [minimum, maximum] range -- click anywhere on the track to jump the
+    handle there, or press-and-drag the handle itself across a wide range
+    in one gesture (StormPanelUI's own motivation for using this over
+    Stepper's +/- buttons, confirmed with the user, 2026-08-22: some of
+    its ranges are wide enough that dozens of +/-1 clicks were tedious).
+
+    Deliberately stateless (no "am I currently being dragged" flag of its
+    own) -- unlike Stepper, a slider drag must keep tracking the mouse
+    across multiple MOUSEMOTION events spanning several frames, but
+    StormPanelUI (the only caller so far) rebuilds a fresh Slider instance
+    from scratch on every single call to keep move() a plain x/y update
+    (see its own docstring) -- an instance-owned drag flag would silently
+    reset every time and a drag could never actually continue. The
+    CALLER owns "which field is currently being dragged" instead (a
+    plain key it remembers across calls) and always routes drag-continue
+    events straight to handle_drag() for that one field, bypassing the
+    track-collision check in handle_click() entirely once a drag has
+    started (so the drag doesn't stop just because the mouse strayed
+    above/below the track's own y-range, standard slider behavior)."""
+
+    HANDLE_WIDTH = 10
+
+    def __init__(self, x, y, width, height, minimum, maximum):
+        self.track_rect = pygame.Rect(x, y, width, height)
+        self.minimum = minimum
+        self.maximum = maximum
+
+    def _value_to_x(self, value):
+        span = self.maximum - self.minimum
+        usable = self.track_rect.width - self.HANDLE_WIDTH
+        t = 0.0 if span <= 0 else (value - self.minimum) / span
+        return self.track_rect.x + self.HANDLE_WIDTH / 2 + max(0.0, min(1.0, t)) * usable
+
+    def _x_to_value(self, x):
+        usable = self.track_rect.width - self.HANDLE_WIDTH
+        if usable <= 0:
+            return self.minimum
+        t = (x - self.track_rect.x - self.HANDLE_WIDTH / 2) / usable
+        t = max(0.0, min(1.0, t))
+        return round(self.minimum + t * (self.maximum - self.minimum))
+
+    def contains(self, pos):
+        return self.track_rect.collidepoint(pos)
+
+    def handle_click(self, pos):
+        """A MOUSEBUTTONDOWN at `pos` -- returns the new clamped value if
+        `pos` hit the track (jump-to-click), else None. The caller starts
+        tracking a drag on a non-None return, same as handle_drag below."""
+        if self.track_rect.collidepoint(pos):
+            return self._x_to_value(pos[0])
+        return None
+
+    def handle_drag(self, pos):
+        """A MOUSEMOTION while this field is the caller's own remembered
+        "currently dragging" one -- always returns a new clamped value
+        (x is clamped to the track's own range even if `pos` has drifted
+        outside it vertically or horizontally)."""
+        return self._x_to_value(pos[0])
+
+    def render(self, screen, value, track_color=(55, 55, 68), fill_color=(90, 150, 220), handle_color=(235, 235, 245)):
+        pygame.draw.rect(screen, track_color, self.track_rect, border_radius=3)
+        handle_x = self._value_to_x(value)
+        fill_rect = pygame.Rect(self.track_rect.x, self.track_rect.y, max(0, round(handle_x - self.track_rect.x)), self.track_rect.height)
+        pygame.draw.rect(screen, fill_color, fill_rect, border_radius=3)
+        handle_rect = pygame.Rect(0, 0, self.HANDLE_WIDTH, self.track_rect.height + 6)
+        handle_rect.center = (handle_x, self.track_rect.centery)
+        pygame.draw.rect(screen, handle_color, handle_rect, border_radius=2)
+
+
+# ---------------------------------------------------------------------
 # Layout column (vertical rect-stacking cursor)
 # ---------------------------------------------------------------------
 
@@ -308,32 +384,187 @@ class LayoutColumn:
 # ---------------------------------------------------------------------
 
 
+def _lerp(a, b, t):
+    return a + (b - a) * t
+
+
+def _ease(t):
+    """Smoothstep -- eases both ends of a 0..1 progress value so animated
+    motion (PanelOpenAnimation) reads as deliberate rather than linear/
+    robotic."""
+    t = max(0.0, min(1.0, t))
+    return t * t * (3 - 2 * t)
+
+
+def _lerp_rect(start, end, t):
+    t = _ease(t)
+    return pygame.Rect(
+        round(_lerp(start.x, end.x, t)), round(_lerp(start.y, end.y, t)),
+        round(_lerp(start.width, end.width, t)), round(_lerp(start.height, end.height, t)),
+    )
+
+
+class PanelOpenAnimation:
+    """Procedural open/close choreography between a PanelTab (its bottom-
+    left bookmark spot, collapsed state) and its PanelFrame (docked, fully
+    open state) -- confirmed with the user, 2026-08-22. One instance lives
+    on each PanelFrame (see PanelFrame.transition); Creator triggers it
+    (tab click to open, PanelFrame's own close button to close) and reads
+    current_phase()/current_rect() each frame to know what to draw instead
+    of the frame's normal chrome/body while `is_animating`.
+
+    Opening plays 4 fixed-duration phases in order, using the tab's and
+    the panel's own CURRENT (last known, e.g. profile-restored) positions
+    as endpoints, never a hardcoded one:
+      shrink       -- the tab collapses in place into a small square
+      travel       -- the square glides to the panel's title bar's left edge
+      expand_title -- the square stretches sideways into the full title
+                       bar, revealing the panel's name
+      expand_body  -- the bar stretches downward into the full panel body
+    Closing plays the exact reverse (shrink_body, shrink_title, travel_back,
+    grow) ending back at the tab's own spot.
+
+    Purely a phase/progress/rect state machine -- draws nothing itself."""
+
+    SQUARE_SIZE = 20
+    PHASE_DURATION = 0.14  # seconds per phase -- ~0.56s for the full sequence
+
+    _OPEN_PHASES = ("shrink", "travel", "expand_title", "expand_body")
+    _CLOSE_PHASES = ("shrink_body", "shrink_title", "travel_back", "grow")
+
+    def __init__(self):
+        self.phases = None
+        self.phase_index = 0
+        self.t = 0.0
+        self.tab_rect = None
+        self.tab_square_rect = None
+        self.title_rect = None
+        self.title_square_rect = None
+        self.combined_rect = None
+
+    @property
+    def is_idle(self):
+        return self.phases is None
+
+    @property
+    def is_animating(self):
+        return self.phases is not None
+
+    def _prime(self, tab_rect, title_rect, combined_rect):
+        """Captures every endpoint rect fresh, at the moment an animation
+        starts -- tab_rect is wherever the tab visually is RIGHT NOW
+        (mid-hover-rise or resting, doesn't matter), title_rect/
+        combined_rect come from the panel's current x/y/width/height. The
+        two intermediate squares are derived from these so both directions
+        of the animation always land exactly on the real title bar and the
+        real tab, however either has moved since the last time this ran."""
+        self.tab_rect = pygame.Rect(tab_rect)
+        self.tab_square_rect = pygame.Rect(0, 0, self.SQUARE_SIZE, self.SQUARE_SIZE)
+        self.tab_square_rect.center = self.tab_rect.center
+        self.title_rect = pygame.Rect(title_rect)
+        self.title_square_rect = pygame.Rect(0, 0, self.SQUARE_SIZE, self.SQUARE_SIZE)
+        self.title_square_rect.midleft = self.title_rect.midleft
+        self.combined_rect = pygame.Rect(combined_rect)
+
+    def start_open(self, tab_rect, title_rect, combined_rect):
+        self._prime(tab_rect, title_rect, combined_rect)
+        self.phases = self._OPEN_PHASES
+        self.phase_index = 0
+        self.t = 0.0
+
+    def start_close(self, tab_rect, title_rect, combined_rect):
+        self._prime(tab_rect, title_rect, combined_rect)
+        self.phases = self._CLOSE_PHASES
+        self.phase_index = 0
+        self.t = 0.0
+
+    def update(self, dt):
+        """Advances the running sequence, if any. Returns "opened"/"closed"
+        the one frame a sequence finishes (so Creator can flip `collapsed`
+        and persist it), None every other frame including while idle."""
+        if self.phases is None:
+            return None
+        was_opening = self.phases is self._OPEN_PHASES
+        self.t += dt / self.PHASE_DURATION
+        while self.phases is not None and self.t >= 1.0:
+            self.t -= 1.0
+            self.phase_index += 1
+            if self.phase_index >= len(self.phases):
+                self.phases = None
+                self.phase_index = 0
+                self.t = 0.0
+                return "opened" if was_opening else "closed"
+        return None
+
+    @property
+    def current_phase(self):
+        return None if self.phases is None else self.phases[self.phase_index]
+
+    def current_rect(self):
+        """The single rect to draw this frame's in-flight square/bar/box
+        at, for whichever phase is currently active -- None while idle."""
+        phase = self.current_phase
+        if phase is None:
+            return None
+        endpoints = {
+            "shrink": (self.tab_rect, self.tab_square_rect),
+            "travel": (self.tab_square_rect, self.title_square_rect),
+            "expand_title": (self.title_square_rect, self.title_rect),
+            "expand_body": (self.title_rect, self.combined_rect),
+            "shrink_body": (self.combined_rect, self.title_rect),
+            "shrink_title": (self.title_rect, self.title_square_rect),
+            "travel_back": (self.title_square_rect, self.tab_square_rect),
+            "grow": (self.tab_square_rect, self.tab_rect),
+        }
+        start, end = endpoints[phase]
+        return _lerp_rect(start, end, self.t)
+
+
 class PanelFrame:
     """Wraps one of Creator's docked panels (ToolPaletteUI, CardPanelUI,
-    RoomPanelUI, GeneratorPanelUI -- anything exposing x/y/width/
+    RoomPanelUI, GeneratorPanelUI -- anything exposing x/y/width/height/
     render(screen)/contains(pos) plus a move(dx, dy) it implements itself,
     since each one caches its own child rects differently) with a
-    draggable title bar and a collapse toggle, so Creator's docked panels
-    can be repositioned/hidden instead of sitting at fixed coordinates
-    forever.
+    `collapsed` flag and a minimal title bar (name + a close button) drawn
+    just above it while open, so a docked panel can be hidden/shown and
+    the player can still tell what's on screen (confirmed with the user,
+    2026-08-22 -- an earlier pass dropped the bar entirely in favor of the
+    bottom-left PanelTab alone, which turned out to read as unlabelled
+    clutter once several panels were open at once).
+
+    The title bar (minus its close button) is still a drag handle
+    (2026-08-22: reintroduced -- turned out to matter a lot in practice,
+    letting the player put each panel wherever suits their layout)
+    dragged via handle_title_drag(), gated by Creator to only fully-open,
+    non-animating frames. Opening goes through a PanelTab
+    (core.editor.creator._panel_tab_entries) and closing through this
+    frame's own close_button_rect(), both driving a PanelOpenAnimation
+    (self.transition) that animates between the tab's spot and this
+    frame's own CURRENT x/y/width/height rather than teleporting -- since
+    title_rect()/body_rect() are always read fresh off self.panel.x/y/
+    width/height, wherever the player last dragged a panel to is exactly
+    where its next open/close animation will start/end, no extra plumbing
+    needed. Creator owns triggering that animation and reading
+    transition.current_rect()/current_phase() to know what to draw instead
+    of render() while transition.is_animating -- this class only exposes
+    the rects/state needed for that (title_rect/body_rect/
+    close_button_rect/transition).
 
     Deliberately NOT an event-dispatch layer over the wrapped panel's own
     handle_event -- Creator keeps calling each panel's existing
     click-routing exactly as before (hit_autotile_toggle, object palette
     drag-start, room/generator panel confirm actions), just gated by
-    `not frame.collapsed` now. This frame only ever owns the title-bar
-    strip drawn just ABOVE the wrapped panel's own bounds (panel.y itself
-    never changes meaning, so none of the wrapped panels' internal
-    y-relative layouts needed touching) -- title-bar clicks either toggle
-    `collapsed` or start a drag, both handled entirely inside
-    handle_title_event, never falling through to the panel body.
+    `not frame.collapsed` -- which Creator keeps True for the entire
+    opening animation and sets True the instant closing starts, so normal
+    interaction never reaches a panel that isn't ACTUALLY fully on screen
+    yet/anymore.
     """
 
     TITLE_HEIGHT = 24
-    TOGGLE_SIZE = 18
+    CLOSE_BUTTON_SIZE = 18
     # How many pixels of the title bar must stay on-screen horizontally --
-    # keeps a stuck-off-to-the-side panel's title bar always grabbable
-    # again, without forcing the whole (possibly much wider) panel body
+    # keeps a panel restored from a stale/off-screen saved position still
+    # reachable, without forcing the whole (possibly much wider) panel body
     # back on-screen too.
     MIN_VISIBLE_X = 60
 
@@ -342,6 +573,7 @@ class PanelFrame:
         self.title = title
         self.on_change = on_change
         self.collapsed = False
+        self.transition = PanelOpenAnimation()
 
         self._dragging = False
         self._drag_last_pos = None
@@ -352,24 +584,25 @@ class PanelFrame:
     def title_rect(self):
         return pygame.Rect(self.panel.x, self.panel.y - self.TITLE_HEIGHT, self.panel.width, self.TITLE_HEIGHT)
 
-    def _toggle_rect(self):
+    def body_rect(self):
+        return pygame.Rect(self.panel.x, self.panel.y, self.panel.width, self.panel.height)
+
+    def close_button_rect(self):
         title = self.title_rect()
         return pygame.Rect(
-            title.right - self.TOGGLE_SIZE - 4,
-            title.y + (title.height - self.TOGGLE_SIZE) / 2,
-            self.TOGGLE_SIZE, self.TOGGLE_SIZE,
+            title.right - self.CLOSE_BUTTON_SIZE - 4,
+            title.y + (title.height - self.CLOSE_BUTTON_SIZE) / 2,
+            self.CLOSE_BUTTON_SIZE, self.CLOSE_BUTTON_SIZE,
         )
 
     def _clamp_panel_xy(self, x, y):
-        """Keeps the title bar -- the only handle a panel can be dragged or
-        recovered by -- fully reachable: its top edge never above the
-        screen (the bug that stranded the Forge panel, whose saved y went
-        negative and put its whole title bar above y=0 with no way to grab
-        it back) and at least MIN_VISIBLE_X of its width on-screen
-        horizontally. The panel body itself is free to hang off any edge --
-        only the drag handle needs to stay clickable. Called from both the
-        live drag path and move_to (so a stale/out-of-bounds saved layout
-        self-heals on restore instead of reproducing the same stuck panel)."""
+        """Keeps the title bar fully on-screen when restoring a saved
+        layout: its top edge never above the screen (the bug that stranded
+        the Forge panel, whose saved y went negative and put its whole
+        title bar above y=0) and at least MIN_VISIBLE_X of its width
+        on-screen horizontally. The panel body itself is free to hang off
+        any edge. Self-heals a stale/out-of-bounds saved layout on
+        restore (see move_to)."""
         surface = pygame.display.get_surface()
         if surface is None:
             return x, y
@@ -380,34 +613,23 @@ class PanelFrame:
         return x, y
 
     def move_to(self, x, y):
-        """Absolute reposition -- used to restore a saved layout. Delegates
-        to the wrapped panel's own move(dx, dy) so both the drag path and
-        the restore path share the exact same per-panel relocation logic
-        (icon rects, Stepper rects, etc. all get shifted the same way)."""
+        """Absolute reposition -- used only to restore a saved layout now
+        (no more live drag). Delegates to the wrapped panel's own
+        move(dx, dy) so the restore path shifts icon rects, Stepper rects,
+        etc. exactly the same way any other relocation would."""
         x, y = self._clamp_panel_xy(x, y)
         self.panel.move(x - self.panel.x, y - self.panel.y)
 
-    def contains(self, pos):
-        """True if `pos` hits either the title bar or (when not collapsed)
-        the wrapped panel's own body -- used by Creator both to bring this
-        frame to front and to decide whether a click here should block a
-        click from reaching the grid underneath (see Creator's existing
-        panel_click gating)."""
-        if self.title_rect().collidepoint(pos):
-            return True
-        return not self.collapsed and self.panel.contains(pos)
-
-    def handle_title_event(self, event):
-        """Title bar/toggle interaction only (drag start/continue/end,
-        collapse toggle) -- returns True if this event was about the
-        title bar and should NOT be forwarded to the wrapped panel's own
-        handle_event/click routing at all. Body events are the caller's
-        job (see this class's own docstring for why)."""
+    def handle_title_drag(self, event):
+        """Drag-to-reposition via the title bar, excluding the close
+        button (Creator checks that separately, before this, so a close
+        click can never also start a drag). Returns True if this event was
+        about dragging and should not be forwarded to anything else.
+        Creator only ever calls this for a frame that's fully open and not
+        mid-animation -- same gating as every other interaction here."""
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            if self._toggle_rect().collidepoint(event.pos):
-                self.collapsed = not self.collapsed
-                self._notify_change()
-                return True
+            if self.close_button_rect().collidepoint(event.pos):
+                return False
             if self.title_rect().collidepoint(event.pos):
                 self._dragging = True
                 self._drag_last_pos = event.pos
@@ -432,23 +654,229 @@ class PanelFrame:
 
         return False
 
+    def contains(self, pos):
+        """True if `pos` hits the title bar or body of a panel that is
+        ACTUALLY fully open right now (not collapsed, not mid-animation)
+        -- used by Creator both to bring this frame to front and to decide
+        whether a click here should block a click from reaching the grid
+        underneath (see Creator's existing panel_click gating). Always
+        False during a transition -- nothing real is sitting at this
+        frame's rect yet/anymore, only the animated square/bar Creator
+        draws separately."""
+        if self.collapsed or self.transition.is_animating:
+            return False
+        return self.title_rect().collidepoint(pos) or self.panel.contains(pos)
+
     def _notify_change(self):
         if self.on_change is not None:
             self.on_change(self)
+
+    def render_chrome(self, screen):
+        """The minimal title bar alone -- name + close button, no drag
+        handle. Used both by render() (normal, fully-open state) and by
+        Creator's transition rendering once the expand_title/shrink_body
+        phase has it at full size (see PanelOpenAnimation)."""
+        title_rect = self.title_rect()
+        self.border.draw(screen, title_rect)
+        label = self.font.render(self.title, True, (255, 255, 255))
+        screen.blit(label, (title_rect.x + 8, title_rect.centery - label.get_height() / 2))
+        self.border.draw_centered_label(screen, self.close_button_rect(), self.font, "x")
 
     def render(self, screen, **panel_kwargs):
         """**panel_kwargs is forwarded to the wrapped panel's own render
         (e.g. ToolPaletteUI.render(screen, autotile_enabled=...)) -- this
         class doesn't need to know each panel's particular render
-        signature, just pass whatever the caller gave it through."""
-        title_rect = self.title_rect()
-        self.border.draw(screen, title_rect)
-        label = self.font.render(self.title, True, (255, 255, 255))
-        screen.blit(label, (title_rect.x + 8, title_rect.centery - label.get_height() / 2))
-        self.border.draw_centered_label(screen, self._toggle_rect(), self.font, "+" if self.collapsed else "-")
+        signature, just pass whatever the caller gave it through. Only
+        meaningful while fully open -- Creator never calls this during a
+        transition (see PanelOpenAnimation's own rendering in Creator)."""
+        if self.collapsed:
+            return
+        self.render_chrome(screen)
+        self.panel.render(screen, **panel_kwargs)
 
-        if not self.collapsed:
-            self.panel.render(screen, **panel_kwargs)
+
+class ModalFadeState:
+    """Tracks a simple fade in/out alpha (0..255) for a full-screen modal
+    panel that owns its own is_open/open()/close() -- SettingsPanelUI,
+    SpriteEditorPanelUI -- neither of which is a good fit for
+    PanelOpenAnimation's tab-travel choreography (both are genuinely
+    full-screen, not a small docked rect with a "last known position" to
+    animate to/from; SettingsPanelUI in particular is shared between
+    Creator and Explorator, so reshaping it into a dockable panel would
+    ripple well past this file). update() just watches whatever `is_open`
+    the caller passes each frame and ramps toward 255 (fully visible) or 0
+    -- no hook into open()/close() needed, so it works with either panel
+    completely unmodified. Confirmed with the user, 2026-08-22: "un petit
+    fondu... ça ira très bien" -- a fade only, not the full animation."""
+
+    FADE_SPEED = 900  # alpha units/sec, ~0.28s for a full 0->255 fade
+
+    def __init__(self):
+        self.alpha = 0.0
+
+    def update(self, dt, is_open):
+        target = 255.0 if is_open else 0.0
+        if self.alpha < target:
+            self.alpha = min(target, self.alpha + self.FADE_SPEED * dt)
+        elif self.alpha > target:
+            self.alpha = max(target, self.alpha - self.FADE_SPEED * dt)
+
+    @property
+    def visible(self):
+        return self.alpha > 0
+
+
+class PanelTab:
+    """A small bookmark-style tab that opens/closes one docked PanelFrame --
+    see Creator, the only caller. Lives in a row anchored to the screen's
+    bottom-left corner: at rest, only PEEK_HEIGHT pokes above the bottom
+    edge -- just enough to always show its symbol (see ICON_TOP_MARGIN/
+    ICON_SIZE) -- and on hover it rises exactly far enough to reveal its
+    OWN full title text (self._reveal_height, see __init__), no further --
+    "no more than needed, but always enough to read" (2026-08-22, confirmed
+    with the user). self.HEIGHT is therefore computed per-instance from
+    the title's own rendered length, not a shared constant -- a short
+    title like "Forge" needs (and rises) far less than "Generation
+    procedurale". Its own bottom edge still never becomes visible even
+    fully hovered (HEIGHT is always taller than what actually gets
+    revealed, see HEIGHT_HIDDEN_MARGIN), so it keeps reading as a drawer
+    still anchored below the screen rather than a floating card. The
+    title lives INSIDE the tab, rotated 90 degrees, immediately below the
+    symbol (LABEL_TOP_MARGIN kept small on purpose -- "contre le sprite")
+    -- not above the tab like an earlier pass had it.
+
+    Purely a rect/hover-progress/click helper -- it renders itself and
+    tracks its own hover animation, but knows nothing about PanelFrame,
+    gating, or z-order; Creator owns the entry list (which tabs exist, in
+    what order, whether each is currently visible) and what a click does
+    (toggle collapsed, bring the frame to front, persist the layout).
+    layout() must be called once per frame (index = this tab's position
+    among the currently-visible ones) before update()/render()."""
+
+    WIDTH = 44
+    # How much of the icon (see ICON_TOP_MARGIN/ICON_SIZE below) must clear
+    # the screen's bottom edge at rest -- always exactly enough to show the
+    # whole symbol plus a small buffer, never partially cropped. Same for
+    # every tab regardless of title length -- nothing but the icon shows
+    # at rest anyway.
+    PEEK_HEIGHT = 44
+    # How much of self.HEIGHT stays below the screen's bottom edge even at
+    # full hover (self._reveal_height, not self.HEIGHT, is what actually
+    # gets revealed) -- keeps the tab reading as anchored/half-hidden
+    # rather than a fully floating card regardless of title length.
+    HEIGHT_HIDDEN_MARGIN = 40
+    GAP = 6
+    LEFT_MARGIN = 10
+    RISE_SPEED = 8.0  # hover_progress units/sec, 0..1
+
+    # How much a symbol's white pixels dim when the tab isn't hovered (its
+    # black outline is left exactly alone either way) -- confirmed with
+    # the user, 2026-08-22.
+    ICON_DIM_FACTOR = 0.5
+    # A pixel counts as "white" (dimmable) once every channel is at least
+    # this bright -- assets/UI/symbol.png is clean black/white/transparent
+    # pixel art with no real anti-aliasing, so this only exists as a safety
+    # margin, not to blend a gradient.
+    ICON_WHITE_THRESHOLD = 200
+    ICON_TOP_MARGIN = 8
+    ICON_SIZE = 32
+    # Gap between the icon's own bottom edge and where the rotated title
+    # starts -- kept small on purpose, the title should sit right up
+    # against the symbol rather than floating in the middle of the tab.
+    LABEL_TOP_MARGIN = 3
+    # Breathing room below the rotated title's own far end before
+    # HEIGHT_HIDDEN_MARGIN's hidden zone begins.
+    LABEL_BOTTOM_PADDING = 6
+
+    def __init__(self, title, backing, icon=None):
+        self.title = title
+        self.backing = backing
+        self.icon = icon
+        self.hover_progress = 0.0
+        self.font = get_font("title", 13)
+        # How tall a fully-hovered tab needs to be on screen to show the
+        # icon AND the complete rotated title (title's own rendered PIXEL
+        # WIDTH becomes its height once rotated 90 degrees) -- computed
+        # once here from this tab's own title/font, not per-frame; layout()
+        # reads it every frame, render() uses it to place the title flush
+        # under the icon. self.HEIGHT (the tab's actual drawn/backing
+        # size) is always taller than this by HEIGHT_HIDDEN_MARGIN so the
+        # tab's own bottom edge/border stays off-screen even fully risen.
+        self._reveal_height = (
+            self.ICON_TOP_MARGIN + self.ICON_SIZE + self.LABEL_TOP_MARGIN
+            + self.font.size(title)[0] + self.LABEL_BOTTOM_PADDING
+        )
+        self.HEIGHT = self._reveal_height + self.HEIGHT_HIDDEN_MARGIN
+        self.rect = pygame.Rect(0, 0, self.WIDTH, self.HEIGHT)
+        self.border = BorderManager()
+        self._scaled_backing = None
+        # Two baked variants of `icon`, built once on first render (see
+        # _dimmed_icon/render): _icon_dim has its white pixels at
+        # ICON_DIM_FACTOR alpha, _icon_full is the source unchanged. Drawn
+        # one atop the other each frame with the top one's OWN alpha set to
+        # hover_progress*255 -- since both share IDENTICAL black/
+        # transparent pixels, only the white blends, crossfading smoothly
+        # from dim to full as the tab rises instead of popping instantly.
+        self._icon_dim = None
+        self._icon_full = None
+
+    @staticmethod
+    def _dimmed_icon(icon, factor, threshold):
+        dimmed = icon.copy()
+        width, height = dimmed.get_size()
+        for x in range(width):
+            for y in range(height):
+                r, g, b, a = dimmed.get_at((x, y))
+                if a > 0 and r >= threshold and g >= threshold and b >= threshold:
+                    dimmed.set_at((x, y), (r, g, b, round(a * factor)))
+        return dimmed
+
+    def layout(self, index, screen_size):
+        _screen_w, screen_h = screen_size
+        rest_y = screen_h - self.PEEK_HEIGHT
+        risen_y = screen_h - self._reveal_height
+        x = self.LEFT_MARGIN + index * (self.WIDTH + self.GAP)
+        y = rest_y + (risen_y - rest_y) * self.hover_progress
+        self.rect = pygame.Rect(x, round(y), self.WIDTH, self.HEIGHT)
+
+    def update(self, dt, mouse_pos):
+        target = 1.0 if self.rect.collidepoint(mouse_pos) else 0.0
+        if self.hover_progress < target:
+            self.hover_progress = min(target, self.hover_progress + self.RISE_SPEED * dt)
+        elif self.hover_progress > target:
+            self.hover_progress = max(target, self.hover_progress - self.RISE_SPEED * dt)
+
+    def render(self, screen):
+        if self._scaled_backing is None:
+            self._scaled_backing = pygame.transform.smoothscale(self.backing, (self.WIDTH, self.HEIGHT))
+        screen.blit(self._scaled_backing, self.rect.topleft)
+        self.border.draw(screen, self.rect)
+        icon_bottom = self.rect.top + self.ICON_TOP_MARGIN + self.ICON_SIZE
+        if self.icon is not None:
+            if self._icon_dim is None:
+                self._icon_full = self.icon
+                self._icon_dim = self._dimmed_icon(self.icon, self.ICON_DIM_FACTOR, self.ICON_WHITE_THRESHOLD)
+            icon_rect = self._icon_dim.get_rect(midtop=(self.rect.centerx, self.rect.top + self.ICON_TOP_MARGIN))
+            screen.blit(self._icon_dim, icon_rect)
+            full = self._icon_full.copy()
+            full.set_alpha(round(255 * self.hover_progress))
+            screen.blit(full, icon_rect)
+        if self.hover_progress > 0.02:
+            # Title lives INSIDE the tab, below the symbol, rotated 90
+            # degrees counter-clockwise ("vers la gauche" -- reads bottom
+            # to top) -- replaces an earlier pass that floated it above
+            # the tab instead. Anchored right up against the icon
+            # (LABEL_TOP_MARGIN, "contre le sprite") rather than centered
+            # in the leftover space below it -- self._reveal_height/
+            # layout() already guarantee exactly this much room is on
+            # screen once fully hovered. Fades in with the same
+            # hover_progress as the icon crossfade, since at rest this
+            # whole area sits below the visible peek anyway.
+            label = self.font.render(self.title, True, (255, 255, 255))
+            rotated = pygame.transform.rotate(label, 90)
+            rotated.set_alpha(round(255 * self.hover_progress))
+            label_top = icon_bottom + self.LABEL_TOP_MARGIN
+            screen.blit(rotated, rotated.get_rect(midtop=(self.rect.centerx, label_top)))
 
 
 # ---------------------------------------------------------------------

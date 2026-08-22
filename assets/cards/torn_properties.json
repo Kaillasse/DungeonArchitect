@@ -67,5 +67,10 @@
     "category": "state",
     "kind": "idle",
     "payload": "idle"
+  },
+  "prop__capability__errance__bf21a9e8fb": {
+    "category": "capability",
+    "kind": "errance",
+    "payload": {}
   }
 }

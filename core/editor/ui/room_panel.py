@@ -38,6 +38,20 @@ class RoomPanelUI:
         )
         self.confirm_rect = pygame.Rect(x, self.browser.y + self.browser.height + 8, self.width, 32)
 
+    @property
+    def height(self):
+        """Dynamic, unlike every other docked panel's fixed self.height --
+        this one's real footprint depends on self.mode: just the button
+        row when no browser is open, extended down through the browser +
+        Valider button once one is (see _open/render). A plain attribute
+        would go stale the moment mode changes; PanelFrame (title_rect/
+        body_rect, its own open/close animation's endpoints) always wants
+        whatever's true RIGHT NOW, so this is computed on every read
+        instead of cached."""
+        if self.mode is None:
+            return self.BUTTON_HEIGHT
+        return self.confirm_rect.bottom - self.y
+
     def move(self, dx, dy):
         """See PanelFrame, which drives this via drag/restore. self.browser
         recomputes its own child rects from browser.x/browser.y on demand

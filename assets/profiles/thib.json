@@ -1,7 +1,7 @@
 {
   "version": 1,
   "name": "thib",
-  "xp": 4455,
+  "xp": 4705,
   "generator_room_names": [
     "room_001",
     "room_002",
@@ -11,33 +11,38 @@
   "generator_room_count": 4,
   "panel_layout": {
     "tools": {
-      "x": 10,
-      "y": 40,
+      "x": 32,
+      "y": 70,
       "collapsed": true
     },
     "room": {
-      "x": 901,
-      "y": 65,
-      "collapsed": false
+      "x": 569,
+      "y": 100,
+      "collapsed": true
     },
     "generator": {
-      "x": 20,
-      "y": 205,
-      "collapsed": false
+      "x": 19,
+      "y": 207,
+      "collapsed": true
     },
     "card": {
-      "x": 710,
-      "y": 123,
-      "collapsed": false
+      "x": 546,
+      "y": 170,
+      "collapsed": true
     },
     "mechanics": {
-      "x": 232,
-      "y": 141,
-      "collapsed": false
+      "x": 274,
+      "y": 73,
+      "collapsed": true
     },
     "sound_box": {
-      "x": 877,
-      "y": 539,
+      "x": 690,
+      "y": 450,
+      "collapsed": true
+    },
+    "storm": {
+      "x": 881,
+      "y": 24,
       "collapsed": true
     }
   },
@@ -97,21 +102,25 @@
     "prop__capability__placable_on_floor__bigstone": 1,
     "prop__capability__placable_on_wall__bordureporte": 1,
     "prop__capability__linkable__button": 1,
-    "prop__aggressivity__87466e1738": 1,
+    "prop__aggressivity__87466e1738": 999999,
     "prop__capability__placable_on_floor__bf21a9e8fb": 3,
-    "prop__stats__ea5e78475d": 1,
+    "prop__stats__ea5e78475d": 999999,
     "sheep__aggressivity": 0,
     "sheep__aggressivity_stats": 999999,
     "pilier_de_base": 999999,
     "prop__stats__cd0f83c160": 0,
-    "prop__behavior__5ffe533b83": 1,
+    "prop__behavior__5ffe533b83": 999999,
     "prop__state__idle__b0ef01c47d": 0,
-    "zomboss": 999999,
-    "torn_properties": 999999
+    "torn_properties": 999999,
+    "prop__capability__errance__bf21a9e8fb": 999999,
+    "zomboss__behavior_capability_errance": 999999,
+    "zomboss__aggressivity_behavior_capability_errance": 999999,
+    "zomboss__aggressivity_behavior_capability_errance_stats": 1,
+    "pig__aggressivity": 1
   },
   "admingod": true,
   "home_player_position": {
-    "x": 432.0,
-    "y": 576.0
+    "x": 444.549740289556,
+    "y": 526.8447141654602
   }
 }
